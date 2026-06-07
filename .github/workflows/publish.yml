@@ -1,0 +1,83 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+# Cancel a superseded run when a new commit lands on the same PR/branch, so the
+# test job doesn't run to completion on every intermediate push.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[dev]"
+      # Tests run with the Moshier fallback (no Swiss ephemeris data files in CI);
+      # line coverage is identical to a Swiss run — only numeric values differ.
+      # --cov enforces fail_under=90 from pyproject [tool.coverage.report].
+      - run: pytest tests/ --cov --cov-report=term-missing
+
+  publish:
+    needs: test
+    # Never publish from a pull request — main pushes and releases only.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Boot BuildKit from Google's Docker Hub pull-through mirror, and route
+          # every docker.io pull (incl. the python:3.10-slim base) through it.
+          # Anonymous registry-1.docker.io pulls on GitHub-hosted runners
+          # intermittently time out / rate-limit — run #11 failed booting
+          # moby/buildkit ("Get https://registry-1.docker.io/v2/: context
+          # deadline exceeded"). mirror.gcr.io is reliable and needs no auth.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

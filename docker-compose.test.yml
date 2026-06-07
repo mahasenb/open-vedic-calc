@@ -1,0 +1,17 @@
+# Run the full calc-service test suite inside Docker.
+# Usage:  docker compose -f docker-compose.test.yml run --rm test
+#
+# This builds pyswisseph from source inside the container, so it works on
+# any OS without a local C++ toolchain.  First build takes ~60s (cached after).
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      CALC_SERVICE_TOKEN: test
+      PUBLIC_SOURCE_URL: https://example.com
+    volumes:
+      # Mount ephemeris data (gitignored, must exist locally)
+      - ./data/ephe:/app/data/ephe:ro
