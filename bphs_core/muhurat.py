@@ -90,6 +90,54 @@ def get_karana_name(idx: int) -> str:
     return KARANAS[(idx - 2) % 7]
 
 
+def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool:
+    """True if a solar OR lunar eclipse is VISIBLE at *place* on this local day.
+
+    An eclipse not visible at the location carries no grahana dosha, so the
+    location-aware drik.next_*_eclipse finders are used — they skip eclipses not
+    seen from `place` (verified: India sees 2026-03-03 lunar & 2027-08-02 solar,
+    but not the 2026-02-17 / 2026-08-12 solar eclipses). The next-eclipse JD is
+    in ``tret[0]``; we accept it when it falls inside this local calendar day.
+    """
+    tz = place.timezone
+    day_start = swe.julday(
+        target_date.year, target_date.month, target_date.day, 0.0 - tz
+    )
+    day_end = day_start + 1.0
+    for finder in (drik.next_solar_eclipse, drik.next_lunar_eclipse):
+        try:
+            res = finder(day_start - 2.0, place)
+            t_max = res[1][0]
+            guard = 0
+            # Advance past any eclipse that falls before this day.
+            while t_max < day_start and guard < 60:
+                res = finder(t_max + 0.05, place)
+                t_max = res[1][0]
+                guard += 1
+            if day_start <= t_max < day_end:
+                return True
+        except Exception:
+            logger.warning("muhurat_eclipse_check_failed", exc_info=True)
+    return False
+
+
+def _is_adhik_maasa(jd: float, place: drik.Place) -> bool:
+    """True if the lunar month containing *jd* is an Adhika (intercalary) Maasa.
+
+    ``drik.lunar_month`` returns ``[maasa_number, is_leap_month, is_nija_month]``;
+    element 1 (``is_leap_month``) is the adhika flag per pyjhora's own docstring —
+    an adhika maasa is the amanta month whose bracketing new moons fall in the
+    same solar month (no sankranti). The service always runs in LAHIRI ayanamsa
+    (set in utils import), under which this is verified against Adhika Shravana
+    2023. No auspicious samskara is begun in an Adhika Maasa.
+    """
+    try:
+        return bool(drik.lunar_month(jd, place)[1])
+    except Exception:
+        logger.warning("muhurat_adhika_maasa_check_failed", exc_info=True)
+        return False
+
+
 def compute_muhurat_for_day(
     place: drik.Place,
     target_date: date_type,
@@ -331,5 +379,9 @@ def compute_muhurat_for_day(
         "panchaka_free": panchaka_free,
         "personal_balam": personal,
         "all_muhurtas": all_muhur,
+        # Day-level electional gates referenced by per-activity rule tables
+        # (lagna_shuddhi._ACTIVITY_RULES.hard_excludes).
+        "is_eclipse_day": _is_eclipse_day(target_date, place),
+        "is_adhik_maasa": _is_adhik_maasa(jd, place),
         "degraded": degraded,
     }

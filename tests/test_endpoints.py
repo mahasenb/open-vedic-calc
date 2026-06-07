@@ -351,14 +351,28 @@ def test_lagna_shuddhi_top_samples_ordered():
     assert scores == sorted(scores, reverse=True), "top_samples not sorted by score desc"
 
 
+_ALL_ACTIVITIES = [
+    "generic", "marriage", "griha_pravesh", "business", "shop_opening",
+    "property", "namkaran", "mundan", "annaprashan", "upanayana", "surgery",
+    "travel", "vehicle", "new_job", "education",
+]
+
+
 def test_lagna_shuddhi_activity_categories():
-    """All activity categories must return 200 with valid structure."""
-    for activity in ["generic", "business", "marriage", "travel", "surgery"]:
+    """Every one of the 14 activity types (+ generic) returns 200 with valid
+    structure."""
+    for activity in _ALL_ACTIVITIES:
         req = {**_LAGNA_SHUDDHI_REQ, "activity_category": activity}
         r = client.post("/v1/muhurat/lagna-shuddhi", json=req)
         assert r.status_code == 200, f"Failed for activity={activity}"
         body = r.json()
         assert body["best_instant"] is not None or body["top_samples"] == []
+
+
+def test_lagna_shuddhi_rejects_unknown_activity():
+    req = {**_LAGNA_SHUDDHI_REQ, "activity_category": "not_a_real_activity"}
+    r = client.post("/v1/muhurat/lagna-shuddhi", json=req)
+    assert r.status_code == 422  # rejected by the ActivityCategory Literal
 
 
 def test_lagna_shuddhi_surgery_excludes_rahu_varjyam():
@@ -397,6 +411,45 @@ _VALID_DIGNITIES = {
     "debilitated", "unknown",
 }
 _TARA_BAD = {"Vipat", "Pratyak", "Naidhana"}
+
+
+# A 3-day window clear of Adhika Maasa and eclipses (2026-05-26..28 is Adhika
+# Jyeshtha 2026, which the samskara gates correctly suppress — see the dedicated
+# suppression test below).
+_FAMILY_REQ_CLEAN = {**_FAMILY_REQ, "start_date": "2026-06-15", "end_date": "2026-06-17"}
+
+
+def test_family_lagna_shuddhi_marriage_two_chart():
+    """Marriage is an inherently two-chart scan (self + partner) — it reuses the
+    family consensus path with exactly two members and the marriage rule table."""
+    req = {**_FAMILY_REQ_CLEAN, "activity_category": "marriage"}
+    r = client.post("/v1/muhurat/family-lagna-shuddhi", json=req)
+    assert r.status_code == 200
+    body = r.json()
+    assert "instant" in body and "consensus_quality" in body
+    assert len(body["per_member"]) == 2
+
+
+def test_family_lagna_shuddhi_family_activities():
+    """The family-capable activity types each run the multi-chart consensus."""
+    for activity in ("griha_pravesh", "travel", "property", "namkaran"):
+        req = {**_FAMILY_REQ_CLEAN, "activity_category": activity}
+        r = client.post("/v1/muhurat/family-lagna-shuddhi", json=req)
+        assert r.status_code == 200, f"family failed for {activity}"
+        assert len(r.json()["per_member"]) == 2
+
+
+def test_family_lagna_shuddhi_adhika_maasa_suppresses_samskaras():
+    """Over an Adhika Maasa window (Adhika Jyeshtha 2026, 2026-05-26..28) the
+    samskara/marriage activities that veto Adhika Maasa must find NO instant,
+    while a normal activity (travel) that ignores it still does."""
+    for activity in ("marriage", "griha_pravesh"):
+        b = client.post("/v1/muhurat/family-lagna-shuddhi",
+                        json={**_FAMILY_REQ, "activity_category": activity}).json()
+        assert b["instant"] is None, f"{activity} should be barred in Adhika Maasa"
+    travel = client.post("/v1/muhurat/family-lagna-shuddhi",
+                         json={**_FAMILY_REQ, "activity_category": "travel"}).json()
+    assert travel["instant"] is not None
 
 
 def test_family_lagna_shuddhi_structure():

@@ -15,6 +15,7 @@ the minimum individual score so no weak member can be averaged away.
 """
 from datetime import datetime, date as date_type
 from typing import Literal
+from dataclasses import dataclass
 
 import swisseph as swe
 from jhora.panchanga import drik
@@ -40,7 +41,16 @@ _FAVORABLE_CHOGADIYA = {
 }
 _FAVORABLE_HORA = {"Sun", "Moon", "Mercury", "Jupiter", "Venus"}
 
-ActivityCategory = Literal["generic", "business", "marriage", "travel", "surgery"]
+ActivityCategory = Literal[
+    "generic",
+    # exclusive
+    "marriage",
+    # special
+    "griha_pravesh", "business", "shop_opening", "property",
+    "namkaran", "mundan", "annaprashan", "upanayana", "surgery",
+    # normal
+    "travel", "vehicle", "new_job", "education",
+]
 
 # --- Panchanga suitability---------------------------------------------
 # Rikta tithis (4th, 9th, 14th of either paksha) are classically inauspicious
@@ -64,15 +74,160 @@ _INAUSPICIOUS_YOGAS = frozenset({
 _MOVABLE_SIGNS = frozenset({"Aries", "Cancer", "Libra", "Capricorn"})
 _FIXED_SIGNS = frozenset({"Taurus", "Leo", "Scorpio", "Aquarius"})
 _DUAL_SIGNS = frozenset({"Gemini", "Virgo", "Sagittarius", "Pisces"})
-# Activity → the sign nature its lagna / navamsa-lagna should classically take.
-# Journeys want motion (movable); a marriage or a business establishment wants
-# permanence (fixed). Generic and surgery carry no fixed nature preference and
-# are judged on Vargottama + a benefic navamsa lagna alone.
-_ACTIVITY_SIGN_NATURE: dict[str, frozenset] = {
-    "travel": _MOVABLE_SIGNS,
-    "marriage": _FIXED_SIGNS,
-    "business": _FIXED_SIGNS,
+# Vara (weekday) classes. The benefic day-lords (Moon/Mercury/Jupiter/Venus)
+# carry auspicious undertakings; Mangala (Tue) and Shani (Sat) are classically
+# avoided for samskaras and beginnings. Commerce/learning lean to Budha/Guru/
+# Shukra. (B.V. Raman, "Muhurtha"; standard panchanga vaara-shuddhi.)
+_BENEFIC_VARAS = frozenset({"Monday", "Wednesday", "Thursday", "Friday"})
+_COMMERCE_VARAS = frozenset({"Wednesday", "Thursday", "Friday"})
+_MALEFIC_VARAS = frozenset({"Tuesday", "Saturday"})
+# Vara bonus/penalty magnitudes (a tuning choice; the classical texts give a
+# qualitative day-lord preference, not numbers).
+_VARA_BONUS = 0.06
+_VARA_PENALTY = 0.05
+# Day/instant conditions that classically VETO an electional instant for the
+# activities that name them (subset stored per-activity in ActivityRule).
+_SAMSKARA_EXCLUDES = frozenset({"eclipse", "adhik_maasa"})
+
+
+@dataclass(frozen=True)
+class ActivityRule:
+    """Per-activity electional preferences — pure DATA, no branching logic.
+
+    Every field below is consumed by ``_score_instant`` / ``_event_navamsha_factor``
+    so a new activity is added by appending ONE row to ``_ACTIVITY_RULES`` (Open/
+    Closed), never by adding an ``if activity == ...`` branch.
+
+    sign_nature        preferred nature of the lagna / event-navamsa sign
+                       (movable→motion, fixed→permanence, dual→learning/exchange).
+    prefer_varas       weekdays that earn a bonus (classical day-lords).
+    avoid_varas        weekdays that earn a penalty.
+    dignity_weight     multiplier on the lagna-lord dignity bonus (>1 amplifies).
+    kendra_lord_bonus  extra credit when the lagna lord occupies a kendra.
+    chogadiya_bonus    credit for a favourable chogadiya at the instant.
+    hard_excludes      conditions that VETO the instant (score 0.0): a subset of
+                       {"durm_varj", "eclipse", "adhik_maasa", "vishti"}.
+
+    The values are BPHS-/muhurta-grounded defaults (B.V. Raman, "Muhurtha";
+    standard drikpanchang vaara/tithi/yoga shuddhi) and are intended to be
+    reviewed for domain accuracy; the *structure* is what keeps scoring uniform.
+    """
+    sign_nature: frozenset = frozenset()
+    prefer_varas: frozenset = frozenset()
+    avoid_varas: frozenset = frozenset()
+    dignity_weight: float = 1.0
+    kendra_lord_bonus: float = 0.0
+    chogadiya_bonus: float = 0.08
+    hard_excludes: frozenset = frozenset()
+
+
+# The full taxonomy as data. 14 activities + a neutral ``generic`` fallback.
+# Classes (metering lives in the application, not here): exclusive=marriage;
+# special=griha_pravesh/business/shop_opening/property/namkaran/mundan/
+# annaprashan/upanayana/surgery; normal=travel/vehicle/new_job/education.
+_ACTIVITY_RULES: dict[str, ActivityRule] = {
+    # Fallback: no fixed preferences — judged on Vargottama + a benefic navamsa
+    # lagna alone. Preserves the original "generic" behaviour exactly.
+    "generic": ActivityRule(),
+
+    # --- exclusive -------------------------------------------------------
+    # Marriage: permanence (fixed) lagna; benefic days, avoid Mangala/Shani;
+    # HARD veto on eclipse, Adhika Maasa and Bhadra (Vishti karana). Vyatipata/
+    # Vaidhriti are already in the always-avoided yoga set. Amplified lagna-lord
+    # dignity weight (the lord's strength matters most for the union).
+    "marriage": ActivityRule(
+        sign_nature=_FIXED_SIGNS,
+        prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS,
+        dignity_weight=1.2,
+        hard_excludes=frozenset({"eclipse", "adhik_maasa", "vishti"}),
+    ),
+
+    # --- special ---------------------------------------------------------
+    # House entry: dwelling permanence (fixed); benefic days; no auspicious
+    # entry during an eclipse or Adhika Maasa.
+    "griha_pravesh": ActivityRule(
+        sign_nature=_FIXED_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS, hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    # Commerce establishment: durability (fixed); Budha/Guru/Shukra days; a
+    # strong lagna lord in a kendra is especially wanted.
+    "business": ActivityRule(
+        sign_nature=_FIXED_SIGNS, prefer_varas=_COMMERCE_VARAS,
+        avoid_varas=_MALEFIC_VARAS, kendra_lord_bonus=0.05,
+        hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    # Shop opening: same commercial profile as business establishment.
+    "shop_opening": ActivityRule(
+        sign_nature=_FIXED_SIGNS, prefer_varas=_COMMERCE_VARAS,
+        avoid_varas=_MALEFIC_VARAS, kendra_lord_bonus=0.05,
+        hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    # Property purchase: permanence (fixed); benefic days; avoid eclipse/Adhika.
+    "property": ActivityRule(
+        sign_nature=_FIXED_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS, hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    # Child samskaras (naming / tonsure / first-feeding / sacred-thread). Soft
+    # benefic days; eclipse and Adhika Maasa are classically barred. Naming,
+    # first-feeding and upanayana carry a learning (dual) flavour; tonsure has
+    # no sign-nature preference.
+    "namkaran": ActivityRule(
+        sign_nature=_DUAL_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS, hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    "mundan": ActivityRule(
+        prefer_varas=_BENEFIC_VARAS, avoid_varas=_MALEFIC_VARAS,
+        hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    "annaprashan": ActivityRule(
+        sign_nature=_DUAL_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS, hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    "upanayana": ActivityRule(
+        sign_nature=_DUAL_SIGNS, prefer_varas=_COMMERCE_VARAS,
+        avoid_varas=_MALEFIC_VARAS, hard_excludes=_SAMSKARA_EXCLUDES,
+    ),
+    # Surgery: the one activity that keeps the Durmuhurtam/Varjyam veto; also
+    # avoid eclipse. No sign-nature preference (parity with prior behaviour).
+    "surgery": ActivityRule(
+        hard_excludes=frozenset({"durm_varj", "eclipse"}),
+    ),
+
+    # --- normal ----------------------------------------------------------
+    # Travel/yatra: motion (movable); a favourable chogadiya weighs more for
+    # journeys; avoid eclipse.
+    "travel": ActivityRule(
+        sign_nature=_MOVABLE_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        chogadiya_bonus=0.15, hard_excludes=frozenset({"eclipse"}),
+    ),
+    # Vehicle purchase: a conveyance → motion (movable); chogadiya weighted
+    # like travel.
+    "vehicle": ActivityRule(
+        sign_nature=_MOVABLE_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        chogadiya_bonus=0.15, hard_excludes=frozenset({"eclipse"}),
+    ),
+    # New job/role: stability (fixed) with a strong lagna lord in a kendra;
+    # benefic days.
+    "new_job": ActivityRule(
+        sign_nature=_FIXED_SIGNS, prefer_varas=_BENEFIC_VARAS,
+        avoid_varas=_MALEFIC_VARAS, kendra_lord_bonus=0.05,
+        hard_excludes=frozenset({"eclipse"}),
+    ),
+    # Education/vidyarambha: learning & exchange (dual); Budha/Guru/Shukra days.
+    "education": ActivityRule(
+        sign_nature=_DUAL_SIGNS, prefer_varas=_COMMERCE_VARAS,
+        hard_excludes=frozenset({"eclipse"}),
+    ),
 }
+
+_GENERIC_RULE = _ACTIVITY_RULES["generic"]
+
+
+def _rule_for(activity: str) -> ActivityRule:
+    """Return the rule row for an activity, defaulting to the neutral generic
+    rule for any unknown value (forward-compatible)."""
+    return _ACTIVITY_RULES.get(activity, _GENERIC_RULE)
 # Benefic-ruled signs (Moon, Mercury, Venus, Jupiter): a mildly favourable
 # navamsa lagna when no stronger signal applies.
 _BENEFIC_LORD_SIGNS = frozenset({
@@ -103,8 +258,8 @@ def _event_navamsha_factor(nav_sign: str, lagna_sign: str,
     """
     if nav_sign == lagna_sign:                       # Vargottama
         return True, 0.08
-    nature = _ACTIVITY_SIGN_NATURE.get(activity)
-    if nature is not None and nav_sign in nature:    # sign nature suits activity
+    nature = _rule_for(activity).sign_nature
+    if nature and nav_sign in nature:                # sign nature suits activity
         return True, 0.05
     if nav_sign in _BENEFIC_LORD_SIGNS:              # benefic navamsa lagna
         return True, 0.03
@@ -245,7 +400,17 @@ def _score_instant(
         detail["hard_excluded"] = True
         return 0.0, detail
 
-    if activity == "surgery" and (in_durm or in_varj):
+    # Per-activity hard vetoes (data-driven — see ActivityRule.hard_excludes).
+    # Durmuhurtam/Varjyam (surgery), a locally-visible eclipse, Adhika Maasa, or
+    # Bhadra (Vishti karana) disqualify the instant outright for the activities
+    # that name them.
+    rule = _rule_for(activity)
+    he = rule.hard_excludes
+    karana = (day_data.get("panchanga") or {}).get("karana") or ""
+    if (("durm_varj" in he and (in_durm or in_varj))
+            or ("eclipse" in he and day_data.get("is_eclipse_day"))
+            or ("adhik_maasa" in he and day_data.get("is_adhik_maasa"))
+            or ("vishti" in he and karana == "Vishti")):
         detail["hard_excluded"] = True
         return 0.0, detail
 
@@ -317,10 +482,9 @@ def _score_instant(
     if in_auspicious:
         score += 0.12 if in_auspicious == "Abhijit Muhurta" else 0.08
 
-    # Favorable chogadiya
+    # Favorable chogadiya (per-activity weight — travel/vehicle value it more)
     if chogadiya_label in _FAVORABLE_CHOGADIYA:
-        cg_bonus = 0.15 if activity == "travel" else 0.08
-        score += cg_bonus
+        score += rule.chogadiya_bonus
 
     # Benefic hora lord
     if hora_lord in _FAVORABLE_HORA:
@@ -329,12 +493,12 @@ def _score_instant(
     # Malefics in lagna
     score -= min(malefics_in_lagna * 0.08, 0.16)
 
-    # Activity-specific adjustments
-    if activity == "marriage":
-        score += dignity_bonus * 0.2  # amplify dignity weight
-    elif activity == "business":
-        if lord_house in (1, 4, 7, 10):
-            score += 0.05  # extra kendra bonus
+    # Activity-specific weighting (data-driven — see ActivityRule):
+    # amplify the lagna-lord dignity weight, and credit a kendra-placed lagna
+    # lord for the activities that ask for it.
+    score += dignity_bonus * (rule.dignity_weight - 1.0)
+    if lord_house in (1, 4, 7, 10):
+        score += rule.kendra_lord_bonus
 
     # --- Muhurta factor gates. Classical priority (B.V. Raman, "Muhurtha";
     # Panchanga Shuddhi): toxic periods are an absolute veto (applied above as a
@@ -353,6 +517,13 @@ def _score_instant(
         score -= 0.10
     if is_bad_yoga:
         score -= 0.10
+
+    # Vaara (weekday) suitability — classical day-lord preference for the activity.
+    vaara = (day_data.get("panchanga") or {}).get("vaara") or ""
+    if vaara in rule.prefer_varas:
+        score += _VARA_BONUS
+    elif vaara in rule.avoid_varas:
+        score -= _VARA_PENALTY
 
     # Tara Bala / Chandra Bala at this exact instant (parity with the family scan).
     tara_label, chandra_str = compute_balam_at_jd(jd, birth_nakshatra, birth_moon_sign)

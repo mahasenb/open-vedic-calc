@@ -2,6 +2,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from datetime import datetime, date, time
 
+from bphs_core.lagna_shuddhi import ActivityCategory
+
 
 class PersonalDataIn(BaseModel):
     name: str
@@ -259,7 +261,7 @@ class LagnaShuddhiRequest(BaseModel):
     timezone_offset_hours: float
     start_date: str     # YYYY-MM-DD
     end_date: str       # YYYY-MM-DD
-    activity_category: Literal["generic", "business", "marriage", "travel", "surgery"] = "generic"
+    activity_category: ActivityCategory = "generic"
     step_seconds: int = 60
 
 
@@ -311,7 +313,7 @@ class FamilyLagnaShuddhiRequest(BaseModel):
     members: list[FamilyMember]
     start_date: str      # YYYY-MM-DD
     end_date: str        # YYYY-MM-DD
-    activity_category: Literal["generic", "business", "marriage", "travel", "surgery"] = "generic"
+    activity_category: ActivityCategory = "generic"
     step_seconds: int = 60
 
 
