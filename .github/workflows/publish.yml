@@ -3,8 +3,15 @@ name: Build and publish image
 on:
   push:
     branches: [main]
+    # Docs-only changes don't change the image — skip the build.
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
   release:
     types: [published]
 
