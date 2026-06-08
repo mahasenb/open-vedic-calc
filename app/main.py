@@ -419,6 +419,8 @@ def family_lagna_shuddhi_endpoint(req: FamilyLagnaShuddhiRequest):
         instant=result["instant"],
         best_window=TimeWindow(**best_window_raw) if best_window_raw else None,
         score=result["score"],
+        score_100=result["score_100"],
+        band=result["band"],
         per_member=per_member_out,
         consensus_quality=result["consensus_quality"],
         compromised_members=result["compromised_members"],

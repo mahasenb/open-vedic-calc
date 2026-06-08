@@ -604,6 +604,150 @@ def _build_clearance_summary(sample: dict, activity: ActivityCategory) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quality band + factor breakdown (additive presentation over the 0..1 score)
+# ---------------------------------------------------------------------------
+
+Band = Literal["Excellent", "Good", "Fair", "Avoid"]
+
+# Tara levels that are classically favourable (bare label, no description).
+# _TARA_BAD (Vipat/Pratyak/Naidhana) is defined further down for the family gate;
+# both are resolved at call time, so order of definition does not matter.
+_TARA_GOOD = frozenset({"Sampat", "Kshema", "Sadhana", "Mitra", "Paramitra"})
+_BAND_ORDER = {"Avoid": 0, "Fair": 1, "Good": 2, "Excellent": 3}
+
+
+def derive_band(score: float, sample: dict) -> Band:
+    """Map a 0..1 score + its classical signals onto a four-level quality band.
+
+    Hybrid rule — nakshatra strength dominates, then score granularity:
+      * a hard inauspicious period (Rahu/Yama/Gulika) or a zero score -> Avoid
+      * bad Tara Bala (Vipat/Pratyak/Naidhana) or Chandra "Avoid" -> at most Fair
+      * else by score: >=0.85 Excellent, >=0.60 Good, otherwise Fair
+    """
+    if (score <= 0.0 or sample.get("in_rahu_kala")
+            or sample.get("in_yamaganda") or sample.get("in_gulika")):
+        return "Avoid"
+    if (sample.get("tara_bala") in _TARA_BAD
+            or sample.get("chandra_bala") == "Inauspicious (Avoid)"):
+        return "Fair"
+    if score >= 0.85:
+        return "Excellent"
+    if score >= 0.60:
+        return "Good"
+    return "Fair"
+
+
+def _factor(name: str, impact: str, detail: str) -> dict:
+    return {"name": name, "impact": impact, "detail": detail}
+
+
+def build_factors(sample: dict) -> list[dict]:
+    """Compact, ordered list of the salient classical contributors for a sample.
+
+    Pure presentation: reads the signals already on the scored sample (no
+    re-computation). Classical priority — toxic-period clearance, Tara/Chandra
+    Bala, panchanga (tithi/yoga), lagna-lord dignity & house, then the finer
+    muhurta/chogadiya/navamsa refinements. Only non-neutral signals are emitted.
+    """
+    factors: list[dict] = []
+
+    # Toxic-period clearance (the hard gate the scan already enforces).
+    if not (sample.get("in_rahu_kala") or sample.get("in_yamaganda")
+            or sample.get("in_gulika")):
+        factors.append(_factor("Inauspicious periods", "positive",
+                               "Clear of Rahu Kala, Yamaganda and Gulika."))
+    else:
+        factors.append(_factor("Inauspicious periods", "negative",
+                               "Falls in Rahu Kala, Yamaganda or Gulika."))
+    if sample.get("in_durmuhurtam"):
+        factors.append(_factor("Durmuhurtam", "negative", "Within Durmuhurtam."))
+    if sample.get("in_varjyam"):
+        factors.append(_factor("Varjyam", "negative", "Within Varjyam."))
+
+    # Tara Bala.
+    tara = sample.get("tara_bala")
+    if tara in _TARA_GOOD:
+        factors.append(_factor("Tara Bala", "positive", f"{tara} — favourable."))
+    elif tara in _TARA_BAD:
+        factors.append(_factor("Tara Bala", "negative", f"{tara} — unfavourable."))
+
+    # Chandra Bala.
+    chandra = sample.get("chandra_bala")
+    if chandra == "Good":
+        factors.append(_factor("Chandra Bala", "positive",
+                               "Moon well placed from the birth sign."))
+    elif chandra == "Inauspicious (Avoid)":
+        factors.append(_factor("Chandra Bala", "negative",
+                               "Moon poorly placed from the birth sign."))
+
+    # Panchanga (tithi / yoga) suitability.
+    if sample.get("panchanga_suitable", True):
+        factors.append(_factor("Panchanga", "positive",
+                               f"{sample.get('tithi')}, {sample.get('yoga')} yoga — suitable."))
+    else:
+        factors.append(_factor("Panchanga", "negative",
+                               f"{sample.get('tithi')}, {sample.get('yoga')} yoga — "
+                               "Rikta tithi or avoided yoga."))
+
+    # Lagna-lord dignity.
+    dignity = sample.get("lagna_lord_dignity")
+    if dignity in ("exalted", "moolatrikona", "own sign", "friendly"):
+        factors.append(_factor("Lagna lord dignity", "positive",
+                               f"Lord {sample.get('lagna_lord')} {dignity}."))
+    elif dignity in ("enemy", "debilitated"):
+        factors.append(_factor("Lagna lord dignity", "negative",
+                               f"Lord {sample.get('lagna_lord')} {dignity}."))
+
+    # Lagna-lord house (whole-sign from lagna).
+    house = sample.get("lagna_lord_house") or 0
+    if house in (1, 4, 7, 10, 5, 9):
+        factors.append(_factor("Lagna lord house", "positive",
+                               f"Lord in the {_ordinal(house)} (kendra/trikona)."))
+    elif house in (6, 8, 12):
+        factors.append(_factor("Lagna lord house", "negative",
+                               f"Lord in the {_ordinal(house)} (dusthana)."))
+
+    # Auspicious muhurta window.
+    musec = sample.get("in_auspicious_muhurta")
+    if musec:
+        factors.append(_factor("Muhurta", "positive", f"Within {musec}."))
+
+    # Favourable chogadiya.
+    if sample.get("chogadiya_label") in _FAVORABLE_CHOGADIYA:
+        factors.append(_factor("Chogadiya", "positive", f"{sample.get('chogadiya_label')}."))
+
+    # Event Navamsha refinement.
+    if sample.get("event_navamsha_suitable"):
+        factors.append(_factor("Event Navamsha", "positive",
+                               f"Navamsa lagna {sample.get('event_navamsha')} suits the activity."))
+
+    return factors
+
+
+def _enrich_sample(sample: dict) -> dict:
+    """Attach score_100 + band + factors to a scored sample dict, in place."""
+    sample["score_100"] = round(sample.get("score", 0.0) * 100)
+    sample["band"] = derive_band(sample.get("score", 0.0), sample)
+    sample["factors"] = build_factors(sample)
+    return sample
+
+
+def _family_band(min_score: float, consensus_quality: str,
+                 per_member: list[dict]) -> Band:
+    """Joint band: the weakest member governs; a best-effort consensus caps at Fair."""
+    if min_score <= 0.0:
+        return "Avoid"
+    worst: Band = "Excellent"
+    for md in per_member:
+        b = derive_band(md.get("score", 0.0), md)
+        if _BAND_ORDER[b] < _BAND_ORDER[worst]:
+            worst = b
+    if consensus_quality == "best_effort" and _BAND_ORDER[worst] > _BAND_ORDER["Fair"]:
+        return "Fair"
+    return worst
+
+
+# ---------------------------------------------------------------------------
 # Main scan function
 # ---------------------------------------------------------------------------
 
@@ -736,10 +880,15 @@ def scan_lagna_shuddhi(
         "label": f"Best window for {activity}",
     }
 
+    # Enrich only the samples we return (best + up to 20), never all candidates.
+    returned = ranked[:20]
+    for _s in returned:
+        _enrich_sample(_s)
+
     return {
         "best_instant": best,
         "best_window": best_window,
-        "top_samples": ranked[:20],
+        "top_samples": returned,
         "clearance_summary": _build_clearance_summary(best, activity),
     }
 
@@ -944,6 +1093,8 @@ def scan_family_lagna_shuddhi(
             "instant": None,
             "best_window": None,
             "score": 0.0,
+            "score_100": 0,
+            "band": "Avoid",
             "per_member": [],
             "consensus_quality": "best_effort",
             "compromised_members": [],
@@ -1007,10 +1158,15 @@ def scan_family_lagna_shuddhi(
         "label": f"Best joint window for {activity}",
     }
 
+    for _md in best["per_member"]:
+        _enrich_sample(_md)
+
     return {
         "instant": best_instant_str,
         "best_window": best_window,
         "score": round(best_min_score, 4),
+        "score_100": round(best_min_score * 100),
+        "band": _family_band(best_min_score, consensus_quality, best["per_member"]),
         "per_member": best["per_member"],
         "consensus_quality": consensus_quality,
         "compromised_members": compromised_members,

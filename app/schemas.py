@@ -265,6 +265,13 @@ class LagnaShuddhiRequest(BaseModel):
     step_seconds: int = 60
 
 
+class ScoreFactor(BaseModel):
+    """One salient classical contributor to a sample's quality (for display)."""
+    name: str
+    impact: Literal["positive", "negative"]
+    detail: str
+
+
 class LagnaShuddhiSample(BaseModel):
     instant: str                    # YYYY-MM-DD HH:MM (local time)
     lagna_sign: str
@@ -288,6 +295,10 @@ class LagnaShuddhiSample(BaseModel):
     panchanga_suitable: bool = True
     event_navamsha: str | None = None       # D9 sign of the rising lagna at the instant
     event_navamsha_suitable: bool = False
+    # --- Quality band (additive; defaults keep older payloads parseable) ---
+    score_100: int = 0                       # round(score * 100) — display scale
+    band: Literal["Excellent", "Good", "Fair", "Avoid"] = "Fair"
+    factors: list[ScoreFactor] = []          # salient classical contributors
 
 
 class LagnaShuddhiResponse(BaseModel):
@@ -327,6 +338,8 @@ class FamilyLagnaShuddhiResponse(BaseModel):
     instant: str | None                         # "YYYY-MM-DD HH:MM" (local, member[0] tz) | None
     best_window: TimeWindow | None              # tolerance band around instant
     score: float                                # joint min-score across members
+    score_100: int = 0                          # round(score * 100) — display scale
+    band: Literal["Excellent", "Good", "Fair", "Avoid"] = "Fair"   # weakest member governs
     per_member: list[FamilyMemberSample]        # per-member detail at the chosen instant
     consensus_quality: Literal["strict", "best_effort"]
     compromised_members: list[str]              # names of members with bad balam (best_effort only)
