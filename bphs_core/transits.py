@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import swisseph as swe
 from jhora.panchanga import drik
 from .chart import ChartSnapshot
@@ -56,7 +56,9 @@ class SadeSatiInfo:
 
 
 def _transit_longitude(jd: float, planet_id: int) -> float:
-    drik.set_ayanamsa_mode('LAHIRI')
+    # Ayanamsa mode is a process-global set once at import (utils.py). Setting it
+    # on every call mutates that C-level global 60+ times per request and can race
+    # with concurrent requests, so it is deliberately not set here.
     return drik.sidereal_longitude(jd, planet_id)
 
 
@@ -111,7 +113,6 @@ def get_sade_sati_info(snapshot: ChartSnapshot, at: datetime) -> SadeSatiInfo:
     target_sign_idx = (moon_sign_idx + phase_offset) % 12
 
     # Find ingress and egress for that sign (search ±4 years)
-    from datetime import timedelta
     start_est = at - timedelta(days=2.5 * 365)
     end_est = at + timedelta(days=2.5 * 365)
 

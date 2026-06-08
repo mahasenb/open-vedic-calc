@@ -469,15 +469,23 @@ def compat_endpoint(req: CompatRequest):
     )
 
 
+# Intentionally unauthenticated: this is the container liveness probe. The
+# docker-compose healthchecks and any orchestrator startup probe hit /healthz
+# with no Authorization header, and the service runs on internal-only ingress.
+# The body carries no sensitive data — only a status string and a boolean for
+# whether the ephemeris data directory is mounted.
 @app.get("/healthz")
 def healthz():
     ephe_ok = os.path.isdir(os.path.join(os.path.dirname(__file__), "../data/ephe"))
     return {"status": "ok", "ephe_loaded": ephe_ok}
 
 
-@app.get("/source", response_model=SourceInfo)
+# Authenticated: provenance (commit + source URL) is served only to the
+# bearer-token-holding backend. The public AGPL source offer is the public
+# GitHub repository, not this internal endpoint.
+@app.get("/source", response_model=SourceInfo, dependencies=AUTH)
 def source():
     return SourceInfo(
-        source_url=os.environ.get("PUBLIC_SOURCE_URL", "https://github.com/your-org/bphs-calc-service"),
+        source_url=os.environ.get("PUBLIC_SOURCE_URL", "https://github.com/mahasenb/open-vedic-calc"),
         commit=_COMMIT,
     )

@@ -35,6 +35,7 @@ class PlanetData:
     is_combust: bool = False
     combust_proximity_degrees: Optional[float] = None
     chalit_house: Optional[int] = None   # secondary Bhava-Chalit (Placidus cusp) house
+    longitude_abs: Optional[float] = None  # unrounded sidereal longitude (0-360), rasi chart only
 
 
 @dataclass
@@ -181,7 +182,10 @@ class Chart:
         try:
             cusps, ascmc = swe.houses(jd_utc, self.person.latitude, self.person.longitude, b"P")
         except Exception:
-            logger.warning("placidus_fallback_equatorial", exc_info=True)
+            logger.warning(
+                "placidus_fallback_equatorial lat=%s lon=%s",
+                self.person.latitude, self.person.longitude, exc_info=True,
+            )
             cusps, ascmc = swe.houses(jd_utc, self.person.latitude, self.person.longitude, b"E")
 
         sid_asc = (ascmc[0] - ayanamsa) % 360
@@ -220,6 +224,7 @@ class Chart:
                 nakshatra=nakshatra, dignity=dignity, house=house,
                 conjunctions=[], aspects=[], is_retrograde=is_retro,
                 chalit_house=chalit_house,
+                longitude_abs=final_lon,
             )
 
         for name, pd in rasi.items():

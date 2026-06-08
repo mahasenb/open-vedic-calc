@@ -102,6 +102,31 @@ def test_dhana_yoga():
     assert set(dhana[0].activating_lords) == {"Venus", "Saturn"}
     assert dhana[0].strength == "moderate" # friend + own sign = moderate
 
+def test_raja_yoga_includes_lagna_lord():
+    # Aries lagna: lagna lord Mars (kendra house 1) conjunct 9th lord Jupiter
+    # (trikona) in the same house is a textbook Raja Yoga. The old `h != 1`
+    # filter dropped the lagna lord and missed every such formation.
+    chart = mock_chart({
+        "Mars": {"sign": "Gemini", "house": 3, "dignity": "neutral"},
+        "Jupiter": {"sign": "Gemini", "house": 3, "dignity": "neutral"},
+    })
+    yogas = detect_all_yogas(chart)
+    raja = [y for y in yogas if y.name == "Raja Yoga"]
+    assert len(raja) == 1
+    assert set(raja[0].activating_lords) == {"Mars", "Jupiter"}
+
+
+def test_raja_yoga_no_false_positive_from_lagna_lord_alone():
+    # A chart with no kendra-lord / trikona-lord conjunction must yield no Raja
+    # Yoga. The lagna lord lording house 1 in both the kendra and trikona roles
+    # is the same house and must not spuriously fire a single-planet yoga.
+    chart = mock_chart({
+        "Sun": {"sign": "Leo", "house": 5, "dignity": "own sign"},
+    })
+    yogas = detect_all_yogas(chart)
+    assert [y for y in yogas if y.name == "Raja Yoga"] == []
+
+
 def test_parivartana_yoga():
     # Aries lagna. Mars (lord of Aries) in Taurus, Venus (lord of Taurus) in Aries
     chart = mock_chart({

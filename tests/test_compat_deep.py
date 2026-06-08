@@ -584,10 +584,11 @@ class TestComputeCompat:
             "graha_maitri", "gana", "bhakoot", "nadi",
         ]
 
-    def test_missing_moon_uses_defaults(self):
-        # No Moon in either chart -> defaults Aries / Ashwini, still computes.
+    def test_missing_moon_raises(self):
+        # A missing Moon means a corrupt snapshot. Rather than silently defaulting
+        # to Aries/Ashwini and returning a plausible-but-wrong score, compute_compat
+        # must fail loudly.
         a = _mock_chart({"Sun": {"sign": "Leo"}})
         b = _mock_chart({"Sun": {"sign": "Leo"}})
-        res = compat.compute_compat(a, b, datetime.date(2026, 1, 1))
-        assert res.total_score >= 0.0
-        assert res.nakshatra_compatibility
+        with pytest.raises(ValueError, match="Moon absent"):
+            compat.compute_compat(a, b, datetime.date(2026, 1, 1))

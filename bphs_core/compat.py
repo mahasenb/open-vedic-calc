@@ -9,7 +9,7 @@ from datetime import datetime, date, timedelta
 from typing import Literal
 
 from .chart import ChartSnapshot
-from .dashas import _vimshottari_mahadashas
+from .dashas import vimshottari_mahadashas
 from . import utils
 
 # ---------------------------------------------------------------------------
@@ -366,8 +366,8 @@ def compute_dasha_overlaps(
     birth_a = datetime.combine(snap_a.person.birth_date, snap_a.person.birth_time)
     birth_b = datetime.combine(snap_b.person.birth_date, snap_b.person.birth_time)
 
-    mds_a = _vimshottari_mahadashas(snap_a, birth_a)
-    mds_b = _vimshottari_mahadashas(snap_b, birth_b)
+    mds_a = vimshottari_mahadashas(snap_a, birth_a)
+    mds_b = vimshottari_mahadashas(snap_b, birth_b)
 
     overlaps: list[DashaOverlapResult] = []
     for md_a in mds_a:
@@ -493,11 +493,16 @@ class CompatResult:
 def compute_compat(snap_a: ChartSnapshot, snap_b: ChartSnapshot, today: date) -> CompatResult:
     moon_a = snap_a.rasi_chart.get("Moon")
     moon_b = snap_b.rasi_chart.get("Moon")
+    # A missing Moon means the snapshot is corrupt. Defaulting to Aries/Ashwini
+    # would return a plausible but entirely wrong compatibility score with no
+    # error surfaced — fail loudly instead.
+    if moon_a is None or moon_b is None:
+        raise ValueError("Moon absent from rasi_chart; cannot compute compatibility")
 
-    sign_a = moon_a.sign if moon_a else "Aries"
-    sign_b = moon_b.sign if moon_b else "Aries"
-    nak_a  = moon_a.nakshatra if moon_a else "Ashwini"
-    nak_b  = moon_b.nakshatra if moon_b else "Ashwini"
+    sign_a = moon_a.sign
+    sign_b = moon_b.sign
+    nak_a  = moon_a.nakshatra
+    nak_b  = moon_b.nakshatra
 
     # 8 kutas in BPHS order
     v_sc, v_int   = _varna(sign_a, sign_b)

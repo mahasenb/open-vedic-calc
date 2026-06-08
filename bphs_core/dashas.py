@@ -52,14 +52,22 @@ def _moon_nakshatra_and_fraction(snapshot: ChartSnapshot) -> tuple[str, float]:
     moon = snapshot.rasi_chart.get("Moon")
     if moon is None:
         return "Ashwini", 0.0
-    total_lon = (utils.SIGNS.index(moon.sign) * 30 + moon.degrees) % 360
+    # Prefer the unrounded absolute longitude (carried on the rasi chart). The
+    # dasha balance is a fraction of the Moon's position within its nakshatra, so
+    # reconstructing from sign + degrees rounded to 4dp can shift the first
+    # mahadasha start by ~an hour. Fall back to reconstruction for mocks/snapshots
+    # that do not carry longitude_abs.
+    if moon.longitude_abs is not None:
+        total_lon = moon.longitude_abs % 360
+    else:
+        total_lon = (utils.SIGNS.index(moon.sign) * 30 + moon.degrees) % 360
     nak_size = 360 / 27
     nak_idx = int(total_lon / nak_size)
     fraction_elapsed = (total_lon % nak_size) / nak_size
     return utils.NAKSHATRAS[nak_idx], fraction_elapsed
 
 
-def _vimshottari_mahadashas(snapshot: ChartSnapshot,
+def vimshottari_mahadashas(snapshot: ChartSnapshot,
                              birth_date: datetime,
                              end_date: datetime | None = None) -> list[DashaPeriod]:
     nak, fraction = _moon_nakshatra_and_fraction(snapshot)
@@ -147,7 +155,7 @@ def get_dasha_timeline(snapshot: ChartSnapshot,
     result: list[DashaPeriod] = []
 
     if "vimshottari" in systems:
-        mahadashas = _vimshottari_mahadashas(snapshot, birth, end)
+        mahadashas = vimshottari_mahadashas(snapshot, birth, end)
         for md in mahadashas:
             if md.end_date < start or md.start_date > end:
                 continue
@@ -171,7 +179,7 @@ def get_active_dasha(snapshot: ChartSnapshot, at: datetime,
                      system: str = "vimshottari") -> DashaPeriod | None:
     birth = datetime.combine(snapshot.person.birth_date, snapshot.person.birth_time)
     if system == "vimshottari":
-        mahadashas = _vimshottari_mahadashas(snapshot, birth)
+        mahadashas = vimshottari_mahadashas(snapshot, birth)
         for md in mahadashas:
             if md.start_date <= at < md.end_date:
                 return md
