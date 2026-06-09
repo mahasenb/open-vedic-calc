@@ -7,6 +7,7 @@ from transits.py).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -22,6 +23,8 @@ from .compat import (
     _mangal_dosha_raw,
 )
 from . import utils
+
+logger = logging.getLogger(__name__)
 
 # Vimshottari nakshatra lords in order (27 nakshatras).
 _NAK_LORDS = [
@@ -210,7 +213,6 @@ def kalsarp_dosh(snapshot: ChartSnapshot) -> dict:
         return {"present": False, "name": None, "partial": False, "rahu_house": None}
 
     rahu_lon = utils.SIGNS.index(rahu.sign) * 30 + rahu.degrees
-    ketu_lon = (rahu_lon + 180) % 360
 
     in_rahu_ketu_arc: list[bool] = []
     for name in _SEVEN_PLANETS:
@@ -270,6 +272,12 @@ def sade_sati_lifetime(snapshot: ChartSnapshot, birth_date: date) -> list[dict]:
             sat_lon = _transit_longitude(jd, 6)  # Saturn
             sat_idx = int(sat_lon // 30) % 12
         except Exception:
+            # A systematic ephemeris/compute failure here would otherwise be
+            # indistinguishable from a legitimately empty scan — log it so the
+            # difference is visible.
+            logger.warning(
+                "sade_sati_scan_error scan_date=%s", scan_date.isoformat(), exc_info=True,
+            )
             scan_date += step
             continue
 

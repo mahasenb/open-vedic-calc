@@ -155,3 +155,54 @@ def test_bhavabala_quartile_ranking_is_monotonic():
         "ranks not monotonic by bala_total: "
         f"{[(round(x['bala_total'], 2), x['rank']) for x in by_total]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Malformed date strings are a 422 (schema validation), never a 500 from
+# datetime.strptime inside the handler.
+# ---------------------------------------------------------------------------
+
+def test_dashas_malformed_date_is_422():
+    req = {**SAMPLE_A, "from_date": "not-a-date", "to_date": "2026-01-01"}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 422
+
+
+def test_transits_malformed_date_is_422():
+    req = {**SAMPLE_A, "at_date": "2026-13-99"}
+    r = client.post("/v1/transits", json=req)
+    assert r.status_code == 422
+
+
+def test_muhurat_malformed_date_is_422():
+    req = {**SAMPLE_A, "start_date": "2026/01/01", "end_date": "2026-01-02"}
+    r = client.post("/v1/muhurat", json=req)
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# step_seconds below the 60s floor is a 422 (DoS guard).
+# ---------------------------------------------------------------------------
+
+def test_lagna_shuddhi_sub_minute_step_is_422():
+    req = {
+        **SAMPLE_A,
+        "start_date": "2026-05-26",
+        "end_date": "2026-05-27",
+        "activity_category": "generic",
+        "step_seconds": 1,
+    }
+    r = client.post("/v1/muhurat/lagna-shuddhi", json=req)
+    assert r.status_code == 422
+
+
+def test_family_lagna_shuddhi_sub_minute_step_is_422():
+    req = {
+        "members": [SAMPLE_A, SAMPLE_B],
+        "start_date": "2026-05-26",
+        "end_date": "2026-05-27",
+        "activity_category": "generic",
+        "step_seconds": 1,
+    }
+    r = client.post("/v1/muhurat/family-lagna-shuddhi", json=req)
+    assert r.status_code == 422

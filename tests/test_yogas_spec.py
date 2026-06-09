@@ -2,7 +2,7 @@ from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
 from bphs_core.yogas import _compute_yoga_strength, detect_all_yogas
 import datetime
 
-def mock_chart(planets_data: dict[str, dict]) -> ChartSnapshot:
+def mock_chart(planets_data: dict[str, dict], lagna: str = "Aries") -> ChartSnapshot:
     # A simple mock for ChartSnapshot that only populates rasi_chart
     # and minimal lagna/house cusps for yoga detection tests.
     
@@ -27,7 +27,7 @@ def mock_chart(planets_data: dict[str, dict]) -> ChartSnapshot:
     
     return ChartSnapshot(
         person=person,
-        lagna="Aries",
+        lagna=lagna,
         lagna_lord="Mars",
         ayanamsa_value=0.0,
         house_cusps=[0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0],
@@ -101,6 +101,42 @@ def test_dhana_yoga():
     assert len(dhana) == 1
     assert set(dhana[0].activating_lords) == {"Venus", "Saturn"}
     assert dhana[0].strength == "moderate" # friend + own sign = moderate
+
+def test_raja_yoga_includes_lagna_lord():
+    # Aries lagna: lagna lord Mars (kendra house 1) conjunct 9th lord Jupiter
+    # (trikona) in the same house is a textbook Raja Yoga. The old `h != 1`
+    # filter dropped the lagna lord and missed every such formation.
+    chart = mock_chart({
+        "Mars": {"sign": "Gemini", "house": 3, "dignity": "neutral"},
+        "Jupiter": {"sign": "Gemini", "house": 3, "dignity": "neutral"},
+    })
+    yogas = detect_all_yogas(chart)
+    raja = [y for y in yogas if y.name == "Raja Yoga"]
+    assert len(raja) == 1
+    assert set(raja[0].activating_lords) == {"Mars", "Jupiter"}
+
+
+def test_raja_yoga_no_false_positive_from_lagna_lord_alone():
+    # A chart with no kendra-lord / trikona-lord conjunction must yield no Raja
+    # Yoga. The lagna lord lording house 1 in both the kendra and trikona roles
+    # is the same house and must not spuriously fire a single-planet yoga.
+    chart = mock_chart({
+        "Sun": {"sign": "Leo", "house": 5, "dignity": "own sign"},
+    })
+    yogas = detect_all_yogas(chart)
+    assert [y for y in yogas if y.name == "Raja Yoga"] == []
+
+
+def test_yoga_karaka_planet():
+    # The classical single Yoga Karaka per lagna (planet ruling a kendra AND a
+    # trikona). Lagnas without one return "".
+    from bphs_core.yogas import get_yoga_karaka_planet
+    assert get_yoga_karaka_planet(mock_chart({}, lagna="Taurus")) == "Saturn"
+    assert get_yoga_karaka_planet(mock_chart({}, lagna="Libra")) == "Saturn"
+    assert get_yoga_karaka_planet(mock_chart({}, lagna="Cancer")) == "Mars"
+    assert get_yoga_karaka_planet(mock_chart({}, lagna="Capricorn")) == "Venus"
+    assert get_yoga_karaka_planet(mock_chart({}, lagna="Aries")) == ""
+
 
 def test_parivartana_yoga():
     # Aries lagna. Mars (lord of Aries) in Taurus, Venus (lord of Taurus) in Aries

@@ -187,6 +187,11 @@ class TestSourceEndpoint:
         assert isinstance(body["commit"], str)
         assert len(body["commit"]) > 0
 
+    def test_source_requires_auth(self):
+        """/source is authenticated — provenance is not served to anon callers."""
+        assert anon_client.get("/source").status_code == 401
+        assert bad_client.get("/source").status_code == 401
+
 
 # ===========================================================================
 # /v1/chart – validation error branch

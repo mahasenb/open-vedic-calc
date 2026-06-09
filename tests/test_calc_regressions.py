@@ -217,7 +217,7 @@ def test_vimshottari_balance_tracks_moon_fraction():
     from birth equals (1 - elapsed_fraction) * lord's full period."""
     from bphs_core.chart import Chart
     from bphs_core.dashas import (
-        _moon_nakshatra_and_fraction, _vimshottari_mahadashas,
+        _moon_nakshatra_and_fraction, vimshottari_mahadashas,
         NAKSHATRA_LORDS, VIMSHOTTARI_YEARS,
     )
 
@@ -231,7 +231,7 @@ def test_vimshottari_balance_tracks_moon_fraction():
 
     nak, frac = _moon_nakshatra_and_fraction(snap)
     lord = NAKSHATRA_LORDS[nak]
-    mds = _vimshottari_mahadashas(snap, birth)
+    mds = vimshottari_mahadashas(snap, birth)
 
     assert mds[0].lord == lord
     remaining = (mds[0].end_date - birth).days / 365.25

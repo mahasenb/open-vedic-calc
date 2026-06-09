@@ -96,23 +96,42 @@ def detect_panchamahapurusha(snapshot: ChartSnapshot) -> list[Yoga]:
 
 
 def detect_raja_yogas(snapshot: ChartSnapshot) -> list[Yoga]:
+    # House 1 is both a kendra and a trikona, and the lagna lord is a primary
+    # Raja Yoga participant (lagna lord conjunct 5th/9th lord, or any kendra lord
+    # conjunct the lagna lord). House 1 must therefore stay in BOTH lists. The
+    # only case to exclude is the degenerate "house 1 paired with itself" — the
+    # lagna lord lording house 1 in both roles is the same house, not a two-house
+    # yoga karaka — guarded below by `kh == th`.
     yogas: list[Yoga] = []
-    kendra_lords = [_house_lord(snapshot, h) for h in KENDRA if h != 1]
-    trikona_lords = [_house_lord(snapshot, h) for h in TRIKONA if h != 1]
-    for kl in kendra_lords:
-        for tl in trikona_lords:
-            if kl and tl and kl == tl:
+    kendra_lords = [(h, _house_lord(snapshot, h)) for h in sorted(KENDRA)]
+    trikona_lords = [(h, _house_lord(snapshot, h)) for h in sorted(TRIKONA)]
+    seen_single: set[str] = set()
+    seen_conjunction: set[frozenset] = set()
+    for kh, kl in kendra_lords:
+        for th, tl in trikona_lords:
+            if not kl or not tl:
+                continue
+            if kl == tl:
+                # One planet lords both a kendra and a trikona (yoga karaka).
+                # Skip the same-house degenerate (house 1 counted in both lists).
+                if kh == th or kl in seen_single:
+                    continue
+                seen_single.add(kl)
                 yogas.append(Yoga(
                     name="Raja Yoga",
                     description=f"{kl} lords both kendra and trikona",
-                    planets_involved=[kl], houses_involved=[],
+                    planets_involved=[kl], houses_involved=sorted({kh, th}),
                     strength=_compute_yoga_strength(snapshot, [kl]),
                     activating_lords=[kl],
                 ))
-            elif kl and tl:
+            else:
                 kl_pd = snapshot.rasi_chart.get(kl)
                 tl_pd = snapshot.rasi_chart.get(tl)
                 if kl_pd and tl_pd and kl_pd.house == tl_pd.house:
+                    pair = frozenset({kl, tl})
+                    if pair in seen_conjunction:
+                        continue
+                    seen_conjunction.add(pair)
                     yogas.append(Yoga(
                         name="Raja Yoga",
                         description=f"{kl} (kendra lord) conjunct {tl} (trikona lord)",
@@ -147,16 +166,6 @@ def detect_dhana_yogas(snapshot: ChartSnapshot) -> list[Yoga]:
     return yogas
 
 
-# Sign ownership for Parivartana detection
-_SIGN_LORD: dict[str, str] = {
-    "Aries": "Mars",    "Scorpio": "Mars",
-    "Taurus": "Venus",  "Libra": "Venus",
-    "Gemini": "Mercury","Virgo": "Mercury",
-    "Cancer": "Moon",
-    "Leo": "Sun",
-    "Sagittarius": "Jupiter", "Pisces": "Jupiter",
-    "Capricorn": "Saturn",    "Aquarius": "Saturn",
-}
 _KARAKA_PLANETS = {"Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"}
 
 
@@ -171,13 +180,11 @@ def detect_parivartana_yoga(snapshot: ChartSnapshot) -> list[Yoga]:
 
     for p_a in planets:
         sign_a = snapshot.rasi_chart[p_a].sign
-        lord_of_a = _SIGN_LORD.get(sign_a)
-        if lord_of_a is None or lord_of_a == p_a:
-            continue
-        if lord_of_a not in snapshot.rasi_chart:
+        lord_of_a = utils.get_sign_lord(sign_a)
+        if lord_of_a == p_a or lord_of_a not in snapshot.rasi_chart:
             continue
         sign_b = snapshot.rasi_chart[lord_of_a].sign
-        lord_of_b = _SIGN_LORD.get(sign_b)
+        lord_of_b = utils.get_sign_lord(sign_b)
         if lord_of_b != p_a:
             continue
         pair = frozenset({p_a, lord_of_a})

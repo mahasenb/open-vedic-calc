@@ -1,8 +1,21 @@
-from typing import Literal
-from pydantic import BaseModel, Field
+from typing import Annotated, Literal
+from pydantic import AfterValidator, BaseModel, Field
 from datetime import datetime, date, time
 
 from bphs_core.lagna_shuddhi import ActivityCategory
+
+
+def _validate_iso_date(value: str) -> str:
+    # Reject malformed dates at the schema boundary so bad input is a clean 422
+    # (Pydantic validation error) rather than a 500 from datetime.strptime inside
+    # an endpoint handler. Kept as a str (not coerced to date) so downstream
+    # consumers that expect the original "%Y-%m-%d" string stay untouched.
+    datetime.strptime(value, "%Y-%m-%d")
+    return value
+
+
+# An ISO "YYYY-MM-DD" date carried on the wire as a string, validated on input.
+IsoDateStr = Annotated[str, AfterValidator(_validate_iso_date)]
 
 
 class PersonalDataIn(BaseModel):
@@ -16,13 +29,13 @@ class PersonalDataIn(BaseModel):
 
 
 class DashaRequest(PersonalDataIn):
-    from_date: str             # ISO date
-    to_date: str               # ISO date
+    from_date: IsoDateStr
+    to_date: IsoDateStr
     systems: list[str] = ["vimshottari"]
 
 
 class TransitRequest(PersonalDataIn):
-    at_date: str               # ISO date
+    at_date: IsoDateStr
 
 
 # --- Chart ---
@@ -48,6 +61,9 @@ class PlanetPlacement(BaseModel):
 class ChartResponse(BaseModel):
     lagna: str
     lagna_lord: str
+    # Lagna-derived Yoga Karaka planet (the single planet ruling both a kendra and
+    # a trikona for this lagna). "" when the lagna has no single Yoga Karaka.
+    yoga_karaka: str = ""
     ayanamsa_value: float
     bhava_chalit_cusps: list[float] = []   # 12 sidereal Placidus cusp longitudes (Bhava-Chalit)
     rasi: list[PlanetPlacement]
@@ -197,8 +213,8 @@ class MuhurtRequest(BaseModel):
     latitude: float
     longitude: float
     timezone_offset_hours: float
-    start_date: str      # YYYY-MM-DD
-    end_date: str        # YYYY-MM-DD
+    start_date: IsoDateStr
+    end_date: IsoDateStr
 
 
 class TimeWindow(BaseModel):
@@ -259,10 +275,12 @@ class LagnaShuddhiRequest(BaseModel):
     latitude: float
     longitude: float
     timezone_offset_hours: float
-    start_date: str     # YYYY-MM-DD
-    end_date: str       # YYYY-MM-DD
+    start_date: IsoDateStr
+    end_date: IsoDateStr
     activity_category: ActivityCategory = "generic"
-    step_seconds: int = 60
+    # Lower-bounded: a sub-minute step over a 365-day range is a denial-of-service
+    # vector (~31M inner-loop iterations). 60s is the default scan granularity.
+    step_seconds: int = Field(60, ge=60)
 
 
 class ScoreFactor(BaseModel):
@@ -322,10 +340,11 @@ class FamilyMember(BaseModel):
 
 class FamilyLagnaShuddhiRequest(BaseModel):
     members: list[FamilyMember]
-    start_date: str      # YYYY-MM-DD
-    end_date: str        # YYYY-MM-DD
+    start_date: IsoDateStr
+    end_date: IsoDateStr
     activity_category: ActivityCategory = "generic"
-    step_seconds: int = 60
+    # See LagnaShuddhiRequest.step_seconds — lower bound guards against DoS.
+    step_seconds: int = Field(60, ge=60)
 
 
 class FamilyMemberSample(LagnaShuddhiSample):

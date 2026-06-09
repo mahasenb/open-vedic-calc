@@ -20,9 +20,15 @@ def _token_required() -> bool:
     return _environment() not in _INSECURE_ENVS
 
 
+# Resolved once at import. ENVIRONMENT does not change within a running process,
+# and caching it prevents a runtime os.environ mutation from silently flipping
+# authentication off mid-process.
+_TOKEN_REQUIRED: bool = _token_required()
+
+
 # Fail fast at import (app startup) rather than on the first request: a non-dev
 # deployment with no token is a misconfiguration, not a runtime condition.
-if _token_required() and not os.environ.get("CALC_SERVICE_TOKEN", ""):
+if _TOKEN_REQUIRED and not os.environ.get("CALC_SERVICE_TOKEN", ""):
     raise RuntimeError(
         f"CALC_SERVICE_TOKEN is unset in ENVIRONMENT={_environment()!r}. "
         "The calc-service refuses to start unauthenticated outside "
@@ -35,7 +41,7 @@ def require_token(authorization: str = Header(default="")) -> None:
     if not expected:
         # Only reachable in an insecure env (the import-time guard blocks the
         # non-dev case). Fail closed anyway if that ever changes.
-        if _token_required():
+        if _TOKEN_REQUIRED:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Calc service is misconfigured (no auth token).",

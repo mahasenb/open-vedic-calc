@@ -59,7 +59,7 @@ _FRIENDLY: dict[str, list[str]] = {
 }
 _ENEMY: dict[str, list[str]] = {
     "Sun": ["Venus", "Saturn"],
-    "Moon": ["None"],
+    "Moon": [],  # Moon has no natural enemies in the BPHS friendship table
     "Mars": ["Mercury"],
     "Mercury": ["Moon"],
     "Jupiter": ["Mercury", "Venus"],

@@ -33,6 +33,9 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", "data", ".mypy_cache"}
 # The gate itself necessarily names the forbidden token to describe it.
 _SELF = Path(__file__).resolve()
+# Anchor the scan to the repo root (parent of ci/), not the process CWD — running
+# the gate from a subdirectory must still scan app/ and bphs_core/.
+_REPO_ROOT = _SELF.parent.parent
 
 
 def _scan_text(label: str, text: str, out: list[str]) -> None:
@@ -44,7 +47,7 @@ def _scan_text(label: str, text: str, out: list[str]) -> None:
 def main() -> int:
     violations: list[str] = []
 
-    for path in Path(".").rglob("*"):
+    for path in _REPO_ROOT.rglob("*"):
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
         if not path.is_file():
@@ -54,7 +57,8 @@ def main() -> int:
         if path.suffix.lower() not in _SCAN_EXT and path.name.lower() != "dockerfile":
             continue
         try:
-            _scan_text(str(path), path.read_text(encoding="utf-8", errors="replace"), violations)
+            label = str(path.relative_to(_REPO_ROOT))
+            _scan_text(label, path.read_text(encoding="utf-8", errors="replace"), violations)
         except OSError:
             continue
 
@@ -62,7 +66,7 @@ def main() -> int:
     try:
         msg = subprocess.run(
             ["git", "log", "-1", "--format=%B"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, cwd=_REPO_ROOT,
         ).stdout
         _scan_text("<latest commit message>", msg, violations)
     except OSError:
