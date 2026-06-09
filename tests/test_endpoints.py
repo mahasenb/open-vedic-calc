@@ -56,6 +56,10 @@ def test_chart_sample_a_structure():
     assert body["lagna"] in _VALID_SIGNS
     assert len(body["rasi"]) == 9   # 9 planets
     assert body["ayanamsa_value"] > 20.0  # Lahiri ~23-24° in modern era
+    # Yoga Karaka is lagna-derived: a planet name for kendra-trikona lagnas, else "".
+    assert "yoga_karaka" in body
+    assert body["yoga_karaka"] in ("", "Sun", "Moon", "Mars", "Mercury",
+                                    "Jupiter", "Venus", "Saturn")
 
 
 def test_chart_new_vargas():

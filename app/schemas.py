@@ -61,6 +61,9 @@ class PlanetPlacement(BaseModel):
 class ChartResponse(BaseModel):
     lagna: str
     lagna_lord: str
+    # Lagna-derived Yoga Karaka planet (the single planet ruling both a kendra and
+    # a trikona for this lagna). "" when the lagna has no single Yoga Karaka.
+    yoga_karaka: str = ""
     ayanamsa_value: float
     bhava_chalit_cusps: list[float] = []   # 12 sidereal Placidus cusp longitudes (Bhava-Chalit)
     rasi: list[PlanetPlacement]

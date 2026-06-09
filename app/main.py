@@ -132,6 +132,7 @@ def _chart_to_response(s: ChartSnapshot) -> ChartResponse:
 
     return ChartResponse(
         lagna=s.lagna, lagna_lord=s.lagna_lord,
+        yoga_karaka=yogas_mod.get_yoga_karaka_planet(s),
         ayanamsa_value=s.ayanamsa_value,
         bhava_chalit_cusps=[round(c, 6) for c in s.chalit_cusps],
         rasi=to_list(s.rasi_chart),
