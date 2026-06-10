@@ -39,6 +39,41 @@ def test_source():
     assert "commit" in body
 
 
+def test_resolve_version_prefers_git_commit_env(monkeypatch):
+    """The build-time GIT_COMMIT is authoritative — it wins over every fallback."""
+    import app.main as main_mod
+
+    monkeypatch.setenv("GIT_COMMIT", "deadbeefcafe1234")
+    # Even if git/content-hash would succeed, the env value must be returned.
+    assert main_mod._resolve_version() == "deadbeefcafe1234"
+
+
+def test_resolve_version_strips_git_commit_env(monkeypatch):
+    """Whitespace around the baked commit is trimmed (ENV may carry a newline)."""
+    import app.main as main_mod
+
+    monkeypatch.setenv("GIT_COMMIT", "  abc123def456  \n")
+    assert main_mod._resolve_version() == "abc123def456"
+
+
+def test_resolve_version_content_hash_fallback(monkeypatch):
+    """Without GIT_COMMIT and with git unavailable, a readable source tree yields
+    the deterministic content-hash ('src-' prefix) — never the bare 'unknown'."""
+    import subprocess as _subprocess
+    import app.main as main_mod
+
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+
+    def _no_git(*_args, **_kwargs):
+        raise FileNotFoundError("git not available")
+
+    monkeypatch.setattr(_subprocess, "check_output", _no_git)
+
+    version = main_mod._resolve_version()
+    assert version.startswith("src-"), version
+    assert version != "unknown"
+
+
 # ---------------------------------------------------------------------------
 # /v1/chart — structural tests (golden numerics added after first run)
 # ---------------------------------------------------------------------------

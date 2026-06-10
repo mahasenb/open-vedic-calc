@@ -1,5 +1,13 @@
 FROM python:3.10-slim
 
+# Bake the building commit into the image so /source can return the authoritative
+# running-commit (the value a downstream consumer keys its cache on). The CI build
+# passes this via --build-arg GIT_COMMIT=<sha>; _resolve_version() prefers it over
+# every fallback. Empty default => local/dev builds fall back to the source-content
+# hash, never a stale constant.
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE EPHEMERIS_LICENSE.md ./

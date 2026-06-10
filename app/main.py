@@ -31,14 +31,23 @@ from bphs_core import compat as compat_mod
 
 
 def _resolve_version() -> str:
-    """Deterministic cache-invalidation key for the calc engine.
+    """Cache-invalidation key for the calc engine, resolved in priority order.
 
-    Prefer the git commit, but containers built without a ``.git`` directory
-    (our Dockerfile only COPYs source) make ``git rev-parse`` fail. Falling
-    back to a content hash of the calc source guarantees the value still
-    *changes whenever the calc logic changes* — which is the only property
-    the downstream ChartAnalysis cache relies on. A static "unknown" would
-    pin the cache forever and silently serve stale charts after every deploy.
+    ``GIT_COMMIT`` (set at image build time via the Dockerfile ARG/ENV, which
+    the CI build populates with the building commit) is the *authoritative*
+    value: the exact running-commit a downstream consumer can key its cache on.
+    The in-container ``git rev-parse`` only fires for checkouts that still carry
+    a ``.git`` directory (local development) — the published image has none.
+
+    The source-content hash (``'src-' + sha256[:16]``) is a deterministic,
+    logic-tracking fallback for local/dev images built without ``GIT_COMMIT``:
+    it is *not* an authoritative commit, but it still changes whenever the calc
+    logic changes, which is the only property a content-keyed cache relies on.
+
+    The literal ``"unknown"`` is returned only if even the source tree is
+    unreadable; it is the unresolved sentinel that signals to a downstream
+    consumer that the version could not be determined and must be treated as
+    non-cacheable (never substituted silently for a real commit).
     """
     commit = os.environ.get("GIT_COMMIT")
     if commit:
