@@ -13,6 +13,7 @@ joint instant that satisfies all members simultaneously — hard-gating each
 member's Rahu/Yama/Gulika exclusions and Tara/Chandra Bala, then ranking by
 the minimum individual score so no weak member can be averaged away.
 """
+import logging
 from datetime import datetime, date as date_type
 from typing import Literal
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from jhora.panchanga import drik
 
 from . import utils
 from .muhurat import compute_muhurat_for_day, _TARA_BALA_LEVELS
+
+logger = logging.getLogger(__name__)
 
 # Chaldean descending-speed order (used for hora lord sequence)
 _CHALDEAN = ["Saturn", "Jupiter", "Mars", "Sun", "Venus", "Mercury", "Moon"]
@@ -56,6 +59,9 @@ ActivityCategory = Literal[
 # Rikta tithis (4th, 9th, 14th of either paksha) are classically inauspicious
 # for new undertakings; get_tithi_name prefixes the paksha, so match by base name.
 _RIKTA_TITHIS = ("Chaturthi", "Navami", "Chaturdashi")
+# Amavasya (new moon) is classically prohibited for new undertakings. It is NOT
+# a Rikta tithi, so it needs its own membership check on the tithi name.
+_AMAVASYA = "Amavasya"
 # Classically avoided yogas (Vishkumbha … Vaidhriti).
 _INAUSPICIOUS_YOGAS = frozenset({
     "Vishkumbha", "Atiganda", "Shula", "Ganda", "Vyaghata",
@@ -327,6 +333,10 @@ def compute_lagna_at_jd(jd: float, lat: float, lon: float) -> tuple[str, str, fl
     try:
         _, ascmc = swe.houses(jd, lat, lon, b"P")
     except Exception:
+        logger.warning(
+            "lagna_shuddhi_placidus_fallback_equatorial",
+            extra={"lat": lat, "lon": lon}, exc_info=True,
+        )
         _, ascmc = swe.houses(jd, lat, lon, b"E")
     sid_asc = (ascmc[0] - ayanamsa) % 360
     sign = utils.SIGNS[int(sid_asc // 30)]
@@ -389,14 +399,24 @@ def _score_instant(
         "tithi": (day_data.get("panchanga") or {}).get("tithi"),
         "yoga": (day_data.get("panchanga") or {}).get("yogam"),
         "panchanga_suitable": True,
-        "tara_bala": "Unknown",
-        "chandra_bala": "Neutral",
+        # Defaults for an instant hard-excluded BEFORE balam is computed — its
+        # score is already 0.0/Avoid, so 'NoBirthData' (the no-penalty sentinel)
+        # avoids a misleading band cap. Overwritten on the non-excluded path.
+        "tara_bala": "NoBirthData",
+        "chandra_bala": "NoBirthData",
         "event_navamsha": None,
         "event_navamsha_suitable": False,
         "hard_excluded": False,
     }
 
     if in_rahu or in_yama or in_guli:
+        detail["hard_excluded"] = True
+        return 0.0, detail
+
+    # Absolute Rahu/Yama/Gulika veto could not be COMPUTED for this day → the
+    # classical safety net is unverifiable, so the instant must not be
+    # recommendable. Fail closed: hard-exclude (score 0.0 / band Avoid).
+    if day_data.get("hard_gate_failed"):
         detail["hard_excluded"] = True
         return 0.0, detail
 
@@ -407,9 +427,12 @@ def _score_instant(
     rule = _rule_for(activity)
     he = rule.hard_excludes
     karana = (day_data.get("panchanga") or {}).get("karana") or ""
+    # eclipse / adhik_maasa now carry bool | None. None == 'could not be
+    # computed' → veto (fail closed), exactly like True; only an explicit False
+    # clears the gate.
     if (("durm_varj" in he and (in_durm or in_varj))
-            or ("eclipse" in he and day_data.get("is_eclipse_day"))
-            or ("adhik_maasa" in he and day_data.get("is_adhik_maasa"))
+            or ("eclipse" in he and day_data.get("is_eclipse_day") in (True, None))
+            or ("adhik_maasa" in he and day_data.get("is_adhik_maasa") in (True, None))
             or ("vishti" in he and karana == "Vishti")):
         detail["hard_excluded"] = True
         return 0.0, detail
@@ -507,16 +530,28 @@ def _score_instant(
     # refinement. The penalty/bonus magnitudes are a tuning choice; their
     # ordering (Tara/Chandra >= tithi/yoga > navamsa) follows that priority. ---
 
-    # Panchanga suitability: Rikta tithis and the avoided yogas deprioritise.
-    tithi_name = detail["tithi"] or ""
-    yoga_name = detail["yoga"] or ""
-    is_rikta = any(r in tithi_name for r in _RIKTA_TITHIS)
-    is_bad_yoga = yoga_name in _INAUSPICIOUS_YOGAS
-    detail["panchanga_suitable"] = not (is_rikta or is_bad_yoga)
-    if is_rikta:
+    # Panchanga suitability — three-valued (fail closed on a missing limb).
+    # A tithi or yoga that could not be computed (None) must NOT gate as
+    # suitable: it carries a penalty and the membership checks are skipped.
+    # When both limbs ARE computed: Rikta tithis, Amavasya (new moon), and the
+    # avoided yogas deprioritise.
+    panchanga_computed = detail["tithi"] is not None and detail["yoga"] is not None
+    if not panchanga_computed:
+        detail["panchanga_suitable"] = False
         score -= 0.10
-    if is_bad_yoga:
-        score -= 0.10
+    else:
+        tithi_name = detail["tithi"]
+        yoga_name = detail["yoga"]
+        is_rikta = any(r in tithi_name for r in _RIKTA_TITHIS)
+        is_amavasya = _AMAVASYA in tithi_name
+        is_bad_yoga = yoga_name in _INAUSPICIOUS_YOGAS
+        detail["panchanga_suitable"] = not (is_rikta or is_amavasya or is_bad_yoga)
+        if is_rikta:
+            score -= 0.10
+        if is_amavasya:
+            score -= 0.10
+        if is_bad_yoga:
+            score -= 0.10
 
     # Vaara (weekday) suitability — classical day-lord preference for the activity.
     vaara = (day_data.get("panchanga") or {}).get("vaara") or ""
@@ -526,12 +561,16 @@ def _score_instant(
         score -= _VARA_PENALTY
 
     # Tara Bala / Chandra Bala at this exact instant (parity with the family scan).
+    # 'Unknown' (computation FAILED with birth data present) fails closed with a
+    # penalty of the same magnitude as a classically-bad Tara. 'NoBirthData' (a
+    # legitimate generic scan) carries NO penalty — there is no personal strength
+    # to check.
     tara_label, chandra_str = compute_balam_at_jd(jd, birth_nakshatra, birth_moon_sign)
     detail["tara_bala"] = tara_label
     detail["chandra_bala"] = chandra_str
-    if tara_label in _TARA_BAD:
+    if tara_label in _TARA_BAD or tara_label == "Unknown":
         score -= 0.12
-    if chandra_str == "Inauspicious (Avoid)":
+    if chandra_str == "Inauspicious (Avoid)" or chandra_str == "Unknown":
         score -= 0.12
     elif chandra_str == "Good":
         score += 0.03
@@ -583,16 +622,47 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
+def _balam_disp(value: str | None) -> str:
+    """Render a Tara/Chandra Bala value for prose, never leaking the literal
+    sentinel strings 'Unknown' / 'NoBirthData' / 'None'."""
+    if value in (None, "Unknown"):
+        return "could not be computed"
+    if value == "NoBirthData":
+        return "not applicable (no birth data supplied)"
+    return value
+
+
 def _build_clearance_summary(sample: dict, activity: ActivityCategory) -> str:
-    """Plain-English why-this-window summary built from a scored sample's factors."""
-    pan = (
-        "suitable" if sample.get("panchanga_suitable", True)
-        else "inauspicious (Rikta tithi or avoided yoga)"
-    )
+    """Plain-English why-this-window summary built from a scored sample's factors.
+
+    Defensive throughout: a limb that could not be computed says so, and the
+    literal strings 'None' / 'Unknown' / 'NoBirthData' never reach the prose.
+    """
+    # Rahu/Yama/Gulika sentence — conditional on whether the absolute veto could
+    # be computed for this day (hard_gate_failed carried onto the sample).
+    if sample.get("hard_gate_failed"):
+        rahu_sentence = (
+            "Rahu Kala / Yamaganda / Gulika status could not be computed — "
+            "treated as unverified."
+        )
+    else:
+        rahu_sentence = "Clear of Rahu Kala, Yamaganda and Gulika."
+
+    # Panchanga sentence — a None tithi/yoga means suitability cannot be verified.
+    tithi_disp = sample.get("tithi") or "could not be computed"
+    yoga_disp = sample.get("yoga") or "could not be computed"
+    if sample.get("tithi") is None or sample.get("yoga") is None:
+        pan = "panchanga suitability could not be verified"
+    elif sample.get("panchanga_suitable", True):
+        pan = "suitable"
+    else:
+        pan = "inauspicious (Rikta tithi, Amavasya or avoided yoga)"
+
     parts = [
-        "Clear of Rahu Kala, Yamaganda and Gulika.",
-        f"Panchanga: {sample.get('tithi')}, {sample.get('yoga')} yoga — {pan}.",
-        f"Tara Bala: {sample.get('tara_bala')}; Chandra Bala: {sample.get('chandra_bala')}.",
+        rahu_sentence,
+        f"Panchanga: {tithi_disp}, yoga {yoga_disp} — {pan}.",
+        f"Tara Bala: {_balam_disp(sample.get('tara_bala'))}; "
+        f"Chandra Bala: {_balam_disp(sample.get('chandra_bala'))}.",
         f"Rising {sample.get('lagna_sign')} (lord {sample.get('lagna_lord')}) in the "
         f"{_ordinal(sample.get('lagna_lord_house', 0))}, {sample.get('lagna_lord_dignity')}.",
     ]
@@ -622,13 +692,17 @@ def derive_band(score: float, sample: dict) -> Band:
     Hybrid rule — nakshatra strength dominates, then score granularity:
       * a hard inauspicious period (Rahu/Yama/Gulika) or a zero score -> Avoid
       * bad Tara Bala (Vipat/Pratyak/Naidhana) or Chandra "Avoid" -> at most Fair
+      * a FAILED Tara/Chandra compute ('Unknown', birth data expected) -> at most
+        Fair (fail closed). 'NoBirthData' (a generic scan) does NOT cap.
       * else by score: >=0.85 Excellent, >=0.60 Good, otherwise Fair
     """
     if (score <= 0.0 or sample.get("in_rahu_kala")
             or sample.get("in_yamaganda") or sample.get("in_gulika")):
         return "Avoid"
     if (sample.get("tara_bala") in _TARA_BAD
-            or sample.get("chandra_bala") == "Inauspicious (Avoid)"):
+            or sample.get("tara_bala") == "Unknown"
+            or sample.get("chandra_bala") == "Inauspicious (Avoid)"
+            or sample.get("chandra_bala") == "Unknown"):
         return "Fair"
     if score >= 0.85:
         return "Excellent"
@@ -664,14 +738,19 @@ def build_factors(sample: dict) -> list[dict]:
     if sample.get("in_varjyam"):
         factors.append(_factor("Varjyam", "negative", "Within Varjyam."))
 
-    # Tara Bala.
+    # Tara Bala. 'Unknown' (failed compute) is a negative factor; 'NoBirthData'
+    # (generic scan, no birth data) emits nothing.
     tara = sample.get("tara_bala")
     if tara in _TARA_GOOD:
         factors.append(_factor("Tara Bala", "positive", f"{tara} — favourable."))
     elif tara in _TARA_BAD:
         factors.append(_factor("Tara Bala", "negative", f"{tara} — unfavourable."))
+    elif tara == "Unknown":
+        factors.append(_factor("Tara Bala", "negative",
+                               "Could not be computed — personal suitability unverified."))
 
-    # Chandra Bala.
+    # Chandra Bala. 'Unknown' (failed compute) is a negative factor; 'NoBirthData'
+    # emits nothing.
     chandra = sample.get("chandra_bala")
     if chandra == "Good":
         factors.append(_factor("Chandra Bala", "positive",
@@ -679,15 +758,27 @@ def build_factors(sample: dict) -> list[dict]:
     elif chandra == "Inauspicious (Avoid)":
         factors.append(_factor("Chandra Bala", "negative",
                                "Moon poorly placed from the birth sign."))
+    elif chandra == "Unknown":
+        factors.append(_factor("Chandra Bala", "negative",
+                               "Chandra Bala could not be computed."))
 
-    # Panchanga (tithi / yoga) suitability.
-    if sample.get("panchanga_suitable", True):
+    # Panchanga (tithi / yoga) suitability — three-valued. A None limb (could not
+    # be computed) is a distinct negative factor; an unsuitable-but-computed pair
+    # keeps the Rikta/Amavasya/avoided-yoga wording; only a computed AND suitable
+    # pair is positive. f-strings guard None so the literal 'None' never renders.
+    tithi_disp = sample.get("tithi")
+    yoga_disp = sample.get("yoga")
+    limb_missing = tithi_disp is None or yoga_disp is None
+    if not sample.get("panchanga_suitable", True) and limb_missing:
+        factors.append(_factor("Panchanga", "negative",
+                               "Tithi or yoga could not be computed."))
+    elif sample.get("panchanga_suitable", True):
         factors.append(_factor("Panchanga", "positive",
-                               f"{sample.get('tithi')}, {sample.get('yoga')} yoga — suitable."))
+                               f"{tithi_disp}, {yoga_disp} yoga — suitable."))
     else:
         factors.append(_factor("Panchanga", "negative",
-                               f"{sample.get('tithi')}, {sample.get('yoga')} yoga — "
-                               "Rikta tithi or avoided yoga."))
+                               f"{tithi_disp}, {yoga_disp} yoga — "
+                               "Rikta tithi, Amavasya or avoided yoga."))
 
     # Lagna-lord dignity.
     dignity = sample.get("lagna_lord_dignity")
@@ -816,6 +907,10 @@ def scan_lagna_shuddhi(
                 "tithi": detail["tithi"],
                 "yoga": detail["yoga"],
                 "panchanga_suitable": detail["panchanga_suitable"],
+                # Carried so the clearance prose can report an unverifiable
+                # absolute-veto day (hard-gate degraded) instead of falsely
+                # claiming 'Clear of Rahu Kala …'.
+                "hard_gate_failed": bool(day_data.get("hard_gate_failed")),
                 "event_navamsha": detail["event_navamsha"],
                 "event_navamsha_suitable": detail["event_navamsha_suitable"],
                 "score": round(score, 4),
@@ -908,10 +1003,16 @@ def compute_balam_at_jd(
     bare label string (e.g. "Vipat") without the parenthesised description.
     chandra_str is one of "Good", "Neutral", or "Inauspicious (Avoid)".
 
-    Returns ("Unknown", "Neutral") when inputs are missing or an error occurs.
+    Two non-numeric sentinels distinguish the two legitimate states the consumer
+    must treat differently:
+      * ("NoBirthData", "NoBirthData") when no birth data was supplied — a
+        legitimate generic scan with no personal strength to check (NO penalty,
+        NO band cap).
+      * "Unknown" for a limb whose computation FAILED despite birth data being
+        present — fail closed (penalty + band capped at Fair).
     """
     if not birth_nakshatra or not birth_moon_sign:
-        return "Unknown", "Neutral"
+        return "NoBirthData", "NoBirthData"
 
     # --- Tara Bala ---
     try:
@@ -936,7 +1037,7 @@ def compute_balam_at_jd(
         else:
             chandra_str = "Inauspicious (Avoid)"
     except Exception:
-        chandra_str = "Neutral"
+        chandra_str = "Unknown"
 
     return tb_label, chandra_str
 
@@ -1054,6 +1155,8 @@ def scan_family_lagna_shuddhi(
                 "tithi": detail["tithi"],
                 "yoga": detail["yoga"],
                 "panchanga_suitable": detail["panchanga_suitable"],
+                # See scan_lagna_shuddhi: carried for the clearance prose.
+                "hard_gate_failed": bool(dd.get("hard_gate_failed")),
                 "event_navamsha": detail["event_navamsha"],
                 "event_navamsha_suitable": detail["event_navamsha_suitable"],
             })
@@ -1071,12 +1174,18 @@ def scan_family_lagna_shuddhi(
     def _passes_balam_gate(record: dict) -> tuple[bool, list[str]]:
         """Return (passes, compromised_names).
 
-        Fails (returns False) if ANY member has Tara in _TARA_BAD or
-        Chandra == "Inauspicious (Avoid)".
+        Fails (returns False) if ANY member has Tara in _TARA_BAD, a FAILED
+        Tara/Chandra compute ('Unknown'), or Chandra == "Inauspicious (Avoid)".
+        A failed compute is fail-closed: the member is compromised so the
+        consensus is best_effort, not strict. 'NoBirthData' members (generic
+        scan, no birth data) are NOT compromised.
         """
         bad = []
         for md in record["per_member"]:
-            if md["tara_bala"] in _TARA_BAD or md["chandra_bala"] == "Inauspicious (Avoid)":
+            if (md["tara_bala"] in _TARA_BAD
+                    or md["tara_bala"] == "Unknown"
+                    or md["chandra_bala"] == "Inauspicious (Avoid)"
+                    or md["chandra_bala"] == "Unknown"):
                 bad.append(md["name"])
         return (len(bad) == 0), bad
 

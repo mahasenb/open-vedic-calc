@@ -51,11 +51,11 @@ class TestPureHelpers:
         assert m.get_tithi_name(1) == "Shukla Prathama"
         assert m.get_tithi_name(15) == "Shukla Purnima"
         assert m.get_tithi_name(16) == "Krishna Prathama"
-        # idx 30 indexes TITHIS[14] ("Purnima") in the Krishna half — the module
-        # maps the 30th tithi to "Krishna Purnima" (the dedicated "Amavasya"
-        # entry at TITHIS[29] is only reached via index lookups the panchanga
-        # never produces). Assert the module's actual behaviour.
-        assert m.get_tithi_name(30) == "Krishna Purnima"
+        # idx 30 IS produced at exact new moon (ceil(moon_phase/12) == 30), so it
+        # is special-cased to "Krishna Amavasya" (TITHIS[29], the new-moon entry)
+        # rather than wrapping to TITHIS[14] ("Purnima"). idx 29 (Chaturdashi) is
+        # unchanged.
+        assert m.get_tithi_name(30) == "Krishna Amavasya"
         assert m.get_tithi_name(29) == "Krishna Chaturdashi"
 
     def test_float_hours_to_hhmm_basic(self):
@@ -249,10 +249,12 @@ class TestAmritaFallback:
 
 
 class TestPanchakaFallback:
-    def test_panchaka_failure_defaults_to_free(self, monkeypatch):
+    def test_panchaka_failure_returns_none(self, monkeypatch):
+        """A failed panchaka computation fails closed: panchaka_free is None
+        ('could not be computed'), never a falsely-clean default of True."""
         monkeypatch.setattr(m.drik, "panchaka_rahitha", _raise)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchaka_free"] is True
+        assert out["panchaka_free"] is None
 
     def test_panchaka_dosha_spanning_noon_marks_not_free(self, monkeypatch):
         """A non-zero dosha window spanning local noon clears panchaka_free."""
@@ -274,20 +276,22 @@ class TestPanchakaFallback:
 
 class TestPersonalBalamFallbacks:
     def test_tara_bala_fallback_on_bad_nakshatra(self):
-        """An unknown birth nakshatra makes NAKSHATRAS.index raise -> Neutral."""
+        """An unknown birth nakshatra makes NAKSHATRAS.index raise -> 'Unknown'
+        ('could not be computed'), aligning with compute_balam_at_jd. NOT
+        'Neutral' (which would falsely read as a computed, benign result)."""
         out = m.compute_muhurat_for_day(
             PLACE, TARGET,
             birth_nakshatra="NotANakshatra", birth_moon_sign="Taurus",
         )
-        assert out["personal_balam"]["tara_bala"] == "Neutral"
+        assert out["personal_balam"]["tara_bala"] == "Unknown"
 
     def test_chandra_bala_fallback_on_bad_sign(self):
-        """An unknown birth Moon sign makes SIGNS.index raise -> Neutral."""
+        """An unknown birth Moon sign makes SIGNS.index raise -> 'Unknown'."""
         out = m.compute_muhurat_for_day(
             PLACE, TARGET,
             birth_nakshatra="Rohini", birth_moon_sign="NotASign",
         )
-        assert out["personal_balam"]["chandra_bala"] == "Neutral"
+        assert out["personal_balam"]["chandra_bala"] == "Unknown"
 
     # The transit Moon on 2026-05-26 (noon, Lahiri) sits in Virgo (sign idx 5).
     # Picking the birth Moon sign therefore selects each chandra-bala category
@@ -379,30 +383,38 @@ class TestDegradedFlag:
 
 
 # ---------------------------------------------------------------------------
-# FIX #10 — nakshatra/yoga index out-of-range returns None, not wrap-around
+# Root-cause: nakshatra/yoga NAME comes from the sidereal longitudes directly,
+# so a corrupt pyjhora index never wraps a wrong name — a valid name is always
+# produced. The corrupt index only invalidates the end-time → day is degraded.
 # ---------------------------------------------------------------------------
 
 class TestNakshatraYogaIndexGuard:
-    def test_nakshatra_index_zero_returns_none(self, monkeypatch):
-        """pyjhora returning 0 for nakshatra index -> None (not last element)."""
+    def test_nakshatra_index_zero_still_names_via_longitude(self, monkeypatch):
+        """A corrupt pyjhora index (0) does NOT corrupt the name (computed from
+        the Moon's longitude); only the end-time is lost and the day degrades."""
         real_nakshatra = m.drik.nakshatra
 
         def fake_nakshatra(jd, place):
             result = real_nakshatra(jd, place)
-            # Return the same tuple structure but with index 0
+            # Return the same tuple structure but with the index forced to 0
             return (0,) + tuple(result[1:])
 
         monkeypatch.setattr(m.drik, "nakshatra", fake_nakshatra)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchanga"]["nakshatra"] is None
+        # Name is still a VALID nakshatra (from the direct longitude computation).
+        assert out["panchanga"]["nakshatra"] in utils.NAKSHATRAS
+        # The out-of-range pyjhora index makes the end-time unavailable -> degraded.
+        assert out["panchanga"]["nakshatra_end"] is None
+        assert out["degraded"] is True
 
     def test_nakshatra_valid_index_returns_name(self):
         """Normal path: valid index returns the correct nakshatra name."""
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["panchanga"]["nakshatra"] in utils.NAKSHATRAS
 
-    def test_yoga_index_zero_returns_none(self, monkeypatch):
-        """pyjhora returning 0 for yoga index -> None (not last element)."""
+    def test_yoga_index_zero_still_names_via_longitude(self, monkeypatch):
+        """A corrupt pyjhora yoga index (0) does NOT corrupt the name (computed
+        from the Sun+Moon longitude sum); only the end-time is lost -> degraded."""
         real_yogam = m.drik.yogam
 
         def fake_yogam(jd, place):
@@ -411,7 +423,9 @@ class TestNakshatraYogaIndexGuard:
 
         monkeypatch.setattr(m.drik, "yogam", fake_yogam)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchanga"]["yogam"] is None
+        assert out["panchanga"]["yogam"] in m.YOGAS
+        assert out["panchanga"]["yogam_end"] is None
+        assert out["degraded"] is True
 
     def test_yoga_valid_index_returns_name(self):
         """Normal path: valid index returns the correct yoga name."""
