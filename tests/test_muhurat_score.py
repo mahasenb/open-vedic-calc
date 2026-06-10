@@ -6,6 +6,7 @@ by the /v1/muhurat/lagna-shuddhi and family endpoint tests.
 """
 import pytest
 
+from bphs_core import lagna_shuddhi as ls
 from bphs_core.lagna_shuddhi import (
     derive_band,
     build_factors,
@@ -73,6 +74,21 @@ def test_band_chandra_avoid_caps_at_fair():
     assert derive_band(0.95, _sample(chandra_bala="Inauspicious (Avoid)")) == "Fair"
 
 
+@pytest.mark.parametrize("field", ["tara_bala", "chandra_bala"])
+def test_band_unknown_balam_caps_at_fair(field):
+    """A FAILED Tara/Chandra compute ('Unknown', birth data expected) fails
+    closed: the band caps at Fair regardless of an otherwise-high score."""
+    assert derive_band(0.95, _sample(**{field: "Unknown"})) == "Fair"
+
+
+def test_band_nobirthdata_does_not_cap():
+    """A generic scan ('NoBirthData') has no personal strength to check, so it
+    does NOT cap — a high score can still be Excellent."""
+    assert derive_band(
+        0.95, _sample(tara_bala="NoBirthData", chandra_bala="NoBirthData")
+    ) == "Excellent"
+
+
 # --------------------------------------------------------------------------- #
 # build_factors                                                               #
 # --------------------------------------------------------------------------- #
@@ -118,8 +134,10 @@ def test_factors_negative_balam_dignity_house_panchanga():
 
 
 def test_factors_neutral_signals_are_omitted():
+    # 'NoBirthData' (generic scan, no birth data) and 'Neutral' chandra carry no
+    # factor — unlike 'Unknown' (failed compute), which IS a negative factor.
     f = _by_name(build_factors(_sample(
-        tara_bala="Unknown", chandra_bala="Neutral",
+        tara_bala="NoBirthData", chandra_bala="Neutral",
         lagna_lord_dignity="neutral", lagna_lord_house=3,  # upachaya: neither
         in_auspicious_muhurta=None, chogadiya_label=None,
         event_navamsha_suitable=False)))
@@ -129,6 +147,15 @@ def test_factors_neutral_signals_are_omitted():
     # clearance + panchanga are always reported
     assert f["Inauspicious periods"]["impact"] == "positive"
     assert "Panchanga" in f
+
+
+def test_factors_unknown_balam_is_negative():
+    """A FAILED Tara/Chandra compute ('Unknown') surfaces a negative factor —
+    distinct from 'NoBirthData', which surfaces nothing."""
+    f = _by_name(build_factors(_sample(
+        tara_bala="Unknown", chandra_bala="Unknown")))
+    assert f["Tara Bala"]["impact"] == "negative"
+    assert f["Chandra Bala"]["impact"] == "negative"
 
 
 def test_factors_trikona_house_is_positive():
@@ -217,3 +244,71 @@ def test_family_response_carries_band_and_score100():
         consensus_quality="strict", compromised_members=[],
     )
     assert resp.band == "Excellent" and resp.score_100 == 90
+
+
+# --------------------------------------------------------------------------- #
+# _passes_balam_gate (via scan_family_lagna_shuddhi)                           #
+# --------------------------------------------------------------------------- #
+#
+# _passes_balam_gate is a closure inside scan_family_lagna_shuddhi, so it is
+# exercised through the public scan. The ephemeris-heavy helpers are stubbed so
+# the test is deterministic and fast: a single candidate minute, a clean day, a
+# fixed lagna, and per-member balam driven by the member's birth_nakshatra.
+
+@pytest.fixture
+def _stub_family_scan(monkeypatch):
+    clean_day = {
+        "date": "2026-05-26",
+        "sunrise": "06:00", "sunset": "18:00",
+        "inauspicious_periods": [],
+        "auspicious_muhurtas": [{"start": "09:00", "end": "09:02",
+                                 "label": "Abhijit Muhurta"}],
+        "chogadiya": [],
+        "panchanga": {"tithi": "Shukla Panchami", "yogam": "Siddhi",
+                      "karana": "Bava", "vaara": "Tuesday"},
+        "is_eclipse_day": False, "is_adhik_maasa": False,
+        "hard_gate_failed": False,
+    }
+    monkeypatch.setattr(ls, "compute_muhurat_for_day", lambda *a, **k: clean_day)
+    monkeypatch.setattr(ls, "compute_lagna_at_jd",
+                        lambda *a, **k: ("Taurus", "Venus", 35.0))
+
+    # balam keyed off the member's birth_nakshatra so each test picks a state.
+    def fake_balam(jd, birth_nak, birth_sign):
+        return {
+            "good": ("Sampat", "Good"),
+            "unknown": ("Unknown", "Unknown"),
+            "nobirth": ("NoBirthData", "NoBirthData"),
+        }[birth_nak]
+
+    monkeypatch.setattr(ls, "compute_balam_at_jd", fake_balam)
+    return None
+
+
+def _member(name, state):
+    return {
+        "name": name, "lat": 7.0, "lon": 80.0, "tz_offset": 5.5,
+        "birth_nakshatra": state, "birth_moon_sign": "Taurus",
+    }
+
+
+def test_passes_balam_gate_unknown_member_is_compromised(_stub_family_scan):
+    """A member whose Tara/Chandra FAILED to compute ('Unknown') is compromised,
+    forcing a best_effort consensus."""
+    out = ls.scan_family_lagna_shuddhi(
+        [_member("Asha", "good"), _member("Ravi", "unknown")],
+        "2026-05-26", "2026-05-26", activity="generic",
+    )
+    assert out["consensus_quality"] == "best_effort"
+    assert "Ravi" in out["compromised_members"]
+    assert "Asha" not in out["compromised_members"]
+
+
+def test_passes_balam_gate_nobirthdata_member_not_compromised(_stub_family_scan):
+    """A 'NoBirthData' member (generic scan, no birth data) is NOT compromised."""
+    out = ls.scan_family_lagna_shuddhi(
+        [_member("Asha", "good"), _member("Ravi", "nobirth")],
+        "2026-05-26", "2026-05-26", activity="generic",
+    )
+    assert out["consensus_quality"] == "strict"
+    assert out["compromised_members"] == []

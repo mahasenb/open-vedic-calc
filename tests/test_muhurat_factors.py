@@ -39,7 +39,7 @@ def _sample(**over):
 def test_clearance_summary_covers_every_factor():
     out = _build_clearance_summary(_sample(), "marriage")
     assert "Clear of Rahu Kala, Yamaganda and Gulika." in out
-    assert "Shukla Panchami" in out and "Siddhi yoga" in out and "suitable" in out
+    assert "Shukla Panchami" in out and "yoga Siddhi" in out and "suitable" in out
     assert "Tara Bala: Sampat" in out and "Chandra Bala: Good" in out
     assert "Taurus" in out and "Venus" in out and "4th" in out
     assert "Event Navamsha lagna Taurus (suitable for marriage)." in out
@@ -49,8 +49,38 @@ def test_clearance_summary_flags_inauspicious_panchanga_and_omits_missing_navams
     out = _build_clearance_summary(
         _sample(panchanga_suitable=False, event_navamsha=None), "generic"
     )
-    assert "inauspicious (Rikta tithi or avoided yoga)" in out
+    assert "inauspicious (Rikta tithi, Amavasya or avoided yoga)" in out
     assert "Event Navamsha" not in out  # no clause when navamsa is absent
+
+
+def test_clearance_summary_none_limb_says_could_not_be_computed_never_none():
+    """A None tithi/yoga renders 'could not be computed' and the suitability
+    label says it could not be verified — the literal 'None' never appears."""
+    out = _build_clearance_summary(
+        _sample(tithi=None, yoga=None, panchanga_suitable=False), "generic"
+    )
+    assert "could not be computed" in out
+    assert "panchanga suitability could not be verified" in out
+    assert "None" not in out
+
+
+def test_clearance_summary_hard_gate_failed_reports_unverified():
+    out = _build_clearance_summary(_sample(hard_gate_failed=True), "generic")
+    assert "Rahu Kala / Yamaganda / Gulika status could not be computed" in out
+    assert "treated as unverified" in out
+    assert "Clear of Rahu Kala" not in out
+
+
+def test_clearance_summary_unknown_balam_never_leaks_literal():
+    """A failed Tara/Chandra ('Unknown') renders 'could not be computed';
+    'NoBirthData' renders 'not applicable' — neither literal reaches the prose."""
+    out = _build_clearance_summary(
+        _sample(tara_bala="Unknown", chandra_bala="NoBirthData"), "generic"
+    )
+    assert "Tara Bala: could not be computed" in out
+    assert "not applicable (no birth data supplied)" in out
+    assert "Unknown" not in out
+    assert "NoBirthData" not in out
 
 
 def test_event_navamsha_vargottama_is_strongest():
