@@ -84,6 +84,11 @@ jobs:
         with:
           context: .
           push: true
+          # Embed the exact source commit so /source returns the authoritative
+          # cache key in production (the image is built without a .git dir, so
+          # the in-container git rev-parse fallback can never fire).
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
