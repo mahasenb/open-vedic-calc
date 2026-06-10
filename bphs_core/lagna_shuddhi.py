@@ -680,8 +680,8 @@ def _build_clearance_summary(sample: dict, activity: ActivityCategory) -> str:
 Band = Literal["Excellent", "Good", "Fair", "Avoid"]
 
 # Tara levels that are classically favourable (bare label, no description).
-# _TARA_BAD (Vipat/Pratyak/Naidhana) is defined further down for the family gate;
-# both are resolved at call time, so order of definition does not matter.
+# _TARA_BAD (Janma/Vipat/Pratyak/Naidhana) is defined further down for the family
+# gate; both are resolved at call time, so order of definition does not matter.
 _TARA_GOOD = frozenset({"Sampat", "Kshema", "Sadhana", "Mitra", "Paramitra"})
 _BAND_ORDER = {"Avoid": 0, "Fair": 1, "Good": 2, "Excellent": 3}
 
@@ -691,7 +691,7 @@ def derive_band(score: float, sample: dict) -> Band:
 
     Hybrid rule — nakshatra strength dominates, then score granularity:
       * a hard inauspicious period (Rahu/Yama/Gulika) or a zero score -> Avoid
-      * bad Tara Bala (Vipat/Pratyak/Naidhana) or Chandra "Avoid" -> at most Fair
+      * bad Tara Bala (Janma/Vipat/Pratyak/Naidhana) or Chandra "Avoid" -> at most Fair
       * a FAILED Tara/Chandra compute ('Unknown', birth data expected) -> at most
         Fair (fail closed). 'NoBirthData' (a generic scan) does NOT cap.
       * else by score: >=0.85 Excellent, >=0.60 Good, otherwise Fair
@@ -1046,7 +1046,14 @@ def compute_balam_at_jd(
 # Hard-gate constants for family scan
 # ---------------------------------------------------------------------------
 
-_TARA_BAD = {"Vipat", "Pratyak", "Naidhana"}
+# The four classically inauspicious Taras: Janma (1st, "Not Good" — danger to
+# the body, avoided for new undertakings), Vipat (3rd, "Bad"), Pratyak (5th,
+# "Not Good") and Naidhana (7th, "Totally Bad"). The 9-fold cycle has exactly
+# these four avoid-Taras; the other five (Sampat/Kshema/Sadhana/Mitra/Paramitra)
+# are favourable. All four deprioritise uniformly here (penalty + band cap at
+# Fair) — the descriptive grading ("Not Good" < "Bad" < "Totally Bad") is not
+# modelled separately.
+_TARA_BAD = {"Janma", "Vipat", "Pratyak", "Naidhana"}
 
 
 # ---------------------------------------------------------------------------

@@ -414,7 +414,7 @@ _VALID_DIGNITIES = {
     "exalted", "moolatrikona", "own sign", "friendly", "neutral", "enemy",
     "debilitated", "unknown",
 }
-_TARA_BAD = {"Vipat", "Pratyak", "Naidhana"}
+_TARA_BAD = {"Janma", "Vipat", "Pratyak", "Naidhana"}
 
 
 # A 3-day window clear of Adhika Maasa and eclipses (2026-05-26..28 is Adhika

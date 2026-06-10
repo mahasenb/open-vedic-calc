@@ -65,8 +65,10 @@ def test_band_hard_period_is_avoid_regardless_of_score(flag):
     assert derive_band(0.9, _sample(**{flag: True})) == "Avoid"
 
 
-@pytest.mark.parametrize("tara", ["Vipat", "Pratyak", "Naidhana"])
+@pytest.mark.parametrize("tara", ["Janma", "Vipat", "Pratyak", "Naidhana"])
 def test_band_bad_tara_caps_at_fair(tara):
+    # All four classically inauspicious Taras cap the band at Fair — Janma (the
+    # birth star) included, despite an otherwise-Excellent score.
     assert derive_band(0.95, _sample(tara_bala=tara)) == "Fair"
 
 
@@ -119,6 +121,13 @@ def test_factors_toxic_period_is_negative_and_flags_durmuhurtam_varjyam():
     assert f["Inauspicious periods"]["impact"] == "negative"
     assert f["Durmuhurtam"]["impact"] == "negative"
     assert f["Varjyam"]["impact"] == "negative"
+
+
+def test_factors_janma_tara_is_negative():
+    # Janma (birth-star) Tara is classically inauspicious — it must surface as a
+    # negative factor, not a neutral/omitted one.
+    f = _by_name(build_factors(_sample(tara_bala="Janma")))
+    assert f["Tara Bala"]["impact"] == "negative"
 
 
 def test_factors_negative_balam_dignity_house_panchanga():
