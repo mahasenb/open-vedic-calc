@@ -685,6 +685,14 @@ Band = Literal["Excellent", "Good", "Fair", "Avoid"]
 _TARA_GOOD = frozenset({"Sampat", "Kshema", "Sadhana", "Mitra", "Paramitra"})
 _BAND_ORDER = {"Avoid": 0, "Fair": 1, "Good": 2, "Excellent": 3}
 
+# Maximum number of diversified alternatives to return alongside the best instant.
+MAX_ALTERNATIVES = 5
+# Two alternatives (or an alternative vs best) on the SAME date must be at least
+# this many minutes apart.  ±5 min is the tolerance band half-width; 60 min
+# guarantees alternatives are not minute-adjacent clusters of the best or each other.
+# Distinct dates are always allowed (no same-day constraint across dates).
+ALT_MIN_SEPARATION_MINS = 60
+
 
 def derive_band(score: float, sample: dict) -> Band:
     """Map a 0..1 score + its classical signals onto a four-level quality band.
@@ -823,6 +831,82 @@ def _enrich_sample(sample: dict) -> dict:
     return sample
 
 
+def _select_alternatives(ranked: list[dict], best: dict,
+                         score_key: str = "score") -> list[dict]:
+    """Pick up to MAX_ALTERNATIVES diversified records from a score-desc ranked list.
+
+    `ranked` MUST be sorted descending by the caller's score key with a
+    deterministic tie-break, and `best` MUST be `ranked[0]` — so no alternative
+    can outscore the recommendation. Solo sorts by (-score, instant); family
+    passes its gate-matched pool sorted by (-min_score, -mean_score, instant)
+    with score_key='min_score' (mean_score is intentionally a finer tie-break
+    than instant-only ordering).
+
+    Diversification rule (deterministic):
+      * never include `best` itself
+      * an alternative is REJECTED if it lies within ALT_MIN_SEPARATION_MINS of
+        ANY already-accepted instant (including `best`) ON THE SAME DATE.
+        Different date => always far enough.
+      * walk `ranked` in order; greedily accept the highest-scoring survivor.
+    Returns accepted records (still the raw scored dicts).
+    """
+    accepted_keys: list[tuple[str, int]] = []  # (date_str, mins)
+    b_date, b_time = best["instant"].split(" ")
+    accepted_keys.append((b_date, _hhmm_to_mins(b_time)))
+    out: list[dict] = []
+    for rec in ranked:
+        if rec is best or rec["instant"] == best["instant"]:
+            continue
+        r_date, r_time = rec["instant"].split(" ")
+        r_mins = _hhmm_to_mins(r_time)
+        too_close = any(
+            d == r_date and abs(m - r_mins) < ALT_MIN_SEPARATION_MINS
+            for d, m in accepted_keys
+        )
+        if too_close:
+            continue
+        accepted_keys.append((r_date, r_mins))
+        out.append(rec)
+        if len(out) >= MAX_ALTERNATIVES:
+            break
+    return out
+
+
+def _tolerance_window(center: dict, same_pool: list[dict], label: str,
+                      score_key: str = "score") -> dict:
+    """Build a [start,end) HH:MM window around `center` using the existing
+    ±5min / 0.85*center_score contiguous-run rule, restricted to same-date pool."""
+    c_date, c_time = center["instant"].split(" ")
+    c_mins = _hhmm_to_mins(c_time)
+    c_score = center[score_key]
+    threshold = 0.85 * c_score
+    band_start = band_end = c_mins
+    for s in sorted(same_pool, key=lambda r: r["instant"], reverse=True):
+        sd, st = s["instant"].split(" ")
+        if sd != c_date:
+            continue
+        sm = _hhmm_to_mins(st)
+        if sm > c_mins:
+            continue
+        if c_mins - sm > 5:
+            break
+        if s[score_key] >= threshold:
+            band_start = min(band_start, sm)
+    for s in sorted(same_pool, key=lambda r: r["instant"]):
+        sd, st = s["instant"].split(" ")
+        if sd != c_date:
+            continue
+        sm = _hhmm_to_mins(st)
+        if sm < c_mins:
+            continue
+        if sm - c_mins > 5:
+            break
+        if s[score_key] >= threshold:
+            band_end = max(band_end, sm)
+    return {"start": _mins_to_hhmm(band_start),
+            "end": _mins_to_hhmm(band_end + 1), "label": label}
+
+
 def _family_band(min_score: float, consensus_quality: str,
                  per_member: list[dict]) -> Band:
     """Joint band: the weakest member governs; a best-effort consensus caps at Fair."""
@@ -925,66 +1009,42 @@ def scan_lagna_shuddhi(
             "best_window": None,
             "top_samples": [],
             "clearance_summary": None,
+            "alternatives": [],
         }
 
-    # Sort by score descending
-    ranked = sorted(all_samples, key=lambda s: s["score"], reverse=True)
+    # Sort by score descending, instant-ascending tie-break — explicit so the
+    # contracted alternatives ordering never depends on insertion order.
+    ranked = sorted(all_samples, key=lambda s: (-s["score"], s["instant"]))
     best = ranked[0]
 
     # Tolerance band: contiguous run of samples around best_instant where
-    # score >= 0.85 * best_score and within ±5 minutes of best_instant
-    best_date, best_time = best["instant"].split(" ")
-    best_mins = _hhmm_to_mins(best_time)
-    best_score = best["score"]
-    threshold = 0.85 * best_score
-
-    band_start = best_mins
-    band_end = best_mins
-
-    # Walk backwards
-    for sample in sorted(all_samples, key=lambda s: s["instant"], reverse=True):
-        s_date, s_time = sample["instant"].split(" ")
-        if s_date != best_date:
-            continue
-        s_mins = _hhmm_to_mins(s_time)
-        if s_mins > best_mins:
-            continue
-        if best_mins - s_mins > 5:
-            break
-        if sample["score"] >= threshold:
-            band_start = min(band_start, s_mins)
-
-    # Walk forwards
-    for sample in sorted(all_samples, key=lambda s: s["instant"]):
-        s_date, s_time = sample["instant"].split(" ")
-        if s_date != best_date:
-            continue
-        s_mins = _hhmm_to_mins(s_time)
-        if s_mins < best_mins:
-            continue
-        if s_mins - best_mins > 5:
-            break
-        if sample["score"] >= threshold:
-            band_end = max(band_end, s_mins)
-
-    best_window = {
-        "start": _mins_to_hhmm(band_start),
-        # band_end is the last qualifying minute; +1 yields an EXCLUSIVE end
-        # (the first non-qualifying minute), so the interval is [start, end).
-        "end": _mins_to_hhmm(band_end + 1),
-        "label": f"Best window for {activity}",
-    }
+    # score >= 0.85 * best_score and within ±5 minutes of best_instant.
+    # Refactored to _tolerance_window for reuse by alternatives.
+    best_window = _tolerance_window(best, all_samples, f"Best window for {activity}")
 
     # Enrich only the samples we return (best + up to 20), never all candidates.
     returned = ranked[:20]
     for _s in returned:
         _enrich_sample(_s)
 
+    # Diversified alternatives: up to MAX_ALTERNATIVES non-adjacent instants.
+    alt_recs = _select_alternatives(ranked, best, score_key="score")
+    for a in alt_recs:
+        _enrich_sample(a)            # ensures score_100/band present
+    alternatives = [{
+        "instant": a["instant"],
+        "score": round(a["score"], 4),
+        "score_100": a["score_100"],
+        "band": a["band"],
+        "window": _tolerance_window(a, all_samples, "Alternative window", "score"),
+    } for a in alt_recs]
+
     return {
         "best_instant": best,
         "best_window": best_window,
         "top_samples": returned,
         "clearance_summary": _build_clearance_summary(best, activity),
+        "alternatives": alternatives,
     }
 
 
@@ -1215,6 +1275,7 @@ def scan_family_lagna_shuddhi(
             "consensus_quality": "best_effort",
             "compromised_members": [],
             "clearance_summary": None,
+            "alternatives": [],
         }
 
     # Stable sort key: (-min_score, -mean_score, instant_str)
@@ -1277,6 +1338,23 @@ def scan_family_lagna_shuddhi(
     for _md in best["per_member"]:
         _enrich_sample(_md)
 
+    # Diversified alternatives — window=None for family (per contract).
+    # Pool matches the recommendation's gate: a strict consensus draws
+    # alternatives only from balam-passing records (best is strict_records[0],
+    # so no alternative can outscore it); a best_effort consensus uses the full
+    # hard-gated pool (best is all_records[0] — again the pool maximum). Every
+    # record in the chosen pool shares the consensus gate outcome, so
+    # consensus_quality is the correct per-alternative band quality.
+    alt_pool = strict_records if consensus_quality == "strict" else all_records
+    alt_recs = _select_alternatives(alt_pool, best, score_key="min_score")
+    alternatives = [{
+        "instant": a["instant"],
+        "score": round(a["min_score"], 4),
+        "score_100": round(a["min_score"] * 100),
+        "band": _family_band(a["min_score"], consensus_quality, a["per_member"]),
+        "window": None,
+    } for a in alt_recs]
+
     return {
         "instant": best_instant_str,
         "best_window": best_window,
@@ -1291,4 +1369,5 @@ def scan_family_lagna_shuddhi(
             + _build_clearance_summary(best["per_member"][0], activity)
             if best.get("per_member") else None
         ),
+        "alternatives": alternatives,
     }

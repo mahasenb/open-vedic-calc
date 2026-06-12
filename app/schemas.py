@@ -273,6 +273,14 @@ class TimeWindow(BaseModel):
     label: str | None = None
 
 
+class LagnaShuddhiAlternative(BaseModel):
+    instant: str                         # "YYYY-MM-DD HH:MM"
+    score: float
+    score_100: int
+    band: Literal["Excellent", "Good", "Fair", "Avoid"]
+    window: TimeWindow | None = None     # present for solo; None for family
+
+
 class PanchangaInfo(BaseModel):
     # tithi/karana names may be None when their pyjhora computation fails (e.g. a
     # ZeroDivisionError at an exact phase boundary); the day is marked degraded.
@@ -388,6 +396,7 @@ class LagnaShuddhiResponse(BaseModel):
     best_window: TimeWindow | None          # tolerance band around best_instant
     top_samples: list[LagnaShuddhiSample]   # up to 20 best-scored samples
     clearance_summary: str | None = None    # plain-English why-this-window summary
+    alternatives: list[LagnaShuddhiAlternative] = []
 
 
 # --- Family (multi-person) Lagna Shuddhi ---
@@ -427,6 +436,7 @@ class FamilyLagnaShuddhiResponse(BaseModel):
     consensus_quality: Literal["strict", "best_effort"]
     compromised_members: list[str]              # names of members with bad balam (best_effort only)
     clearance_summary: str | None = None        # plain-English why-this-window summary
+    alternatives: list[LagnaShuddhiAlternative] = []
 
 
 # --- Compatibility ---

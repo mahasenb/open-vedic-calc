@@ -15,6 +15,7 @@ from .schemas import (
     RashiDrishti, RashiDrishtiPlanet, InduLagnaOut, SphutaOut,
     MuhurtRequest, MuhurtResponse,
     LagnaShuddhiRequest, LagnaShuddhiResponse, LagnaShuddhiSample, TimeWindow,
+    LagnaShuddhiAlternative,
     FamilyLagnaShuddhiRequest, FamilyLagnaShuddhiResponse, FamilyMemberSample,
     CompatRequest, CompatResponse, KutaScore, MangalDoshaResult, DashaOverlap,
     ProfileResponse,
@@ -421,6 +422,7 @@ def lagna_shuddhi_endpoint(req: LagnaShuddhiRequest):
         best_window=TimeWindow(**best_window_raw) if best_window_raw else None,
         top_samples=[_to_sample(d) for d in top_raw],
         clearance_summary=result.get("clearance_summary"),
+        alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
     )
 
 
@@ -478,6 +480,7 @@ def family_lagna_shuddhi_endpoint(req: FamilyLagnaShuddhiRequest):
         consensus_quality=result["consensus_quality"],
         compromised_members=result["compromised_members"],
         clearance_summary=result.get("clearance_summary"),
+        alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
     )
 
 
