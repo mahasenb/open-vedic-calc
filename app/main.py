@@ -11,7 +11,8 @@ from .schemas import (
     ChartResponse, StrengthResponse, DashaPeriodOut,
     YogaOut, TransitResponse, TransitPlanetPlacement, GocharaVedha,
     SpecialPointsResponse, JaiminiKaraka, SourceInfo,
-    PlanetPlacement, ShadbalaItem, BhavabalaItem,
+    PlanetPlacement, ShadbalaItem, BhavabalaItem, VimshopakaItem,
+    RashiDrishti, RashiDrishtiPlanet, InduLagnaOut, SphutaOut,
     MuhurtRequest, MuhurtResponse,
     LagnaShuddhiRequest, LagnaShuddhiResponse, LagnaShuddhiSample, TimeWindow,
     FamilyLagnaShuddhiRequest, FamilyLagnaShuddhiResponse, FamilyMemberSample,
@@ -24,6 +25,8 @@ from bphs_core import dashas as dashas_mod
 from bphs_core import yogas as yogas_mod
 from bphs_core import transits as transits_mod
 from bphs_core import special_points as sp_mod
+from bphs_core import vimshopaka as vimshopaka_mod
+from bphs_core import rashi_drishti as rashi_drishti_mod
 from bphs_core import muhurat as muhurat_mod
 from bphs_core import lagna_shuddhi as lagna_shuddhi_mod
 from bphs_core import utils
@@ -139,11 +142,23 @@ def _chart_to_response(s: ChartSnapshot) -> ChartResponse:
     def to_list(varga: dict) -> list[PlanetPlacement]:
         return [_pd_to_schema(pd) for pd in varga.values()]
 
+    rashi_drishti = RashiDrishti(
+        sign_table=rashi_drishti_mod.get_rashi_drishti_table(),
+        per_planet=[
+            RashiDrishtiPlanet(
+                planet=p.planet, sign=p.sign,
+                aspects_signs=p.aspects_signs, aspects_planets=p.aspects_planets,
+            )
+            for p in rashi_drishti_mod.get_planet_rashi_drishti(s)
+        ],
+    )
+
     return ChartResponse(
         lagna=s.lagna, lagna_lord=s.lagna_lord,
         yoga_karaka=yogas_mod.get_yoga_karaka_planet(s),
         ayanamsa_value=s.ayanamsa_value,
         bhava_chalit_cusps=[round(c, 6) for c in s.chalit_cusps],
+        rashi_drishti=rashi_drishti,
         rasi=to_list(s.rasi_chart),
         hora=to_list(s.hora_chart),
         drekkana=to_list(s.drekkana_chart),
@@ -190,10 +205,18 @@ def strength_endpoint(p: PersonalDataIn):
     ]
     akv = strength_mod.compute_ashtakavarga(s)
 
+    vimshopaka = {
+        r.planet: VimshopakaItem(
+            total=r.total, grade=r.grade, contributions=r.contributions,
+        )
+        for r in vimshopaka_mod.compute_all_vimshopaka(s)
+    }
+
     return StrengthResponse(
         shadbala=shadbala,
         bhavabala=bhavabala,
         ashtakavarga=akv,
+        vimshopaka=vimshopaka,
     )
 
 
@@ -289,12 +312,32 @@ def transits_endpoint(req: TransitRequest):
 def special_points_endpoint(p: PersonalDataIn):
     _, s = _get_chart(p)
     karakas_raw = sp_mod.get_jaimini_karakas(s)
+
+    indu = sp_mod.get_indu_lagna(s)
+    beeja = sp_mod.get_beeja_sphuta(s)
+    kshetra = sp_mod.get_kshetra_sphuta(s)
+
+    def _sphuta_out(sp) -> SphutaOut:
+        return SphutaOut(
+            longitude=sp.longitude, sign=sp.sign, navamsa_sign=sp.navamsa_sign,
+            sign_parity=sp.sign_parity, navamsa_parity=sp.navamsa_parity,
+            strength=sp.strength, sign_lord=sp.sign_lord,
+            sign_lord_dignity=sp.sign_lord_dignity,
+        )
+
     return SpecialPointsResponse(
         arudha_lagna=sp_mod.get_arudha_lagna(s).sign,
         upapada=sp_mod.get_upapada(s).sign,
         atmakaraka=sp_mod.get_atmakaraka(s),
         karakamsa=sp_mod.get_karakamsa(s).sign,
         jaimini_karakas=[JaiminiKaraka(**k) for k in karakas_raw],
+        indu_lagna=InduLagnaOut(
+            sign=indu.sign, house_from_lagna=indu.house_from_lagna,
+            occupants=indu.occupants, lord=indu.lord,
+            lord_dignity=indu.lord_dignity, lord_house=indu.lord_house,
+        ),
+        beeja_sphuta=_sphuta_out(beeja),
+        kshetra_sphuta=_sphuta_out(kshetra),
     )
 
 

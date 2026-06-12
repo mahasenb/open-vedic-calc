@@ -2,8 +2,11 @@ from dataclasses import dataclass
 from .chart import ChartSnapshot, PlanetData
 from . import utils
 
+# Classical BPHS minimum Shadbala requirements in rupas (shashtiamsas ÷ 60):
+# Sun 390/60=6.5, Moon 360/60=6.0, Mars 300/60=5.0, Mercury 420/60=7.0,
+# Jupiter 390/60=6.5, Venus 330/60=5.5, Saturn 300/60=5.0
 SHADBALA_MINIMUMS: dict[str, float] = {
-    "Sun": 5.0, "Moon": 6.0, "Mars": 5.0,
+    "Sun": 6.5, "Moon": 6.0, "Mars": 5.0,
     "Mercury": 7.0, "Jupiter": 6.5, "Venus": 5.5, "Saturn": 5.0,
 }
 

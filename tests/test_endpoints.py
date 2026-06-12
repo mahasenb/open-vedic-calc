@@ -157,6 +157,28 @@ def test_chart_exposes_bhava_chalit_secondary():
         )
 
 
+def test_chart_includes_rashi_drishti():
+    """Additive Jaimini sign-aspect block: full 12-sign table + per-planet view."""
+    r = client.post("/v1/chart", json=SAMPLE_A)
+    assert r.status_code == 200
+    rd = r.json()["rashi_drishti"]
+    table = rd["sign_table"]
+    assert set(table) == _VALID_SIGNS
+    for sign, aspected in table.items():
+        assert len(aspected) == 3
+        assert sign not in aspected
+        # symmetric
+        for other in aspected:
+            assert sign in table[other]
+    # per-planet entries cover all nine planets in the rasi chart
+    per_planet = rd["per_planet"]
+    assert len(per_planet) == 9
+    for entry in per_planet:
+        assert entry["sign"] in _VALID_SIGNS
+        assert sorted(entry["aspects_signs"]) == sorted(table[entry["sign"]])
+        assert entry["planet"] not in entry["aspects_planets"]
+
+
 def test_chart_placidus_fallback_logs_warning(monkeypatch, caplog):
     """FIX #6: when swe.houses raises on b'P', the equatorial fallback is used
     and a 'placidus_fallback_equatorial' warning is emitted. Chart still returns 200."""
@@ -197,6 +219,21 @@ def test_strength_sample_a():
     for item in body["shadbala"]:
         assert "total_bala" in item
         assert isinstance(item["is_below_minimum"], bool)
+
+
+def test_strength_includes_vimshopaka():
+    r = client.post("/v1/strength", json=SAMPLE_A)
+    assert r.status_code == 200
+    vim = r.json()["vimshopaka"]
+    # Additive field: the seven grahas, no nodes.
+    assert set(vim) == {"Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"}
+    for planet, item in vim.items():
+        assert 0.0 <= item["total"] <= 20.0
+        assert item["grade"] in ("very weak", "weak", "good", "excellent")
+        # ten Dashavarga columns incl. the newly-wired D16
+        assert set(item["contributions"]) == {
+            "D1", "D2", "D3", "D7", "D9", "D10", "D12", "D16", "D30", "D60"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +310,33 @@ def test_special_points_sample_a():
     assert body["atmakaraka"] in [
         "Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"
     ]
+
+
+def test_special_points_includes_indu_and_sphutas():
+    r = client.post("/v1/special-points", json=SAMPLE_A)
+    assert r.status_code == 200
+    body = r.json()
+
+    indu = body["indu_lagna"]
+    assert indu["sign"] in _VALID_SIGNS
+    assert 1 <= indu["house_from_lagna"] <= 12
+    assert indu["lord"] in [
+        "Sun","Moon","Mars","Mercury","Jupiter","Venus","Saturn"
+    ]
+    assert isinstance(indu["occupants"], list)
+
+    for key, fav in (("beeja_sphuta", "odd"), ("kshetra_sphuta", "even")):
+        sp = body[key]
+        assert 0.0 <= sp["longitude"] < 360.0
+        assert sp["sign"] in _VALID_SIGNS
+        assert sp["navamsa_sign"] in _VALID_SIGNS
+        assert sp["sign_parity"] in ("odd", "even")
+        assert sp["navamsa_parity"] in ("odd", "even")
+        assert sp["strength"] in ("strong", "middling", "weak")
+        # strength consistent with the favourable parity for this sphuta
+        hits = (sp["sign_parity"] == fav) + (sp["navamsa_parity"] == fav)
+        expected = {2: "strong", 1: "middling", 0: "weak"}[hits]
+        assert sp["strength"] == expected
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,20 @@ class PlanetPlacement(BaseModel):
     pada_lord: str | None = None
 
 
+class RashiDrishtiPlanet(BaseModel):
+    planet: str
+    sign: str
+    aspects_signs: list[str] = []
+    aspects_planets: list[str] = []
+
+
+class RashiDrishti(BaseModel):
+    # Classical sign -> [aspected signs] map (full 12-sign matrix).
+    sign_table: dict[str, list[str]] = {}
+    # Per-planet view: which signs/planets each planet casts rashi drishti onto.
+    per_planet: list[RashiDrishtiPlanet] = []
+
+
 class ChartResponse(BaseModel):
     lagna: str
     lagna_lord: str
@@ -66,6 +80,8 @@ class ChartResponse(BaseModel):
     yoga_karaka: str = ""
     ayanamsa_value: float
     bhava_chalit_cusps: list[float] = []   # 12 sidereal Placidus cusp longitudes (Bhava-Chalit)
+    # Additive: Jaimini sign aspects (deterministic).
+    rashi_drishti: RashiDrishti | None = None
     rasi: list[PlanetPlacement]
     hora: list[PlanetPlacement]          # D2 — wealth/resources
     drekkana: list[PlanetPlacement]      # D3 — siblings/vitality
@@ -101,10 +117,18 @@ class BhavabalaItem(BaseModel):
     rank: str
 
 
+class VimshopakaItem(BaseModel):
+    total: float                       # 0-20
+    grade: str                         # very weak | weak | good | excellent
+    contributions: dict[str, float]    # {varga_label (D1..D60): points}
+
+
 class StrengthResponse(BaseModel):
     shadbala: list[ShadbalaItem]
     bhavabala: list[BhavabalaItem]
     ashtakavarga: dict
+    # Additive: Vimshopaka Bala (Dashavarga, 0-20) keyed by planet name.
+    vimshopaka: dict[str, VimshopakaItem] = {}
 
 
 # --- Dashas ---
@@ -174,12 +198,36 @@ class JaiminiKaraka(BaseModel):
     domain: str
 
 
+class InduLagnaOut(BaseModel):
+    sign: str
+    house_from_lagna: int
+    occupants: list[str] = []
+    lord: str
+    lord_dignity: str
+    lord_house: int
+
+
+class SphutaOut(BaseModel):
+    longitude: float
+    sign: str
+    navamsa_sign: str
+    sign_parity: str               # odd | even
+    navamsa_parity: str            # odd | even
+    strength: str                  # strong | middling | weak
+    sign_lord: str
+    sign_lord_dignity: str
+
+
 class SpecialPointsResponse(BaseModel):
     arudha_lagna: str
     upapada: str
     atmakaraka: str
     karakamsa: str
     jaimini_karakas: list[JaiminiKaraka] = []
+    # Additive: wealth ascendant + fertility points.
+    indu_lagna: InduLagnaOut | None = None
+    beeja_sphuta: SphutaOut | None = None
+    kshetra_sphuta: SphutaOut | None = None
 
 
 # --- Profile (Phase 2) ---
