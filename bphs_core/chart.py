@@ -54,6 +54,10 @@ class ChartSnapshot:
     lagna: str
     lagna_lord: str
     ayanamsa_value: float
+    # D16 (Kalamsa) — required by Vimshopaka Dashavarga. Defaulted (added after the
+    # other vargas) so existing ChartSnapshot constructors that predate D16 stay
+    # valid; the real Chart builder always supplies it by keyword.
+    shodasamsa_chart: dict[str, PlanetData] = field(default_factory=dict)   # D16
     house_cusps: list[float] = field(default_factory=list)   # whole-sign cusps (sign starts from lagna)
     chalit_cusps: list[float] = field(default_factory=list)   # sidereal Placidus cusps (Bhava-Chalit)
     jd: float = 0.0
@@ -242,6 +246,7 @@ class Chart:
             navamsa_chart=_build_varga_chart(charts.navamsa_chart(rasi_positions), retro_planets),
             decamsa_chart=_build_varga_chart(charts.dasamsa_chart(rasi_positions), retro_planets),
             dwadasamsa_chart=_build_varga_chart(charts.dwadasamsa_chart(rasi_positions), retro_planets),
+            shodasamsa_chart=_build_varga_chart(charts.shodasamsa_chart(rasi_positions), retro_planets),
             chaturvimsa_chart=_build_varga_chart(charts.chaturvimsamsa_chart(rasi_positions), retro_planets),
             trimshamsa_chart=_build_varga_chart(charts.trimsamsa_chart(rasi_positions), retro_planets),
             saptamsa_chart=_build_varga_chart(charts.saptamsa_chart(rasi_positions), retro_planets),
