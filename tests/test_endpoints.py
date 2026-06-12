@@ -425,6 +425,10 @@ def test_lagna_shuddhi_structure():
     assert isinstance(body["top_samples"], list)
     assert len(body["top_samples"]) <= 20
 
+    assert "alternatives" in body
+    assert isinstance(body["alternatives"], list)
+    assert len(body["alternatives"]) <= 5
+
 
 def test_lagna_shuddhi_returns_minute_resolution():
     r = client.post("/v1/muhurat/lagna-shuddhi", json=_LAGNA_SHUDDHI_REQ)
@@ -572,6 +576,10 @@ def test_family_lagna_shuddhi_structure():
     assert isinstance(body["score"], float)
     assert 0.0 <= body["score"] <= 1.0
     assert "clearance_summary" in body
+
+    assert "alternatives" in body
+    assert isinstance(body["alternatives"], list)
+    assert len(body["alternatives"]) <= 5
 
 
 def test_family_lagna_shuddhi_per_member_fields():
