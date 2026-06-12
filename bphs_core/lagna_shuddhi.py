@@ -835,10 +835,12 @@ def _select_alternatives(ranked: list[dict], best: dict,
                          score_key: str = "score") -> list[dict]:
     """Pick up to MAX_ALTERNATIVES diversified records from a score-desc ranked list.
 
-    `ranked` MUST already be sorted by (score desc, instant asc) — the same order
-    the caller computed `best` from (ranked[0] == best for solo; for family the
-    caller passes the (-min_score,-mean_score,instant)-sorted all_records and
-    score_key='min_score').
+    `ranked` MUST be sorted descending by the caller's score key with a
+    deterministic tie-break, and `best` MUST be `ranked[0]` — so no alternative
+    can outscore the recommendation. Solo sorts by (-score, instant); family
+    passes its gate-matched pool sorted by (-min_score, -mean_score, instant)
+    with score_key='min_score' (mean_score is intentionally a finer tie-break
+    than instant-only ordering).
 
     Diversification rule (deterministic):
       * never include `best` itself
@@ -1010,8 +1012,9 @@ def scan_lagna_shuddhi(
             "alternatives": [],
         }
 
-    # Sort by score descending
-    ranked = sorted(all_samples, key=lambda s: s["score"], reverse=True)
+    # Sort by score descending, instant-ascending tie-break — explicit so the
+    # contracted alternatives ordering never depends on insertion order.
+    ranked = sorted(all_samples, key=lambda s: (-s["score"], s["instant"]))
     best = ranked[0]
 
     # Tolerance band: contiguous run of samples around best_instant where
@@ -1336,20 +1339,19 @@ def scan_family_lagna_shuddhi(
         _enrich_sample(_md)
 
     # Diversified alternatives — window=None for family (per contract).
-    # _select_alternatives and this comprehension live here so the
-    # _passes_balam_gate closure (defined above) remains in scope.
-    alt_recs = _select_alternatives(all_records, best, score_key="min_score")
+    # Pool matches the recommendation's gate: a strict consensus draws
+    # alternatives only from balam-passing records (best is strict_records[0],
+    # so no alternative can outscore it); a best_effort consensus uses the full
+    # hard-gated pool (best is all_records[0] — again the pool maximum). Every
+    # record in the chosen pool shares the consensus gate outcome, so
+    # consensus_quality is the correct per-alternative band quality.
+    alt_pool = strict_records if consensus_quality == "strict" else all_records
+    alt_recs = _select_alternatives(alt_pool, best, score_key="min_score")
     alternatives = [{
         "instant": a["instant"],
         "score": round(a["min_score"], 4),
         "score_100": round(a["min_score"] * 100),
-        # Recompute consensus_quality per alternative from its own balam gate:
-        # a gate-failing alternative is best_effort, capping its band at Fair.
-        "band": _family_band(
-            a["min_score"],
-            "strict" if _passes_balam_gate(a)[0] else "best_effort",
-            a["per_member"],
-        ),
+        "band": _family_band(a["min_score"], consensus_quality, a["per_member"]),
         "window": None,
     } for a in alt_recs]
 

@@ -593,6 +593,42 @@ def test_family_alternatives_same_date_separation():
         accepted.append((a_date, a_m))
 
 
+def test_family_alternatives_never_outscore_best():
+    """Alternatives come from the same gated pool as the recommendation
+    (strict pool when consensus is strict), so none may carry a higher
+    score than the consensus best."""
+    result = scan_family_lagna_shuddhi(
+        members=[
+            {
+                "name": "member_a",
+                "lat": SAMPLE_A["latitude"],
+                "lon": SAMPLE_A["longitude"],
+                "tz_offset": SAMPLE_A["timezone_offset_hours"],
+                "birth_nakshatra": None,
+                "birth_moon_sign": None,
+            },
+            {
+                "name": "member_b",
+                "lat": SAMPLE_B["latitude"],
+                "lon": SAMPLE_B["longitude"],
+                "tz_offset": SAMPLE_B["timezone_offset_hours"],
+                "birth_nakshatra": None,
+                "birth_moon_sign": None,
+            },
+        ],
+        start_date="2026-06-15",
+        end_date="2026-06-17",
+        activity="generic",
+        step_seconds=60,
+    )
+    if result["instant"] is None:
+        pytest.skip("no best instant")
+    for a in result["alternatives"]:
+        assert a["score"] <= result["score"] + 1e-9, (
+            f"Alternative {a['instant']} outscores best: {a['score']} > {result['score']}"
+        )
+
+
 def test_family_alternatives_band_field():
     """Each family alternative must have a valid band field."""
     result = scan_family_lagna_shuddhi(
