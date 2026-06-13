@@ -23,9 +23,9 @@ class PersonalDataIn(BaseModel):
     birth_date: date
     birth_time: time
     birth_place: str
-    latitude: float
-    longitude: float
-    timezone_offset_hours: float
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
 
 
 class DashaRequest(PersonalDataIn):
@@ -258,9 +258,9 @@ class MuhurtRequest(BaseModel):
     birth_date: date
     birth_time: time
     birth_place: str
-    latitude: float
-    longitude: float
-    timezone_offset_hours: float
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
     start_date: IsoDateStr
     end_date: IsoDateStr
 
@@ -341,9 +341,9 @@ class LagnaShuddhiRequest(BaseModel):
     birth_date: date
     birth_time: time
     birth_place: str
-    latitude: float
-    longitude: float
-    timezone_offset_hours: float
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
     start_date: IsoDateStr
     end_date: IsoDateStr
     activity_category: ActivityCategory = "generic"
@@ -406,9 +406,9 @@ class FamilyMember(BaseModel):
     birth_date: date
     birth_time: time
     birth_place: str
-    latitude: float
-    longitude: float
-    timezone_offset_hours: float
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
 
 
 class FamilyLagnaShuddhiRequest(BaseModel):
