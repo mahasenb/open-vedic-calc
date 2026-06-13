@@ -157,6 +157,44 @@ class TestAuthBranches:
         r = anon_client.post("/v1/chart", json=SAMPLE_A)
         assert r.status_code == 401
 
+    def test_dedicated_header_accepted(self):
+        """X-Calc-Service-Token with the correct raw token → 200 (preferred path)."""
+        dedicated_client = TestClient(
+            app, headers={"X-Calc-Service-Token": "test"}
+        )
+        r = dedicated_client.post("/v1/chart", json=SAMPLE_A)
+        assert r.status_code == 200
+
+    def test_legacy_bearer_still_accepted(self):
+        """Authorization: Bearer <token> still works for backward compatibility."""
+        legacy_client = TestClient(
+            app, headers={"Authorization": "Bearer test"}
+        )
+        r = legacy_client.post("/v1/chart", json=SAMPLE_A)
+        assert r.status_code == 200
+
+    def test_wrong_dedicated_header_rejected(self):
+        """Wrong value in X-Calc-Service-Token with no Authorization → 401."""
+        bad_dedicated = TestClient(
+            app, headers={"X-Calc-Service-Token": "wrong"}
+        )
+        r = bad_dedicated.post("/v1/chart", json=SAMPLE_A)
+        assert r.status_code == 401
+
+    def test_wrong_both_headers_rejected(self):
+        """Wrong token in both headers → 401."""
+        bad_both = TestClient(app, headers={
+            "X-Calc-Service-Token": "wrong",
+            "Authorization": "Bearer wrong",
+        })
+        r = bad_both.post("/v1/chart", json=SAMPLE_A)
+        assert r.status_code == 401
+
+    def test_neither_header_present_rejected(self):
+        """No dedicated header and no Authorization header → 401."""
+        r = anon_client.post("/v1/strength", json=SAMPLE_A)
+        assert r.status_code == 401
+
 
 # ===========================================================================
 # /source – git failure branch (commit = "unknown")

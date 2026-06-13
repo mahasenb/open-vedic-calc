@@ -36,7 +36,25 @@ if _TOKEN_REQUIRED and not os.environ.get("CALC_SERVICE_TOKEN", ""):
     )
 
 
-def require_token(authorization: str = Header(default="")) -> None:
+def require_token(
+    x_calc_service_token: str = Header(default=""),
+    authorization: str = Header(default=""),
+) -> None:
+    """Accept the app-layer token from EITHER:
+
+    - ``X-Calc-Service-Token: <token>``  (preferred; raw token, no prefix), OR
+    - ``Authorization: Bearer <token>``  (legacy; kept for backward-compatible
+      rollout while callers migrate).
+
+    Both comparisons are always evaluated via ``hmac.compare_digest`` before any
+    decision is made, preventing a timing oracle that would otherwise reveal
+    which header was used.
+
+    Rationale: when Cloud Run IAM authentication is enabled, the Google OIDC
+    identity token occupies ``Authorization: Bearer <id_token>`` and Cloud Run
+    validates it before the request reaches the container.  The app-layer secret
+    must therefore travel in a separate header so the two tokens do not collide.
+    """
     expected = os.environ.get("CALC_SERVICE_TOKEN", "")
     if not expected:
         # Only reachable in an insecure env (the import-time guard blocks the
@@ -51,7 +69,14 @@ def require_token(authorization: str = Header(default="")) -> None:
             "Set CALC_SERVICE_TOKEN to enable authentication."
         )
         return
-    if not hmac.compare_digest(authorization, f"Bearer {expected}"):
+
+    # Evaluate BOTH comparisons unconditionally so that the accept/reject
+    # decision cannot be inferred from response timing (no early-return between
+    # the two compare_digest calls).
+    dedicated_ok = hmac.compare_digest(x_calc_service_token, expected)
+    legacy_ok = hmac.compare_digest(authorization, f"Bearer {expected}")
+
+    if not (dedicated_ok or legacy_ok):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing bearer token",
