@@ -88,6 +88,13 @@ _ALLOWED_ORIGINS = [o for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") 
 
 MAX_MUHURAT_DAYS = int(os.environ.get("MAX_MUHURAT_DAYS", "365"))
 MAX_LAGNA_SHUDDHI_DAYS = int(os.environ.get("MAX_LAGNA_SHUDDHI_DAYS", "365"))
+# Vimshottari is a 120-year (43,830-day) cycle.  The cap must be large enough
+# to pass a full-life request (birth → birth+120y) without truncation.  47,000
+# days (~128.6 years) gives the 120-year cycle plus headroom for the elapsed-
+# fraction back-dating (up to ~20 years × 365.25 days).  This is intentionally
+# NOT the 365-day muhurat value — a sub-120-year cap would reject every
+# full-life dasha request.
+MAX_DASHA_DAYS = int(os.environ.get("MAX_DASHA_DAYS", "47000"))
 
 app = FastAPI(
     title="Open Vedic Calc",
@@ -223,9 +230,21 @@ def strength_endpoint(p: PersonalDataIn):
 
 @app.post("/v1/dashas", response_model=list[DashaPeriodOut], dependencies=AUTH)
 def dashas_endpoint(req: DashaRequest):
-    _, s = _get_chart(req)
     start = datetime.strptime(req.from_date, "%Y-%m-%d")
     end = datetime.strptime(req.to_date, "%Y-%m-%d")
+    if end < start:
+        raise HTTPException(status_code=422, detail="to_date must be on or after from_date")
+    # Cap measured from birth date, not from_date.  The real cost driver in
+    # vimshottari_mahadashas is cycle_count, which scales with (to_date - BIRTH),
+    # not (to_date - from_date).  A narrow far-future window (e.g. 9900→9999) with
+    # a normal birth can still force dozens of cycles from birth before window-
+    # filtering; capping from birth directly bounds cycle_count to ≈3 regardless
+    # of from_date.  Birth→birth+120y is 43,830 days < 47,000, so every legitimate
+    # full-life request still passes.
+    birth_dt = datetime.combine(req.birth_date, datetime.min.time())
+    if (end - birth_dt).days > MAX_DASHA_DAYS:
+        raise HTTPException(status_code=422, detail=f"Date range exceeds {MAX_DASHA_DAYS} days")
+    _, s = _get_chart(req)
     periods = dashas_mod.get_dasha_timeline(s, start, end, req.systems)
     return [
         DashaPeriodOut(
