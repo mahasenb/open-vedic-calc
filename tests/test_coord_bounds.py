@@ -29,11 +29,11 @@ from tests.conftest import SAMPLE_A
 
 client = TestClient(
     app,
-    headers={"Authorization": "Bearer test"},
+    headers={"X-Calc-Service-Token": "test"},
     raise_server_exceptions=False,
 )
 
-_JSON_HEADERS = {"Content-Type": "application/json", "Authorization": "Bearer test"}
+_JSON_HEADERS = {"Content-Type": "application/json", "X-Calc-Service-Token": "test"}
 
 # ---------------------------------------------------------------------------
 # Base payloads — same shape the existing tests use.

@@ -84,8 +84,8 @@ os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 from app.main import app  # noqa: E402
 from tests.conftest import SAMPLE_A, SAMPLE_B  # noqa: E402
 
-AUTH_HDR = {"Authorization": "Bearer test"}
-BAD_HDR  = {"Authorization": "Bearer wrong"}
+AUTH_HDR = {"X-Calc-Service-Token": "test"}
+BAD_HDR  = {"X-Calc-Service-Token": "wrong"}
 
 client     = TestClient(app, headers=AUTH_HDR)
 bad_client = TestClient(app, headers=BAD_HDR)
@@ -98,7 +98,7 @@ anon_client = TestClient(app)
 # ===========================================================================
 
 class TestAuthBranches:
-    """Exercise all three branches of require_token without mocking."""
+    """Exercise the require_token branches (disabled / valid / rejected) without mocking."""
 
     def test_token_check_disabled_when_env_unset(self):
         """Branch: `if not expected: return` — token check disabled."""
@@ -165,13 +165,15 @@ class TestAuthBranches:
         r = dedicated_client.post("/v1/chart", json=SAMPLE_A)
         assert r.status_code == 200
 
-    def test_legacy_bearer_still_accepted(self):
-        """Authorization: Bearer <token> still works for backward compatibility."""
+    def test_legacy_bearer_no_longer_accepted(self):
+        """Authorization: Bearer <token> is NOT app auth. That header is reserved
+        for the Google OIDC identity token validated by Cloud Run IAM; with no
+        X-Calc-Service-Token present the request is rejected."""
         legacy_client = TestClient(
             app, headers={"Authorization": "Bearer test"}
         )
         r = legacy_client.post("/v1/chart", json=SAMPLE_A)
-        assert r.status_code == 200
+        assert r.status_code == 401
 
     def test_wrong_dedicated_header_rejected(self):
         """Wrong value in X-Calc-Service-Token with no Authorization → 401."""
@@ -181,13 +183,14 @@ class TestAuthBranches:
         r = bad_dedicated.post("/v1/chart", json=SAMPLE_A)
         assert r.status_code == 401
 
-    def test_wrong_both_headers_rejected(self):
-        """Wrong token in both headers → 401."""
-        bad_both = TestClient(app, headers={
+    def test_authorization_bearer_does_not_satisfy_app_auth(self):
+        """An Authorization bearer (the OIDC slot) is not app auth: presenting one
+        alongside a wrong X-Calc-Service-Token is still 401."""
+        c = TestClient(app, headers={
+            "Authorization": "Bearer looks-like-an-oidc-token",
             "X-Calc-Service-Token": "wrong",
-            "Authorization": "Bearer wrong",
         })
-        r = bad_both.post("/v1/chart", json=SAMPLE_A)
+        r = c.post("/v1/chart", json=SAMPLE_A)
         assert r.status_code == 401
 
     def test_neither_header_present_rejected(self):

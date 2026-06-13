@@ -13,7 +13,7 @@ os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 from app.main import app
 from tests.conftest import SAMPLE_A, SAMPLE_B, SAMPLE_C
 
-client = TestClient(app, headers={"Authorization": "Bearer test"})
+client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +667,7 @@ def test_family_lagna_shuddhi_date_range_422():
 
 
 def test_family_lagna_shuddhi_unauthorized_401():
-    bad_client = TestClient(app, headers={"Authorization": "Bearer wrong"})
+    bad_client = TestClient(app, headers={"X-Calc-Service-Token": "wrong"})
     r = bad_client.post("/v1/muhurat/family-lagna-shuddhi", json=_FAMILY_REQ)
     assert r.status_code == 401
 
@@ -778,7 +778,7 @@ def test_compat_deterministic():
 
 
 def test_compat_unauthenticated():
-    bad_client = TestClient(app, headers={"Authorization": "Bearer wrong"})
+    bad_client = TestClient(app, headers={"X-Calc-Service-Token": "wrong"})
     r = bad_client.post("/v1/compat", json=_COMPAT_REQ)
     assert r.status_code == 401
 
@@ -793,7 +793,7 @@ def test_compat_missing_fields():
 # ---------------------------------------------------------------------------
 
 def test_auth_rejected():
-    bad_client = TestClient(app, headers={"Authorization": "Bearer wrong"})
+    bad_client = TestClient(app, headers={"X-Calc-Service-Token": "wrong"})
     r = bad_client.post("/v1/chart", json=SAMPLE_A)
     assert r.status_code == 401
 

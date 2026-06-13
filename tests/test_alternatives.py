@@ -27,7 +27,7 @@ from bphs_core.lagna_shuddhi import (
 )
 from tests.conftest import SAMPLE_A, SAMPLE_B
 
-client = TestClient(app, headers={"Authorization": "Bearer test"})
+client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
 # ---------------------------------------------------------------------------
 # Shared request fixtures
