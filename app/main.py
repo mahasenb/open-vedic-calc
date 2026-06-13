@@ -1,8 +1,12 @@
+import math
 import os
 import subprocess
 from datetime import datetime, time, date, timedelta
+from typing import Any
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import require_token
@@ -108,6 +112,50 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively coerce values that would crash json.dumps into safe forms.
+
+    FastAPI's default RequestValidationError handler includes the raw input
+    and ctx.error values in the error body. These can be:
+    - Non-finite floats (NaN, ±Infinity) — not valid JSON
+    - Python exception objects in the ctx["error"] slot — not JSON-serializable
+
+    Both are converted to their string representation so the 422 response
+    can always be serialized.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return "NaN"
+        if math.isinf(obj):
+            return "Infinity" if obj > 0 else "-Infinity"
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    # Pydantic v2 puts the original exception object in ctx["error"]. The
+    # standard json encoder cannot serialize Exception instances, so stringify.
+    if isinstance(obj, Exception):
+        return str(obj)
+    return obj
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Return a well-formed 422 even when input contains non-finite floats.
+
+    The default FastAPI handler includes the raw input in the error detail,
+    which crashes json.dumps when the input is NaN or ±Infinity. We sanitize
+    before serializing so the 422 is always delivered (never silently becomes
+    a 500 that obscures the schema rejection).
+    """
+    sanitized = _sanitize_for_json(exc.errors())
+    return JSONResponse(status_code=422, content={"detail": sanitized})
+
 
 AUTH = [Depends(require_token)]
 
