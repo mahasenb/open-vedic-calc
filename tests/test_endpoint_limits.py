@@ -206,3 +206,96 @@ def test_family_lagna_shuddhi_sub_minute_step_is_422():
     }
     r = client.post("/v1/muhurat/family-lagna-shuddhi", json=req)
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# /v1/dashas date-range guards (CALC-1 DoS fix)
+# ---------------------------------------------------------------------------
+
+def test_dashas_unbounded_far_future_is_422():
+    """to_date=9999-12-31 must be rejected before any period materialization."""
+    req = {**SAMPLE_A, "from_date": "2000-01-01", "to_date": "9999-12-31",
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 422
+    assert "exceeds" in r.text.lower()
+
+
+def test_dashas_reversed_range_is_422():
+    """to_date before from_date must return 422."""
+    req = {**SAMPLE_A, "from_date": "2030-01-01", "to_date": "2020-01-01",
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 422
+    assert "from_date" in r.text.lower() or "to_date" in r.text.lower()
+
+
+def test_dashas_full_life_120_year_span_returns_mahadashas():
+    """A full Vimshottari cycle (birth → birth+120y, ~43,830 days) must NOT be
+    rejected and must return a non-empty timeline with all 9 mahadashas.
+
+    This is the anti-regression guard against a naive 365-day cap: the 120-year
+    cycle is the legitimate upper bound of a real full-life dasha request."""
+    birth = SAMPLE_A["birth_date"]  # "1950-06-15"
+    from_date = birth
+    # 120 years × 365.25 = 43,830 days; use a round 44,000 to stay comfortably
+    # inside MAX_DASHA_DAYS=47000 while covering the full cycle.
+    from datetime import date, timedelta
+    birth_dt = date.fromisoformat(birth)
+    to_dt = birth_dt + timedelta(days=44000)
+    req = {**SAMPLE_A, "from_date": from_date, "to_date": to_dt.isoformat(),
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 200, f"Full 120-year span must not be rejected: {r.text}"
+    periods = r.json()
+    mahadashas = [p for p in periods if p["level"] == "mahadasha"]
+    assert len(mahadashas) > 0, "No mahadashas returned for full-life span"
+    # All 9 Vimshottari lords should appear over 120 years
+    lords = {p["lord"] for p in mahadashas}
+    assert len(lords) >= 9, f"Expected all 9 dasha lords, got {lords}"
+
+
+def test_dashas_boundary_at_max_passes():
+    """to_date exactly MAX_DASHA_DAYS days from birth must return 200.
+
+    The cap is measured from birth (bounds cycle_count), not from from_date.
+    SAMPLE_A birth is 1950-06-15; birth + 47000 days is still within the
+    legitimate range and must not be rejected."""
+    import app.main as main_mod
+    from datetime import date, timedelta
+    limit = main_mod.MAX_DASHA_DAYS
+    birth_dt = date.fromisoformat(SAMPLE_A["birth_date"])
+    to_dt = birth_dt + timedelta(days=limit)
+    req = {**SAMPLE_A, "from_date": SAMPLE_A["birth_date"], "to_date": to_dt.isoformat(),
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 200, f"Exactly MAX_DASHA_DAYS from birth should pass: {r.text}"
+
+
+def test_dashas_one_over_max_is_422():
+    """to_date at MAX_DASHA_DAYS+1 days from birth must be rejected with 422.
+
+    The cap is measured from birth; from_date is irrelevant to the guard."""
+    import app.main as main_mod
+    from datetime import date, timedelta
+    limit = main_mod.MAX_DASHA_DAYS
+    birth_dt = date.fromisoformat(SAMPLE_A["birth_date"])
+    to_dt = birth_dt + timedelta(days=limit + 1)
+    req = {**SAMPLE_A, "from_date": SAMPLE_A["birth_date"], "to_date": to_dt.isoformat(),
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 422, f"MAX_DASHA_DAYS+1 from birth must be rejected: {r.status_code}"
+
+
+def test_dashas_far_future_narrow_window_is_422():
+    """Far-future narrow window that bypassed the old from_date cap must now be 422.
+
+    An attacker passing from_date=9900-01-01, to_date=9999-12-31 (span < 47000 days)
+    with a normal birth year would force the engine to materialise ~60+ Vimshottari
+    cycles from birth before window-filtering.  The new birth-relative guard catches
+    this: (9999-12-31 - 1950-06-15).days >> MAX_DASHA_DAYS."""
+    req = {**SAMPLE_A, "from_date": "9900-01-01", "to_date": "9999-12-31",
+           "systems": ["vimshottari"]}
+    r = client.post("/v1/dashas", json=req)
+    assert r.status_code == 422, f"Far-future narrow window must be rejected: {r.status_code}"
+    assert "exceeds" in r.text.lower()
