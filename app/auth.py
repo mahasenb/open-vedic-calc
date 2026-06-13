@@ -25,15 +25,42 @@ def _token_required() -> bool:
 # authentication off mid-process.
 _TOKEN_REQUIRED: bool = _token_required()
 
+# A real deployment token is a long random secret. Reject obvious placeholders
+# and anything too short: a guessable/default token (e.g. left at "changeme")
+# is no better than no token at all.
+_MIN_TOKEN_LEN = 16
+_PLACEHOLDER_TOKENS = {
+    "test", "tests", "testing", "changeme", "change-me", "change_me",
+    "secret", "token", "password", "placeholder", "example", "dummy",
+    "calc", "calc-token", "calc-service-token", "your-token-here", "xxx", "todo",
+}
+
+
+def _token_weakness_reason(token: str) -> str | None:
+    """Why *token* is unacceptable for a non-dev deployment, or None if it is fine.
+
+    Pure helper so the policy is unit-testable without process-env gymnastics.
+    """
+    if not token:
+        return "unset"
+    if token.strip().lower() in _PLACEHOLDER_TOKENS:
+        return "a known placeholder value"
+    if len(token) < _MIN_TOKEN_LEN:
+        return f"too short (<{_MIN_TOKEN_LEN} chars)"
+    return None
+
 
 # Fail fast at import (app startup) rather than on the first request: a non-dev
-# deployment with no token is a misconfiguration, not a runtime condition.
-if _TOKEN_REQUIRED and not os.environ.get("CALC_SERVICE_TOKEN", ""):
-    raise RuntimeError(
-        f"CALC_SERVICE_TOKEN is unset in ENVIRONMENT={_environment()!r}. "
-        "The calc-service refuses to start unauthenticated outside "
-        f"{sorted(_INSECURE_ENVS)}. Set CALC_SERVICE_TOKEN."
-    )
+# deployment with a missing OR weak token is a misconfiguration, not a runtime
+# condition. A guessable default would expose every calc endpoint.
+if _TOKEN_REQUIRED:
+    _weakness = _token_weakness_reason(os.environ.get("CALC_SERVICE_TOKEN", ""))
+    if _weakness:
+        raise RuntimeError(
+            f"CALC_SERVICE_TOKEN is {_weakness} in ENVIRONMENT={_environment()!r}. "
+            "The calc-service refuses to start with a missing or weak token outside "
+            f"{sorted(_INSECURE_ENVS)}. Set CALC_SERVICE_TOKEN to a long random secret."
+        )
 
 
 def require_token(
