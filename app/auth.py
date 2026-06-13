@@ -65,22 +65,15 @@ if _TOKEN_REQUIRED:
 
 def require_token(
     x_calc_service_token: str = Header(default=""),
-    authorization: str = Header(default=""),
 ) -> None:
-    """Accept the app-layer token from EITHER:
+    """Validate the app-layer secret carried in ``X-Calc-Service-Token``.
 
-    - ``X-Calc-Service-Token: <token>``  (preferred; raw token, no prefix), OR
-    - ``Authorization: Bearer <token>``  (legacy; kept for backward-compatible
-      rollout while callers migrate).
-
-    Both comparisons are always evaluated via ``hmac.compare_digest`` before any
-    decision is made, preventing a timing oracle that would otherwise reveal
-    which header was used.
-
-    Rationale: when Cloud Run IAM authentication is enabled, the Google OIDC
-    identity token occupies ``Authorization: Bearer <id_token>`` and Cloud Run
-    validates it before the request reaches the container.  The app-layer secret
-    must therefore travel in a separate header so the two tokens do not collide.
+    The token travels in its own header so that ``Authorization`` is reserved
+    exclusively for the Google OIDC identity token: when Cloud Run IAM
+    authentication is enabled, that ``Authorization: Bearer <id_token>`` is
+    validated at the platform edge before the request reaches the container.
+    The two are separate transports — Cloud Run handles identity, this function
+    handles the in-container app secret — so they must never share a header.
     """
     expected = os.environ.get("CALC_SERVICE_TOKEN", "")
     if not expected:
@@ -97,14 +90,8 @@ def require_token(
         )
         return
 
-    # Evaluate BOTH comparisons unconditionally so that the accept/reject
-    # decision cannot be inferred from response timing (no early-return between
-    # the two compare_digest calls).
-    dedicated_ok = hmac.compare_digest(x_calc_service_token, expected)
-    legacy_ok = hmac.compare_digest(authorization, f"Bearer {expected}")
-
-    if not (dedicated_ok or legacy_ok):
+    if not hmac.compare_digest(x_calc_service_token, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing bearer token",
+            detail="Invalid or missing service token",
         )

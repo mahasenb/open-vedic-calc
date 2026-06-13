@@ -16,7 +16,7 @@ os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 from app.main import app
 from tests.conftest import SAMPLE_A, SAMPLE_B, SAMPLE_C
 
-client = TestClient(app, headers={"Authorization": "Bearer test"})
+client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
 
 def test_muhurat_range_exceeding_limit_is_422():
