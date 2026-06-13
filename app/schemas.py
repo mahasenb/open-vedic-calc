@@ -17,12 +17,18 @@ def _validate_iso_date(value: str) -> str:
 # An ISO "YYYY-MM-DD" date carried on the wire as a string, validated on input.
 IsoDateStr = Annotated[str, AfterValidator(_validate_iso_date)]
 
+# The dasha systems the timeline builder actually computes; see get_dasha_timeline.
+DashaSystem = Literal["vimshottari", "yogini"]
+
 
 class PersonalDataIn(BaseModel):
-    name: str
+    # Bounded so an oversized free-text field can't be used to inflate request
+    # size / log volume. name and place are display-only labels here; the
+    # computation keys off the date/time/coordinates.
+    name: str = Field(min_length=1, max_length=120)
     birth_date: date
     birth_time: time
-    birth_place: str
+    birth_place: str = Field(min_length=1, max_length=200)
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
@@ -31,7 +37,13 @@ class PersonalDataIn(BaseModel):
 class DashaRequest(PersonalDataIn):
     from_date: IsoDateStr
     to_date: IsoDateStr
-    systems: list[str] = ["vimshottari"]
+    # Only these two dasha systems are computed (get_dasha_timeline). Restricting
+    # the element type to a Literal rejects unknown values at the boundary instead
+    # of silently dropping them (an unknown system would otherwise be ignored,
+    # yielding a confusingly partial timeline). The length bound stops a huge list
+    # forcing repeated scans. An empty list is still accepted (explicit "no
+    # systems" → empty timeline) to preserve the existing contract.
+    systems: list[DashaSystem] = Field(default_factory=lambda: ["vimshottari"], max_length=2)
 
 
 class TransitRequest(PersonalDataIn):

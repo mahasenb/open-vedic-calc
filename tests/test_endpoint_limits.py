@@ -299,3 +299,52 @@ def test_dashas_far_future_narrow_window_is_422():
     r = client.post("/v1/dashas", json=req)
     assert r.status_code == 422, f"Far-future narrow window must be rejected: {r.status_code}"
     assert "exceeds" in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# /v1/dashas request-field bounds (CALC-3 string caps, CALC-4 systems Literal)
+# ---------------------------------------------------------------------------
+
+def _dasha_req(**overrides):
+    base = {**SAMPLE_A, "from_date": "2000-01-01", "to_date": "2010-01-01",
+            "systems": ["vimshottari"]}
+    base.update(overrides)
+    return base
+
+
+def test_dashas_overlong_name_is_422():
+    r = client.post("/v1/dashas", json=_dasha_req(name="x" * 121))
+    assert r.status_code == 422
+
+
+def test_dashas_empty_name_is_422():
+    r = client.post("/v1/dashas", json=_dasha_req(name=""))
+    assert r.status_code == 422
+
+
+def test_dashas_overlong_birth_place_is_422():
+    r = client.post("/v1/dashas", json=_dasha_req(birth_place="p" * 201))
+    assert r.status_code == 422
+
+
+def test_dashas_unknown_system_is_422():
+    """An unknown dasha system is rejected at the boundary, not silently dropped."""
+    r = client.post("/v1/dashas", json=_dasha_req(systems=["kalachakra"]))
+    assert r.status_code == 422
+
+
+def test_dashas_too_many_systems_is_422():
+    r = client.post("/v1/dashas", json=_dasha_req(systems=["vimshottari", "yogini", "vimshottari"]))
+    assert r.status_code == 422
+
+
+def test_dashas_yogini_system_accepted():
+    r = client.post("/v1/dashas", json=_dasha_req(systems=["yogini"]))
+    assert r.status_code == 200, r.text
+
+
+def test_dashas_empty_systems_still_accepted():
+    """Explicit empty systems remains a valid request (contract preserved)."""
+    r = client.post("/v1/dashas", json=_dasha_req(systems=[]))
+    assert r.status_code == 200, r.text
+    assert r.json() == []
