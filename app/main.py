@@ -222,6 +222,7 @@ def _chart_to_response(s: ChartSnapshot) -> ChartResponse:
         navamsa=to_list(s.navamsa_chart),
         decamsa=to_list(s.decamsa_chart),
         dwadasamsa=to_list(s.dwadasamsa_chart),
+        shodasamsa=to_list(s.shodasamsa_chart),
         chaturvimsa=to_list(s.chaturvimsa_chart),
         trimshamsa=to_list(s.trimshamsa_chart),
         shashtyamsa=to_list(s.shashtyamsa_chart),
