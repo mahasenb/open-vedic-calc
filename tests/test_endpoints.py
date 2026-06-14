@@ -98,11 +98,11 @@ def test_chart_sample_a_structure():
 
 
 def test_chart_new_vargas():
-    """D2/D3/D7/D12 must be present and well-formed."""
+    """D2/D3/D7/D12/D16 must be present and well-formed."""
     r = client.post("/v1/chart", json=SAMPLE_A)
     assert r.status_code == 200
     body = r.json()
-    for varga in ("hora", "drekkana", "saptamsa", "dwadasamsa"):
+    for varga in ("hora", "drekkana", "saptamsa", "dwadasamsa", "shodasamsa"):
         assert varga in body, f"Missing varga: {varga}"
         assert len(body[varga]) == 9, f"{varga} must have 9 planet entries"
         for p in body[varga]:

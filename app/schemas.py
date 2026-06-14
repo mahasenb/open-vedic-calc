@@ -101,6 +101,7 @@ class ChartResponse(BaseModel):
     navamsa: list[PlanetPlacement]       # D9
     decamsa: list[PlanetPlacement]       # D10
     dwadasamsa: list[PlanetPlacement]    # D12 — parents/lineage
+    shodasamsa: list[PlanetPlacement]    # D16 — vehicles/comforts (Kalamsa)
     chaturvimsa: list[PlanetPlacement]   # D24
     trimshamsa: list[PlanetPlacement]    # D30
     shashtyamsa: list[PlanetPlacement]   # D60
