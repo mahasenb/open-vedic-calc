@@ -43,5 +43,7 @@ omit = ["*/__pycache__/*", "tests/*"]
 
 [tool.coverage.report]
 show_missing = true
-# Phase-1 gate target for the calc-service: line coverage ≥ 90%.
-fail_under = 90
+# Coverage gate for the calc-service. Raised 90 -> 92 after the edge-case
+# top-ups (measured 97.82% combined line+branch, branch=true), keeping a
+# comfortable buffer below actual.
+fail_under = 92
