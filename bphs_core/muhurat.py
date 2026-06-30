@@ -187,8 +187,25 @@ def compute_muhurat_for_day(
     birth_nakshatra: str | None = None,
     birth_moon_sign: str | None = None
 ) -> dict:
-    # 1. Convert target date to Julian Day at Noon local time
-    jd = swe.julday(target_date.year, target_date.month, target_date.day, 12.0)
+    # 1. Convert target date to Julian Day.
+    #
+    # Two separate JDs are needed for correctness:
+    #
+    # jd      — LOCAL noon as a JD (no timezone subtraction). This is what
+    #            pyjhora's sunrise/sunset/tithi/nakshatra-end/karana helpers
+    #            expect: they internally subtract Place.timezone to reach UTC.
+    #
+    # jd_utc  — TRUE UTC noon JD (jd_local - tz/24). This is what
+    #            drik.sidereal_longitude() requires — its docstring is explicit:
+    #            "JD_UTC = JD - Place.TimeZoneInFloatHours". Calling it with the
+    #            local JD introduces a ~tz * 0.55°/hr error (≈3° for IST), enough
+    #            to shift the Moon's nakshatra across a 13°20' boundary.
+    #
+    # Sunrise/sunset must continue using the local jd so pyjhora's internal tz
+    # subtraction produces the correct local event times.
+    y, m, d = target_date.year, target_date.month, target_date.day
+    jd = swe.julday(y, m, d, 12.0)                      # LOCAL noon — for pyjhora event calcs
+    jd_utc = swe.julday(y, m, d, 12.0 - place.timezone) # UTC noon   — for drik.sidereal_longitude
     drik.set_ayanamsa_mode('LAHIRI')
 
     # 2. Get Sunrise, Sunset, Moonrise, Moonset
@@ -244,8 +261,9 @@ def compute_muhurat_for_day(
         degraded = True
 
     # Nakshatra: NAME directly from the Moon's longitude (always valid); end-time
-    # from pyjhora, guarded.
-    n_name, _ = _nakshatra_from_moon(jd)
+    # from pyjhora, guarded. Use jd_utc so drik.sidereal_longitude gets the true
+    # UTC Julian Day (local jd causes a ~tz * 0.55°/hr error — ~3° for IST).
+    n_name, _ = _nakshatra_from_moon(jd_utc)
     try:
         n_res = drik.nakshatra(jd, place)
         n_idx = n_res[0]
@@ -258,8 +276,8 @@ def compute_muhurat_for_day(
         degraded = True
 
     # Yoga: NAME directly from the Sun+Moon longitude sum (always valid); end-time
-    # from pyjhora, guarded.
-    y_name, _ = _yoga_from_sun_moon(jd)
+    # from pyjhora, guarded. Use jd_utc for the same reason as nakshatra above.
+    y_name, _ = _yoga_from_sun_moon(jd_utc)
     try:
         y_res = drik.yogam(jd, place)
         y_idx = y_res[0]
@@ -424,7 +442,7 @@ def compute_muhurat_for_day(
         # corrupt. On failure 'Unknown' (NOT 'Neutral'): 'Unknown' uniformly
         # means 'could not be computed', matching compute_balam_at_jd.
         try:
-            _, transit_star = _nakshatra_from_moon(jd)  # 1-27, from longitude
+            _, transit_star = _nakshatra_from_moon(jd_utc)  # 1-27, from UTC-corrected longitude
             birth_star_idx = utils.NAKSHATRAS.index(birth_nakshatra) + 1
             tb_div = (((transit_star - birth_star_idx + 27) % 27) + 1) % 9
             tb_label, tb_desc = _TARA_BALA_LEVELS.get(tb_div, ("Unknown", "Neutral"))
@@ -433,8 +451,9 @@ def compute_muhurat_for_day(
             tara_str = "Unknown"
 
         # Chandra Bala — on failure 'Unknown' (NOT 'Neutral'), same convention.
+        # Use jd_utc: drik.sidereal_longitude expects a UTC Julian Day.
         try:
-            transit_moon_lon = drik.sidereal_longitude(jd, 1)  # 1 is Moon ID
+            transit_moon_lon = drik.sidereal_longitude(jd_utc, 1)  # 1 is Moon ID
             transit_moon_sign_idx = int(transit_moon_lon // 30) % 12
             birth_moon_sign_idx = utils.SIGNS.index(birth_moon_sign)
             diff = (transit_moon_sign_idx - birth_moon_sign_idx) % 12 + 1

@@ -3,7 +3,18 @@ Synthetic test fixtures — no real personal data committed here.
 Fill in coordinates/dates with any well-documented public birth data
 (e.g., historical figures) to make the goldens verifiable.
 """
+import os
 import pytest
+
+# Set the auth environment variables before any app import in the test suite.
+# ENVIRONMENT=test keeps the calc service in insecure mode (auth disabled)
+# without touching a real token, so endpoint-level tests using the
+# X-Calc-Service-Token="test" header work correctly.
+# These must be set before app.auth is first imported, which happens when
+# any test module that imports app.main is collected.
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
+os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
 # Synthetic sample A: arbitrary date, Sri Lanka coordinates
 SAMPLE_A = {

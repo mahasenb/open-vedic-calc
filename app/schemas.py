@@ -91,7 +91,13 @@ class ChartResponse(BaseModel):
     # a trikona for this lagna). "" when the lagna has no single Yoga Karaka.
     yoga_karaka: str = ""
     ayanamsa_value: float
-    bhava_chalit_cusps: list[float] = []   # 12 sidereal Placidus cusp longitudes (Bhava-Chalit)
+    # The cusp system used for the secondary Bhava-Chalit houses.
+    # 'placidus' is normal; 'equatorial' means Placidus failed (e.g. at high
+    # latitudes) and the equatorial fallback was used instead. Consumers that
+    # display or interpret chalit_cusps should check this field — the cusp
+    # values are only geometrically valid under the system that produced them.
+    house_system: str = "placidus"
+    bhava_chalit_cusps: list[float] = []   # 12 sidereal cusp longitudes (Bhava-Chalit)
     # Additive: Jaimini sign aspects (deterministic).
     rashi_drishti: RashiDrishti | None = None
     rasi: list[PlanetPlacement]
@@ -253,6 +259,10 @@ class ProfileResponse(BaseModel):
     favourable: dict             # lucky_number, lucky_metal, lucky_stone, lucky_color, good_years
     janma_nakshatra: dict        # deity, symbol, ruling_planet, tattva, purushartha, pada
     mangal_dosha: dict           # present, severity, cancellation, from_moon, mars_house
+    # The quarterly scan step used for sade_sati_lifetime: period boundaries
+    # carry ±precision_days imprecision. Defaulted so clients that parsed this
+    # response before the field was added still deserialise correctly.
+    precision_days: int = 91
 
 
 # --- Meta ---

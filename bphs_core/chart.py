@@ -61,6 +61,12 @@ class ChartSnapshot:
     house_cusps: list[float] = field(default_factory=list)   # whole-sign cusps (sign starts from lagna)
     chalit_cusps: list[float] = field(default_factory=list)   # sidereal Placidus cusps (Bhava-Chalit)
     jd: float = 0.0
+    # 'placidus' normally; 'equatorial' when Placidus failed and the equatorial
+    # fallback (swe.houses(..., b"E")) was used instead. Consumers that need cusp-
+    # based secondary houses should check this field — the chalit_cusps are only
+    # geometrically meaningful under the system that produced them. Defaulted so
+    # synthetic test ChartSnapshot constructors (which predated this field) stay valid.
+    house_system: str = "placidus"
 
 
 # Aspects each planet casts (house offsets, 1-based from its own house)
@@ -183,6 +189,7 @@ class Chart:
         # lagna lands tz hours off; swisseph.houses takes true UT (jd_utc) and
         # ascmc[0] is the correct ascendant, independent of the house system.
         # (Same method as lagna_shuddhi.py.)
+        _house_system_used = "placidus"
         try:
             cusps, ascmc = swe.houses(jd_utc, self.person.latitude, self.person.longitude, b"P")
         except Exception:
@@ -191,6 +198,7 @@ class Chart:
                 self.person.latitude, self.person.longitude, exc_info=True,
             )
             cusps, ascmc = swe.houses(jd_utc, self.person.latitude, self.person.longitude, b"E")
+            _house_system_used = "equatorial"
 
         sid_asc = (ascmc[0] - ayanamsa) % 360
         lagna_sign_index = int(sid_asc // 30)
@@ -257,6 +265,7 @@ class Chart:
             house_cusps=whole_sign_cusps,
             chalit_cusps=chalit_cusps,
             jd=jd_utc,
+            house_system=_house_system_used,
         )
 
     def snapshot(self) -> ChartSnapshot:

@@ -12,7 +12,12 @@ _INSECURE_ENVS = {"development", "local", "test"}
 
 
 def _environment() -> str:
-    return os.environ.get("ENVIRONMENT", "development")
+    # Default to 'production' so that a missing ENVIRONMENT variable is
+    # fail-secure: auth is ON unless the operator explicitly sets ENVIRONMENT
+    # to a known insecure value (development / local / test).
+    # The old default 'development' was fail-open — a misconfigured or newly
+    # deployed container with no ENVIRONMENT set would run with auth disabled.
+    return os.environ.get("ENVIRONMENT", "production")
 
 
 def _token_required() -> bool:
@@ -61,6 +66,17 @@ if _TOKEN_REQUIRED:
             "The calc-service refuses to start with a missing or weak token outside "
             f"{sorted(_INSECURE_ENVS)}. Set CALC_SERVICE_TOKEN to a long random secret."
         )
+else:
+    # Auth is intentionally disabled (ENVIRONMENT is in _INSECURE_ENVS).
+    # Emit a startup CRITICAL so this insecure mode is impossible to miss in logs.
+    logger.critical(
+        "Authentication is DISABLED: ENVIRONMENT=%r is in the insecure-env list %r. "
+        "ALL calc endpoints are unprotected. "
+        "Set ENVIRONMENT to a non-insecure value and supply CALC_SERVICE_TOKEN "
+        "before exposing this service.",
+        _environment(),
+        sorted(_INSECURE_ENVS),
+    )
 
 
 def require_token(
@@ -84,9 +100,11 @@ def require_token(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Calc service is misconfigured (no auth token).",
             )
-        logger.warning(
-            "CALC_SERVICE_TOKEN is not set — all endpoints are unprotected. "
-            "Set CALC_SERVICE_TOKEN to enable authentication."
+        logger.critical(
+            "CALC_SERVICE_TOKEN is not set — ALL ENDPOINTS ARE UNPROTECTED. "
+            "ENVIRONMENT=%r is in the insecure-env list. "
+            "Set CALC_SERVICE_TOKEN to enable authentication.",
+            _environment(),
         )
         return
 
