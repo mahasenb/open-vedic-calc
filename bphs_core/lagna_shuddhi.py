@@ -961,7 +961,11 @@ def scan_lagna_shuddhi(
         )
         candidates = _candidate_minutes(day_data)
         if step_mins > 1:
-            candidates = [m for i, m in enumerate(candidates) if i % step_mins == 0]
+            # Filter on the actual minute-of-day value, not the enumeration index.
+            # Filtering on `i % step_mins == 0` (old code) produced samples at
+            # arbitrary clock-minutes depending on where the candidate list started,
+            # not at genuine step_mins-minute intervals.
+            candidates = [m for m in candidates if m % step_mins == 0]
 
         for time_mins in candidates:
             jd = _jd_for_local(day_data["date"], time_mins, tz_offset)
@@ -1168,7 +1172,9 @@ def scan_family_lagna_shuddhi(
             dd = member_day_data[(idx, date_str)]
             mins_list = _candidate_minutes(dd)
             if step_mins > 1:
-                mins_list = [m for i, m in enumerate(mins_list) if i % step_mins == 0]
+                # Same fix as scan_lagna_shuddhi: filter on the actual minute-of-day
+                # value so that step granularity is respected regardless of list offset.
+                mins_list = [m for m in mins_list if m % step_mins == 0]
             for m in mins_list:
                 candidate_set.add((date_str, m))
         curr += timedelta(days=1)

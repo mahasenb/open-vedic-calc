@@ -155,16 +155,26 @@ def _maitri_score(lord_a: str, lord_b: str) -> float:
 # ---------------------------------------------------------------------------
 
 def _varna(sign_a: str, sign_b: str) -> tuple[float, str]:
-    va = _VARNA_LEVEL.get(sign_a, 2)
-    vb = _VARNA_LEVEL.get(sign_b, 2)
-    score = round(min(va, vb) / max(va, vb), 4)
+    """Varna kuta score for a pair of Moon signs.
+
+    Convention: sign_a is the groom's Moon sign, sign_b is the bride's.
+
+    The rule is directional: the match is auspicious (1.0) only when the groom's
+    varna level is equal to or higher than the bride's. If the groom is of a
+    lower varna than the bride the score is 0.0 (the classical texts state the
+    groom's varna must be at least as high as the bride's for harmony). The
+    maximum points for this kuta is 1 out of 36.
+    """
+    va = _VARNA_LEVEL.get(sign_a, 2)  # groom's varna level
+    vb = _VARNA_LEVEL.get(sign_b, 2)  # bride's varna level
+    score = 1.0 if va >= vb else 0.0
     names = f"{_VARNA_NAMES[va]} / {_VARNA_NAMES[vb]}"
     if va == vb:
         interp = f"Both partners share the {_VARNA_NAMES[va]} varna, indicating excellent spiritual alignment."
-    elif abs(va - vb) == 1:
-        interp = f"{names} varna pairing offers moderate spiritual compatibility."
+    elif va > vb:
+        interp = f"{names} varna pairing: groom's varna is higher, indicating auspicious compatibility."
     else:
-        interp = f"{names} varna difference suggests divergent spiritual orientations requiring conscious effort."
+        interp = f"{names} varna difference: bride's varna is higher than the groom's, which is inauspicious per classical rules."
     return score, interp
 
 

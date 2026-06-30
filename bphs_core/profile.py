@@ -242,12 +242,29 @@ def kalsarp_dosh(snapshot: ChartSnapshot) -> dict:
 # Sade Sati lifetime scan
 # ---------------------------------------------------------------------------
 
+_SADE_SATI_SCAN_STEP_DAYS: int = 91
+"""Quarterly scan step used by sade_sati_lifetime.
+
+The start/end dates returned by sade_sati_lifetime are rounded to the nearest
+quarterly boundary, so they carry an inherent ±91-day (±1 quarter) imprecision.
+This constant is exposed so callers and the profile response can communicate the
+uncertainty to consumers — e.g. "start date accurate to within ±91 days".
+Reducing the step improves precision at the cost of ~4× the computation per
+80-year lifetime scan.
+"""
+
+
 def sade_sati_lifetime(snapshot: ChartSnapshot, birth_date: date) -> list[dict]:
     """Return all Sade Sati periods from birth to birth+80 years.
 
     Scans every ~91 days (quarterly) for Saturn's sign relative to natal Moon.
     Contiguous quarters where Saturn occupies the sign before, same as, or after
     natal Moon are merged into a single period with a rising/peak/setting label.
+
+    **Precision note**: period boundaries are accurate to within ±``_SADE_SATI_SCAN_STEP_DAYS``
+    days (currently ±91 days / ±1 quarter). Callers that need finer accuracy should
+    use a dedicated binary-search ingress finder (e.g. ``get_sade_sati_info`` in
+    transits.py) on the specific boundary of interest.
     """
     from .transits import _transit_longitude, _jd_from_date
 
@@ -259,7 +276,7 @@ def sade_sati_lifetime(snapshot: ChartSnapshot, birth_date: date) -> list[dict]:
 
     # Quarter-year steps over 80 years
     periods: list[dict] = []
-    step = timedelta(days=91)
+    step = timedelta(days=_SADE_SATI_SCAN_STEP_DAYS)
     scan_date = datetime(birth_date.year, birth_date.month, birth_date.day)
     end_date = datetime(birth_date.year + 80, birth_date.month, birth_date.day)
 
@@ -406,4 +423,9 @@ def compute_profile(snapshot: ChartSnapshot, birth_date: date, name: str = "") -
         "favourable":         fav,
         "janma_nakshatra":    janma_nakshatra(snapshot),
         "mangal_dosha":       mangal_dosha(snapshot),
+        # The Sade Sati lifetime scan uses quarterly (~91-day) steps, so
+        # period start/end dates are accurate to within ±this many days.
+        # Callers that need finer accuracy should use the transits binary-search
+        # ingress finder for the specific boundary of interest.
+        "precision_days":     _SADE_SATI_SCAN_STEP_DAYS,
     }

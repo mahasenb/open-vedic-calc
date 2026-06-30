@@ -60,23 +60,45 @@ def _mock_chart(planets: dict[str, dict], lagna: str = "Aries",
 # ---------------------------------------------------------------------------
 
 class TestVarna:
+    """Varna kuta is now DIRECTIONAL: sign_a=groom, sign_b=bride.
+    Score = 1.0 iff groom_varna >= bride_varna, else 0.0.
+    (Old non-directional min/max ratio scoring is replaced by fix 6.)
+    """
     def test_same_varna(self):
-        # Cancer & Scorpio are both Brahmin (level 4)
+        # Cancer & Scorpio are both Brahmin (level 4): groom >= bride -> 1.0
         score, interp = compat._varna("Cancer", "Scorpio")
         assert score == 1.0
         assert "share the Brahmin varna" in interp
 
-    def test_adjacent_varna(self):
-        # Brahmin (4) vs Kshatriya (3): diff == 1 -> moderate
+    def test_groom_higher_varna(self):
+        # Cancer (groom=Brahmin=4) vs Aries (bride=Kshatriya=3): groom > bride -> 1.0
+        # Old (non-directional): round(3/4, 4) = 0.75 — now 1.0
         score, interp = compat._varna("Cancer", "Aries")
-        assert score == round(3 / 4, 4)
-        assert "moderate spiritual compatibility" in interp
+        assert score == 1.0, (
+            "Groom Brahmin (4) >= Bride Kshatriya (3): directional score must be 1.0"
+        )
+        assert "groom's varna is higher" in interp.lower() or "auspicious" in interp.lower()
 
-    def test_divergent_varna(self):
-        # Brahmin (4) vs Shudra (1): diff == 3 -> divergent (line 167)
+    def test_groom_lower_varna(self):
+        # Aries (groom=Kshatriya=3) vs Cancer (bride=Brahmin=4): groom < bride -> 0.0
+        score, interp = compat._varna("Aries", "Cancer")
+        assert score == 0.0, (
+            "Groom Kshatriya (3) < Bride Brahmin (4): directional score must be 0.0"
+        )
+        assert "bride's varna is higher" in interp.lower() or "inauspicious" in interp.lower()
+
+    def test_groom_highest_varna(self):
+        # Cancer (groom=Brahmin=4) vs Gemini (bride=Shudra=1): groom >> bride -> 1.0
+        # Old (non-directional): round(1/4, 4) = 0.25 — now 1.0
         score, interp = compat._varna("Cancer", "Gemini")
-        assert score == round(1 / 4, 4)
-        assert "divergent spiritual orientations" in interp
+        assert score == 1.0, (
+            "Groom Brahmin (4) >= Bride Shudra (1): directional score must be 1.0"
+        )
+
+    def test_lowest_groom_varna(self):
+        # Gemini (groom=Shudra=1) vs Cancer (bride=Brahmin=4): groom << bride -> 0.0
+        score, interp = compat._varna("Gemini", "Cancer")
+        assert score == 0.0
 
 
 # ---------------------------------------------------------------------------

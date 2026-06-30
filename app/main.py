@@ -213,6 +213,7 @@ def _chart_to_response(s: ChartSnapshot) -> ChartResponse:
         lagna=s.lagna, lagna_lord=s.lagna_lord,
         yoga_karaka=yogas_mod.get_yoga_karaka_planet(s),
         ayanamsa_value=s.ayanamsa_value,
+        house_system=s.house_system,
         bhava_chalit_cusps=[round(c, 6) for c in s.chalit_cusps],
         rashi_drishti=rashi_drishti,
         rasi=to_list(s.rasi_chart),
@@ -327,7 +328,8 @@ def transits_endpoint(req: TransitRequest):
     _, s = _get_chart(req)
     at = datetime.strptime(req.at_date, "%Y-%m-%d")
 
-    current = transits_mod.get_current_transits(s, at)
+    current = transits_mod.get_current_transits(s, at,
+                                                 timezone_offset_hours=req.timezone_offset_hours)
     saturn = current.get("Saturn")
     jupiter = current.get("Jupiter")
 

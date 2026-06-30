@@ -67,8 +67,30 @@ def _jd_from_date(dt: datetime) -> float:
                       dt.hour + dt.minute / 60 + dt.second / 3600)
 
 
-def get_current_transits(snapshot: ChartSnapshot, at: datetime) -> dict:
-    jd = _jd_from_date(at)
+def _jd_utc_from_local(dt: datetime, timezone_offset_hours: float) -> float:
+    """Build a UTC Julian Day from a local datetime and its timezone offset.
+
+    drik.sidereal_longitude() requires a UTC Julian Day (jd_utc); calling it
+    with a local datetime produces a tz-offset error in every planet longitude
+    (~0.55°/hr for the Moon, ~3° for IST). The caller supplies the local
+    datetime as received from the request, and this helper converts to UTC.
+    """
+    local_hour = dt.hour + dt.minute / 60 + dt.second / 3600
+    utc_hour = local_hour - timezone_offset_hours
+    return swe.julday(dt.year, dt.month, dt.day, utc_hour)
+
+
+def get_current_transits(snapshot: ChartSnapshot, at: datetime,
+                         timezone_offset_hours: float = 0.0) -> dict:
+    """Compute current planetary transits at *at* (local datetime).
+
+    *timezone_offset_hours* is the local timezone offset in hours (positive east
+    of UTC, e.g. 5.5 for IST). It is used to build a true UTC Julian Day before
+    calling drik.sidereal_longitude(), which requires UTC JD. Passing the local
+    datetime without timezone correction produces a ~tz × 0.55°/hr error in
+    planetary longitudes (≈3° for IST), enough to shift the Moon's nakshatra.
+    """
+    jd = _jd_utc_from_local(at, timezone_offset_hours)
     result: dict[str, TransitPlacement] = {}
     for name, pid in _PYJHORA_TRANSIT_PLANETS.items():
         lon = _transit_longitude(jd, pid)
@@ -112,14 +134,35 @@ def get_sade_sati_info(snapshot: ChartSnapshot, at: datetime) -> SadeSatiInfo:
     phase_offset = {"first": -1, "second": 0, "third": 1}[phase]
     target_sign_idx = (moon_sign_idx + phase_offset) % 12
 
-    # Find ingress and egress for that sign (search ±4 years)
-    start_est = at - timedelta(days=2.5 * 365)
-    end_est = at + timedelta(days=2.5 * 365)
+    # Search window widened to 3.5 years (was 2.5).
+    #
+    # Saturn's sidereal transit through a sign averages ~2.46 years (29.46 / 12)
+    # but can reach ~3.1 years near aphelion. A 2.5-year lookback window fails
+    # when the ingress falls beyond that limit: the binary-search lo boundary
+    # lands INSIDE the transit sign, so the search converges to the lo boundary
+    # rather than the true ingress, returning a falsely late start_date.
+    #
+    # 3.5 years gives ≥0.4 years of margin beyond the worst-case Saturn transit.
+    #
+    # Search precondition assertion: if lo is already in the target sign, the
+    # window is still too short — surface it as a ValueError so it cannot be
+    # silently substituted for the true ingress.
+    start_est = at - timedelta(days=3.5 * 365)
+    end_est = at + timedelta(days=3.5 * 365)
 
     def saturn_in_sign(dt: datetime) -> bool:
         j = _jd_from_date(dt)
         lon = _transit_longitude(j, 6)
         return int(lon // 30) % 12 == target_sign_idx
+
+    # Precondition: lo must be OUTSIDE the target sign, otherwise the binary
+    # search will return lo as the ingress (window is too narrow).
+    if saturn_in_sign(start_est):
+        raise ValueError(
+            f"Sade Sati ingress search window too narrow: Saturn is already in "
+            f"sign {target_sign_idx} at lo boundary {start_est.date()}. "
+            "Widen _SADE_SATI_LOOKBACK_YEARS beyond 3.5."
+        )
 
     # Binary search for ingress
     lo, hi = start_est, at
