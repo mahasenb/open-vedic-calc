@@ -96,6 +96,28 @@ def _cheshta_bala(pd: PlanetData, planet: str) -> float:
     return 30.0 if pd.is_retrograde else 15.0
 
 
+def _moon_is_benefic(snapshot: ChartSnapshot) -> bool:
+    """Return True when the Moon is waxing (shukla paksha), False when waning.
+
+    Waxing = elongation (moon_longitude - sun_longitude) mod 360 is in the
+    open interval (0, 180). Waning = (180, 360). Boundary values 0 and 180
+    are excluded from waxing per classical rules.
+
+    Reads longitude_abs from the rasi_chart PlanetData; returns False when
+    either the Sun or Moon longitude is unavailable.
+    """
+    sun_pd = snapshot.rasi_chart.get("Sun")
+    moon_pd = snapshot.rasi_chart.get("Moon")
+    if sun_pd is None or moon_pd is None:
+        return False
+    sun_lon = sun_pd.longitude_abs
+    moon_lon = moon_pd.longitude_abs
+    if sun_lon is None or moon_lon is None:
+        return False
+    elongation = (moon_lon - sun_lon) % 360.0
+    return 0.0 < elongation < 180.0
+
+
 def _drik_bala(snapshot: ChartSnapshot, planet: str) -> float:
     pd = snapshot.rasi_chart.get(planet)
     if pd is None:
@@ -107,7 +129,13 @@ def _drik_bala(snapshot: ChartSnapshot, planet: str) -> float:
         if planet in other_pd.aspects:
             if other_name in ("Jupiter", "Venus", "Mercury"):
                 score += 15.0
-            elif other_name in ("Sun", "Moon", "Mars", "Saturn"):
+            elif other_name == "Moon":
+                # Moon is phase-dependent: benefic when waxing, malefic when waning
+                if _moon_is_benefic(snapshot):
+                    score += 15.0
+                else:
+                    score -= 15.0
+            elif other_name in ("Sun", "Mars", "Saturn"):
                 score -= 15.0
     return max(0.0, score)
 
@@ -160,6 +188,12 @@ def _bhava_drik_bala(snapshot: ChartSnapshot, house: int) -> float:
         if pd.house == house:
             if name in ("Jupiter", "Venus", "Mercury"):
                 score += 10.0
+            elif name == "Moon":
+                # Moon is phase-dependent: benefic when waxing, malefic when waning
+                if _moon_is_benefic(snapshot):
+                    score += 10.0
+                else:
+                    score -= 10.0
             elif name in ("Mars", "Saturn", "Sun"):
                 score -= 10.0
     return score
