@@ -1,0 +1,62 @@
+# CLAUDE.md — open-vedic-calc
+
+This repo is a generic, standalone Vedic (BPHS) astronomical calculation service, licensed AGPL-3.0-only. It is reached only over HTTP by a bearer-token-holding caller. Rules below supplement the workspace CLAUDE.md; they do not replace it.
+
+## Product neutrality — absolute
+
+This is a public AGPL repo. It must **never** name, hint at, or link the proprietary consumer that calls it — not in code, comments, docstrings, tests, commit messages, PR titles/bodies, issues, or docs. Refer to callers only in generic, role-based terms: "the caller", "the HTTP client", "the consumer". "The downstream backend" is acceptable only as a role description, never paired with a name.
+
+The CI gate `ci/check_no_proprietary_refs.py` (run by `.github/workflows/ci.yml` on every change, including docs) is the enforcement mechanism. Its forbidden-term pattern (`ci/check_no_proprietary_refs.py:27`) is the source of truth for what is disallowed. Standing rule: keep this pattern current as the consumer's branding evolves. A pattern that only guards a superseded name silently permits a leak — updating it when you learn the brand or infra identifiers have changed is required work, not optional.
+
+Critical subtlety: do **not** write the literal brand token into this CLAUDE.md, into the gate file's plaintext, or into any other tracked file — the file is public, and the token itself would leak the association. The forbidden-term list must be maintained out-of-band (e.g. a hashed/obfuscated token set, or a value injected at CI time from a private source), never as public plaintext. If asked to "add the brand to the gate," the correct implementation is a non-plaintext mechanism — flag to the owner if unsure how to do that.
+
+The gate currently scans only the latest commit (`git log -1`; see `ci/check_no_proprietary_refs.py` around the `main()` scan). Standing rule: when touching the gate, scan the full pushed commit range, not just HEAD, so a leak buried in an intermediate commit cannot slip through.
+
+Before every push, run the gate locally: `python ci/check_no_proprietary_refs.py`.
+
+## Engine conventions (astronomical correctness)
+
+- Ayanamsa is LAHIRI, set **globally at import time** in `bphs_core/utils.py` (`swe.set_ephe_path(...)` at utils.py:6, `drik.set_ayanamsa_mode('LAHIRI')` at utils.py:9). This is process-global state set on import — any code path or test that needs a different ayanamsa, or a guaranteed-fresh sidereal mode, must set it explicitly at the call site; never assume a clean default. `Chart._compute` re-asserts `drik.set_ayanamsa_mode('LAHIRI')` (chart.py:176) for exactly this reason — keep that re-assertion pattern in any new compute path.
+- Julian Day discipline (the rule that prevents the tz double-subtraction bug): pyjhora chart/drik functions (`charts.rasi_chart`, `drik.ascendant`, `drik.dhasavarga`, `drik.planets_in_retrograde`) expect a **local-clock JD** and subtract the place timezone themselves internally. Build the local JD and pass it **unmodified** to pyjhora — never pre-subtract the timezone (`_jd_from_person`, chart.py:80-91). Any swisseph call that needs true UT derives it separately as `jd_utc = jd - tz_offset_hours / 24.0` **at the call site** (chart.py:178). Never feed a tz-pre-subtracted JD to pyjhora, and never feed a local JD to a swisseph UT function — the two transports are distinct and are not interchangeable.
+- The lagna/ascendant is computed **directly** from swisseph — `swe.houses(jd_utc, lat, lon, b"P")` → `ascmc[0]`, then sidereal-corrected as `(ascmc[0] - ayanamsa) % 360` (chart.py:194-203). **Never** take the ascendant from pyjhora's `rasi_chart()[0]`: it double-applies the timezone and lands the lagna tz-hours off. Fallback: if placidus (`b"P"`) raises (extreme latitudes), fall back to equatorial (`b"E"`) and record `house_system` accordingly (chart.py:192-201) — never silently return a placidus-labelled chart from an equatorial computation.
+- Whole-sign is the primary house frame for planetary house assignment; Bhava-Chalit cusps are provided separately as sidereal Placidus cusps (chart.py:217-218, field `chalit_cusps`). Do not conflate the two — whole-sign house is the interpretive default, chalit is supplementary.
+- Origin lesson: this codifies a real ascendant-timezone bug found and fixed in this repo; the rule above is self-contained and does not require any external context to apply correctly.
+
+## Determinism
+
+This is an electional/astronomical engine — outputs must be reproducible.
+
+- Astronomical outputs are golden-value tested against synthetic, non-personal reference charts. `tests/test_calc_regressions.py` is the canonical pattern: synthetic charts only, invariant assertions (e.g. Chart longitudes equal a direct UT swisseph computation for any non-zero timezone). **No personal or family birth data ever enters tests, fixtures, plans, or committed reference files** — synthesize charts or assert invariants instead.
+- Any change to a calculation module (`bphs_core/*`) that could shift a numeric output requires a golden/regression test that first failed (per the parent workspace's test-first non-negotiable) and pins the expected value. "It runs" is not sufficient evidence for an accuracy engine.
+- Fail-closed determinism governs the electional (muhurat / lagna-shuddhi) pipeline: a limb that cannot be computed (tithi crash, hard-gate failure, eclipse/adhika-maasa resolving to `None`) must degrade to "not recommendable / visibly degraded" — **never** silently to "fine / auspicious". `tests/test_panchanga_fail_closed.py` is the contract; extend it, never weaken it. One-sentence mandate: a missing limb means visibly degraded, never a clean pass.
+
+## API contract stability
+
+Endpoints are versioned under `/v1/*` (chart, strength, dashas, yogas, transits, special-points, profile, muhurat, muhurat.lagna-shuddhi, muhurat.family-lagna-shuddhi, compat — all POST; plus GET /source, GET /healthz). Response models live in `app/schemas.py` and are the wire contract with the caller.
+
+- A backward-incompatible change to any request or response schema (removed/renamed field, changed type or units, tightened enum) requires a version bump (a new `/vN/` path) — never an in-place mutation of `/v1`. Additive optional fields are fine. Never break `/v1` in place; the caller pins to it.
+- `/source` (authenticated) returns `{source_url, commit}`, where `commit` is the cache-invalidation key resolved by `_resolve_version()` (main.py:41-89): `GIT_COMMIT` env (baked at image build, Dockerfile `ARG`/`ENV`) is authoritative; the source-content hash `src-<sha256[:16]>` is the dev fallback; the literal `unknown` is the non-cacheable sentinel. Never substitute a fabricated commit for `unknown` — the caller keys its result cache on this value, and a wrong key serves stale astronomy.
+
+## HTTP service hardening
+
+- Auth fails **closed**. `app/auth.py` refuses to start (`raise RuntimeError` at import time, auth.py:64) when `ENVIRONMENT` is outside `{development, local, test}` and `CALC_SERVICE_TOKEN` is missing, a known placeholder, or shorter than 16 characters. `ENVIRONMENT` defaults to `production` precisely so a missing value is fail-secure (auth.py:20). Rules: (1) never change that default to a permissive value; (2) never add a code path that serves an authenticated endpoint when the token is unset outside dev; (3) token comparison uses `hmac.compare_digest` — never `==` (timing attack surface) (auth.py:111); (4) the app secret travels in its own header, `X-Calc-Service-Token`; `Authorization` is reserved for the platform's OIDC identity token — never merge the two into one header (auth.py:85-94).
+- `/healthz` is intentionally unauthenticated (liveness probe, no sensitive body, main.py:603-606) — keep its body limited to a status string plus an `ephe_loaded` boolean; never add sensitive data to it.
+- Validate every endpoint at the schema boundary: latitude `ge=-90, le=90`, longitude `ge=-180, le=180`, timezone `ge=-12, le=14`, and every float field carries `allow_inf_nan=False`. Hard rule on the NaN subtlety: `ge`/`le` alone do **not** reject NaN (IEEE-754 comparisons with NaN are always false), so a NaN value passes range checks and flows into `swe.houses()` / `drik.Place()`, producing a finite-but-wrong chart. Every new float input field **must** set `allow_inf_nan=False` (see `app/schemas.py` and the contract in `tests/test_coord_bounds.py`). Also bound expensive-scan inputs — date-range caps (`MAX_*_DAYS`), `step_seconds >= 60`, family members `2..6` — so a single request cannot force an unbounded compute.
+- The 422 handler must never regress into a 500: `_validation_exception_handler` sanitizes non-finite floats and exception objects before serializing (main.py:146). Keep validation rejections as well-formed 422s.
+- Keep-alive / stale-connection handling is a two-sided contract. Server side: uvicorn runs with `--timeout-keep-alive 75` (Dockerfile CMD) so idle pooled connections aren't closed out from under a client mid-send (which otherwise surfaces as an `httpx.ReadError`) — keep this value at or above any upstream/load-balancer idle timeout. Client-side retry of the residual race is the caller's responsibility, not this repo's. If you change one side of this contract, reason about both.
+- CORS `allow_origins` is driven by the `ALLOWED_ORIGINS` env var (main.py:91,111) and is empty by default — this is a server-to-server service. Do not introduce a wildcard `["*"]` origin.
+
+## Supply-chain & image hygiene
+
+- The shipped Docker image must install from the committed lockfile so the deployed dependency set equals the tested one. Current defect tracked under the audit (FORENSIC_AUDIT_2026-07-02.md, MED-47): the Dockerfile's `pip install --no-cache-dir -e .` (Dockerfile, `RUN pip install` step) never copies `uv.lock` into the build context, so the image resolves floating ranges (e.g. `pyjhora>=4.8.0`, `fastapi>=0.111.0`) at build time and can diverge from the locked, tested set — unacceptable for a temp=0, deterministic-accuracy engine. Rule: copy `uv.lock` into the image and install frozen (`uv sync --frozen`); CI must test exactly what the Dockerfile ships.
+- Add and keep dependency CVE scanning (e.g. `pip-audit`) and a `dependabot.yml`. `pyswisseph` is a hard-pinned compiled C extension that parses ephemeris files — a CVE there must not go unmonitored. This is baseline hygiene expected of a public AGPL project.
+
+## Tests & local gate
+
+- Coverage gate is `fail_under = 92`, `branch = true` (`pyproject.toml:40,49`) — do not lower it; new logic ships with tests that keep it green. (`publish.yml`'s comment citing "90" is stale relative to `pyproject.toml`'s 92 — treat `pyproject.toml` as authoritative.)
+- CI runs against the Moshier ephemeris fallback (no Swiss data files in Actions); line/branch coverage is identical to a Swiss run, but numeric values differ. Accuracy-sensitive golden values must be asserted with tolerances valid under the actual runtime, or gated to a Swiss-data job.
+- Before every push, run the repo gate locally: `python ci/check_no_proprietary_refs.py && pytest tests/ -q`.
+
+## Active remediation
+
+Audit findings against this repo are tracked in FORENSIC_AUDIT_2026-07-02.md (workspace repo, PR #1); its section 5 remediation batches are the work queue. Repo-relevant confirmed findings: MED-47 (Dockerfile ignores `uv.lock` and there is zero CVE scanning) and MED-74 (the proprietary-reference gate guards only a superseded token and scans only the latest commit). Each fix follows the parent workspace's test-first non-negotiable and the neutrality rule above; the preventive rules in this file are the standing encoding, not a restatement of the findings list.
