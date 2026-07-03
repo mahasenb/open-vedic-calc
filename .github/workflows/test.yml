@@ -31,3 +31,9 @@ jobs:
           pip install -e ".[dev]"
       - name: Run tests
         run: pytest tests/ -q
+      - name: Run CI gate regression suite
+        # ci/tests/ lives outside the tests/ tree by design (it tests the CI
+        # gate script itself, not the calc engine) — pytest tests/ never
+        # collects it. Without this step, a future edit that weakens
+        # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green.
+        run: pytest ci/tests/ -q

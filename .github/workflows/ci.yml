@@ -13,9 +13,22 @@ jobs:
   boundary:
     name: No proprietary references
     runs-on: ubuntu-latest
+    # PROPRIETARY_REF_TOKENS holds the current downstream brand token(s)
+    # (comma-separated) as a repo secret — never as a literal in this public
+    # repo's tracked source. Unset (e.g. until the owner provisions the secret,
+    # or on forks/external PRs where secrets aren't exposed) falls back to the
+    # legacy-only pattern; see ci/check_no_proprietary_refs.py for the
+    # fail-safe fallback rationale.
+    env:
+      PROPRIETARY_REF_TOKENS: ${{ secrets.PROPRIETARY_REF_TOKENS }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Check for proprietary consumer references
-        run: python ci/check_no_proprietary_refs.py
+        # Scan the full pushed commit range, not just HEAD, so a leak buried in
+        # an intermediate commit of a multi-commit push can't slip through.
+        # github.event.before is the zero-SHA sentinel on a branch's first push
+        # and is absent entirely on non-push events (e.g. pull_request) — the
+        # script falls back to scanning just HEAD's message in both cases.
+        run: python ci/check_no_proprietary_refs.py "${{ github.event.before }}..${{ github.sha }}"

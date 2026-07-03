@@ -34,6 +34,12 @@ jobs:
       # line coverage is identical to a Swiss run — only numeric values differ.
       # --cov enforces fail_under=90 from pyproject [tool.coverage.report].
       - run: pytest tests/ --cov --cov-report=term-missing
+      # ci/tests/ lives outside the tests/ tree by design (it tests the CI
+      # gate script itself, not the calc engine) — pytest tests/ never
+      # collects it. Without this step, a future edit that weakens
+      # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green
+      # right up through the image build/publish path.
+      - run: pytest ci/tests/ -q
 
   publish:
     needs: test
