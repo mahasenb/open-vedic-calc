@@ -48,29 +48,40 @@ _LEGACY_PATTERN = re.compile(r"(?i)\bastro\b(?!\.com)")
 _NULL_SHA = "0" * 40
 
 
-def _build_forbidden_patterns(env: dict[str, str] | None = None) -> list[re.Pattern[str]]:
-    """Build the list of compiled forbidden-reference patterns: the legacy base
-    pattern plus any additional brand token(s) read from PROPRIETARY_REF_TOKENS
-    (comma-separated). The env var's value is never written to this repo's
-    source — only its name appears here."""
+def _build_brand_patterns(env: dict[str, str] | None = None) -> list[re.Pattern[str]]:
+    """Compile the brand token(s) read from PROPRIETARY_REF_TOKENS (comma-separated)
+    — the names that must never appear anywhere in this public repo. The env var's
+    value is never written to this repo's source; only its name appears here."""
     if env is None:
         env = os.environ  # type: ignore[assignment]
 
-    patterns: list[re.Pattern[str]] = [_LEGACY_PATTERN]
-
+    patterns: list[re.Pattern[str]] = []
     raw = env.get("PROPRIETARY_REF_TOKENS", "")
     for token in raw.split(","):
         token = token.strip()
         if not token:
             continue
         patterns.append(re.compile(re.escape(token), re.IGNORECASE))
-
     return patterns
+
+
+def _build_forbidden_patterns(env: dict[str, str] | None = None) -> list[re.Pattern[str]]:
+    """Patterns for scanning FILE content: the legacy base token plus the brand
+    tokens. The legacy 'astro' word is a code-hygiene concern in source
+    identifiers, so it is included here but deliberately NOT in the commit-message
+    scan (see _BRAND_PATTERNS) — 'astro' is unavoidably common in this astrology
+    repo's prose and would false-positive on every commit that discusses the gate
+    or the domain."""
+    return [_LEGACY_PATTERN, *_build_brand_patterns(env)]
 
 
 # Built at import time from the current environment; tests reload the module
 # after setting/clearing PROPRIETARY_REF_TOKENS to exercise both branches.
+# _FORBIDDEN scans files (legacy + brand); _BRAND_PATTERNS scans commit messages
+# (brand only — a leak buried in a message means a real product name, never the
+# legacy 'astro' word which litters legitimate astrology commit prose).
 _FORBIDDEN: list[re.Pattern[str]] = _build_forbidden_patterns()
+_BRAND_PATTERNS: list[re.Pattern[str]] = _build_brand_patterns()
 
 _SCAN_EXT = {
     ".py", ".md", ".yml", ".yaml", ".toml", ".txt", ".sh", ".ps1",
@@ -85,9 +96,15 @@ _SELF = Path(__file__).resolve()
 _REPO_ROOT = _SELF.parent.parent
 
 
-def _scan_text(label: str, text: str, out: list[str]) -> None:
+def _scan_text(
+    label: str,
+    text: str,
+    out: list[str],
+    patterns: list[re.Pattern[str]] | None = None,
+) -> None:
+    active = _FORBIDDEN if patterns is None else patterns
     for i, line in enumerate(text.splitlines(), 1):
-        for pattern in _FORBIDDEN:
+        for pattern in active:
             if pattern.search(line):
                 out.append(f"{label}:{i}: {line.strip()}")
                 break
@@ -141,7 +158,7 @@ def main(commit_range: str | None = None) -> int:
     # in an intermediate commit of a multi-commit push, not just HEAD).
     try:
         for msg in _get_commit_messages(commit_range):
-            _scan_text("<commit message>", msg, violations)
+            _scan_text("<commit message>", msg, violations, _BRAND_PATTERNS)
     except OSError:
         pass
 

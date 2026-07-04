@@ -274,3 +274,39 @@ class TestMainUsesCommitRangeArgument:
         assert "commit_range" in module.main.__code__.co_varnames or (
             module.main.__defaults__ is not None
         )
+
+
+class TestCommitMessageScanExcludesLegacyWord:
+    """Regression: commit-message scanning must catch brand tokens (real leaks) but
+    NOT the legacy code-hygiene word, which is unavoidably common in this astrology
+    repo's commit prose (e.g. a commit that documents the gate itself). File scanning
+    still catches the legacy word."""
+
+    def test_legacy_word_in_commit_message_is_allowed(self, monkeypatch):
+        monkeypatch.setenv("PROPRIETARY_REF_TOKENS", _SYNTHETIC_TOKEN)
+        module = _load_gate_module()
+        out: list[str] = []
+        module._scan_text(
+            "<commit message>",
+            f"ci: gate matched only the legacy token '{_LEGACY_WORD}' before this",
+            out,
+            module._BRAND_PATTERNS,
+        )
+        assert out == []
+
+    def test_brand_token_in_commit_message_is_flagged(self, monkeypatch):
+        monkeypatch.setenv("PROPRIETARY_REF_TOKENS", _SYNTHETIC_TOKEN)
+        module = _load_gate_module()
+        out: list[str] = []
+        module._scan_text(
+            "<commit message>", f"leaked {_SYNTHETIC_TOKEN} in a message", out,
+            module._BRAND_PATTERNS,
+        )
+        assert len(out) == 1
+
+    def test_legacy_word_in_file_is_still_flagged(self, monkeypatch):
+        monkeypatch.setenv("PROPRIETARY_REF_TOKENS", _SYNTHETIC_TOKEN)
+        module = _load_gate_module()
+        out: list[str] = []
+        module._scan_text("some_file.py", f"x = '{_LEGACY_WORD}'", out, module._FORBIDDEN)
+        assert len(out) == 1
