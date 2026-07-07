@@ -10,13 +10,29 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 
 WORKDIR /app
 
-COPY pyproject.toml README.md LICENSE EPHEMERIS_LICENSE.md ./
-RUN pip install --no-cache-dir -e .
+# Install uv itself from its official distroless image (pinned digest-free tag is
+# fine here — uv is the installer, not a project dependency; supply-chain risk for
+# the actual app deps is covered by the frozen lockfile install below).
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Install from the committed, hash-pinned lockfile only — `--frozen` fails the
+# build if pyproject.toml and uv.lock have drifted, instead of silently
+# re-resolving. Replaces the old floating `pip install -e .`, which ignored
+# uv.lock entirely and could pull an unpinned/compromised transitive version of
+# pyswisseph (native C) or any other dependency.
+COPY pyproject.toml uv.lock README.md LICENSE EPHEMERIS_LICENSE.md ./
+RUN uv sync --frozen --no-install-project --no-dev
+ENV PATH="/app/.venv/bin:${PATH}"
 
 COPY bphs_core ./bphs_core
 COPY app ./app
 # data/ephe must be volume-mounted or COPY'd separately (not committed to git)
 RUN mkdir -p data/ephe
+
+# Second `uv sync --frozen` installs the project itself (editable, into the venv
+# from the first sync) now that its source is present — still frozen against the
+# same committed lockfile, no re-resolution.
+RUN uv sync --frozen --no-dev
 
 EXPOSE 8000
 

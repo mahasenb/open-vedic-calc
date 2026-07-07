@@ -2,6 +2,8 @@ name: Tests
 
 # Compiles pyswisseph and runs pytest — skipped for docs-only changes to save
 # Actions minutes. The boundary gate (ci.yml) still runs on those changes.
+# Also runs weekly (independent of any push/PR) so a newly disclosed CVE in a
+# pinned dependency is caught even on a repo with no recent commits.
 on:
   push:
     paths-ignore:
@@ -11,6 +13,8 @@ on:
     paths-ignore:
       - "**.md"
       - "LICENSE"
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -30,10 +34,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Run tests
+        # Scheduled (weekly CVE-only) runs skip pytest — nothing about the code
+        # changed, only the vulnerability database might have.
+        if: github.event_name != 'schedule'
         run: pytest tests/ -q
       - name: Run CI gate regression suite
         # ci/tests/ lives outside the tests/ tree by design (it tests the CI
         # gate script itself, not the calc engine) — pytest tests/ never
         # collects it. Without this step, a future edit that weakens
         # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green.
+        if: github.event_name != 'schedule'
         run: pytest ci/tests/ -q
+      - name: Dependency vulnerability scan (pip-audit)
+        # Scans the installed environment (resolved from the committed uv.lock
+        # via the frozen extras above) against the PyPI Advisory Database.
+        run: pip-audit
