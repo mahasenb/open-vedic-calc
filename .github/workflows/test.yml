@@ -45,7 +45,11 @@ jobs:
         # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green.
         if: github.event_name != 'schedule'
         run: pytest ci/tests/ -q
-      - name: Dependency vulnerability scan (pip-audit)
-        # Scans the installed environment (resolved from the committed uv.lock
-        # via the frozen extras above) against the PyPI Advisory Database.
-        run: pip-audit
+      - name: Dependency vulnerability scan (pip-audit against the frozen lock)
+        # Audits the EXACT production dependency set that ships in the image
+        # (uv sync --frozen from uv.lock), not the floating pip-resolved dev env
+        # installed above — so the scan matches what actually runs in production.
+        run: |
+          python -m pip install --upgrade uv
+          uv export --frozen --no-dev --no-emit-project -o requirements.frozen.txt
+          pip-audit --requirement requirements.frozen.txt
