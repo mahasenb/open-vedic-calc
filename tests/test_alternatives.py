@@ -54,6 +54,70 @@ _FAMILY_REQ_CLEAN = {
 
 
 # ---------------------------------------------------------------------------
+# Shared expensive-scan fixtures
+#
+# Many tests below assert independent properties of the *same* scan (same
+# lat/lon/dates/activity/step). Each scan walks a 2-3 day window at 60-second
+# resolution, which is expensive to recompute once per assertion. These
+# module-scoped fixtures run the scan once per distinct arg-set and let every
+# test assert against the shared result — no assertions change, only the
+# number of recomputations drops.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def solo_scan_result():
+    return scan_lagna_shuddhi(
+        lat=SAMPLE_A["latitude"],
+        lon=SAMPLE_A["longitude"],
+        tz_offset=SAMPLE_A["timezone_offset_hours"],
+        birth_nakshatra=None,
+        birth_moon_sign=None,
+        start_date="2026-06-15",
+        end_date="2026-06-17",
+        activity="generic",
+        step_seconds=60,
+    )
+
+
+@pytest.fixture(scope="module")
+def family_scan_result():
+    return scan_family_lagna_shuddhi(
+        members=[
+            {
+                "name": "member_a",
+                "lat": SAMPLE_A["latitude"],
+                "lon": SAMPLE_A["longitude"],
+                "tz_offset": SAMPLE_A["timezone_offset_hours"],
+                "birth_nakshatra": None,
+                "birth_moon_sign": None,
+            },
+            {
+                "name": "member_b",
+                "lat": SAMPLE_B["latitude"],
+                "lon": SAMPLE_B["longitude"],
+                "tz_offset": SAMPLE_B["timezone_offset_hours"],
+                "birth_nakshatra": None,
+                "birth_moon_sign": None,
+            },
+        ],
+        start_date="2026-06-15",
+        end_date="2026-06-17",
+        activity="generic",
+        step_seconds=60,
+    )
+
+
+@pytest.fixture(scope="module")
+def solo_endpoint_response():
+    return client.post("/v1/muhurat/lagna-shuddhi", json=_LAGNA_SHUDDHI_REQ)
+
+
+@pytest.fixture(scope="module")
+def family_endpoint_response():
+    return client.post("/v1/muhurat/family-lagna-shuddhi", json=_FAMILY_REQ_CLEAN)
+
+
+# ---------------------------------------------------------------------------
 # _select_alternatives unit tests (pure function, no ephemeris needed)
 # ---------------------------------------------------------------------------
 
@@ -222,66 +286,26 @@ def test_tolerance_window_single_point():
 # Integration: solo scan — alternatives shape
 # ---------------------------------------------------------------------------
 
-def test_solo_alternatives_present_in_result():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_present_in_result(solo_scan_result):
+    result = solo_scan_result
     assert "alternatives" in result
     assert isinstance(result["alternatives"], list)
 
 
-def test_solo_alternatives_cap():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_cap(solo_scan_result):
+    result = solo_scan_result
     assert len(result["alternatives"]) <= MAX_ALTERNATIVES
 
 
-def test_solo_alternatives_sorted_desc():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_sorted_desc(solo_scan_result):
+    result = solo_scan_result
     alts = result["alternatives"]
     scores = [a["score"] for a in alts]
     assert scores == sorted(scores, reverse=True)
 
 
-def test_solo_alternatives_excludes_best():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_excludes_best(solo_scan_result):
+    result = solo_scan_result
     if result["best_instant"] is None:
         pytest.skip("no best instant for this window")
     best_inst = result["best_instant"]["instant"]
@@ -289,18 +313,8 @@ def test_solo_alternatives_excludes_best():
         assert a["instant"] != best_inst
 
 
-def test_solo_alternatives_same_date_separation():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_same_date_separation(solo_scan_result):
+    result = solo_scan_result
     if result["best_instant"] is None:
         pytest.skip("no best instant")
     best_date, best_time = result["best_instant"]["instant"].split(" ")
@@ -318,18 +332,8 @@ def test_solo_alternatives_same_date_separation():
         accepted.append((a_date, a_m))
 
 
-def test_solo_alternatives_window_shape():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_window_shape(solo_scan_result):
+    result = solo_scan_result
     for a in result["alternatives"]:
         w = a["window"]
         assert w is not None, "Solo alternative must have a window"
@@ -339,7 +343,13 @@ def test_solo_alternatives_window_shape():
         assert end_m - start_m <= 11, f"Alternative window too wide: {end_m - start_m}"
 
 
-def test_solo_alternatives_determinism():
+def test_solo_alternatives_determinism(solo_scan_result):
+    """Calling the scan twice with identical inputs yields identical output.
+
+    r1 comes from the shared module-scoped fixture (itself one real scan
+    call); r2 is a fresh, independent invocation with the same args. The
+    comparison still exercises true determinism of the underlying scan.
+    """
     kwargs = dict(
         lat=SAMPLE_A["latitude"],
         lon=SAMPLE_A["longitude"],
@@ -351,25 +361,15 @@ def test_solo_alternatives_determinism():
         activity="generic",
         step_seconds=60,
     )
-    r1 = scan_lagna_shuddhi(**kwargs)
+    r1 = solo_scan_result
     r2 = scan_lagna_shuddhi(**kwargs)
     assert [a["instant"] for a in r1["alternatives"]] == [a["instant"] for a in r2["alternatives"]]
     assert [a["score"] for a in r1["alternatives"]] == [a["score"] for a in r2["alternatives"]]
 
 
-def test_solo_best_window_unchanged_after_refactor():
+def test_solo_best_window_unchanged_after_refactor(solo_scan_result):
     """Regression guard: _tolerance_window refactor must not change best_window behaviour."""
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+    result = solo_scan_result
     if result["best_window"] is None:
         pytest.skip("no best window")
     bw = result["best_window"]
@@ -378,18 +378,8 @@ def test_solo_best_window_unchanged_after_refactor():
     assert end_m - start_m <= 11, f"best_window too wide after refactor: {end_m - start_m}"
 
 
-def test_solo_alternatives_have_required_fields():
-    result = scan_lagna_shuddhi(
-        lat=SAMPLE_A["latitude"],
-        lon=SAMPLE_A["longitude"],
-        tz_offset=SAMPLE_A["timezone_offset_hours"],
-        birth_nakshatra=None,
-        birth_moon_sign=None,
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_solo_alternatives_have_required_fields(solo_scan_result):
+    result = solo_scan_result
     for a in result["alternatives"]:
         assert "instant" in a
         assert "score" in a
@@ -405,177 +395,39 @@ def test_solo_alternatives_have_required_fields():
 # Integration: family scan — alternatives shape
 # ---------------------------------------------------------------------------
 
-def test_family_alternatives_present():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_present(family_scan_result):
+    result = family_scan_result
     assert "alternatives" in result
     assert isinstance(result["alternatives"], list)
 
 
-def test_family_alternatives_cap():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_cap(family_scan_result):
+    result = family_scan_result
     assert len(result["alternatives"]) <= MAX_ALTERNATIVES
 
 
-def test_family_alternatives_window_is_none():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_window_is_none(family_scan_result):
+    result = family_scan_result
     for a in result["alternatives"]:
         assert a["window"] is None, "Family alternatives must have window=None"
 
 
-def test_family_alternatives_sorted_desc():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_sorted_desc(family_scan_result):
+    result = family_scan_result
     scores = [a["score"] for a in result["alternatives"]]
     assert scores == sorted(scores, reverse=True)
 
 
-def test_family_alternatives_excludes_best():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_excludes_best(family_scan_result):
+    result = family_scan_result
     if result["instant"] is None:
         pytest.skip("no best instant")
     for a in result["alternatives"]:
         assert a["instant"] != result["instant"]
 
 
-def test_family_alternatives_same_date_separation():
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+def test_family_alternatives_same_date_separation(family_scan_result):
+    result = family_scan_result
     if result["instant"] is None:
         pytest.skip("no best instant")
     best_date, best_time = result["instant"].split(" ")
@@ -593,34 +445,11 @@ def test_family_alternatives_same_date_separation():
         accepted.append((a_date, a_m))
 
 
-def test_family_alternatives_never_outscore_best():
+def test_family_alternatives_never_outscore_best(family_scan_result):
     """Alternatives come from the same gated pool as the recommendation
     (strict pool when consensus is strict), so none may carry a higher
     score than the consensus best."""
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+    result = family_scan_result
     if result["instant"] is None:
         pytest.skip("no best instant")
     for a in result["alternatives"]:
@@ -629,32 +458,9 @@ def test_family_alternatives_never_outscore_best():
         )
 
 
-def test_family_alternatives_band_field():
+def test_family_alternatives_band_field(family_scan_result):
     """Each family alternative must have a valid band field."""
-    result = scan_family_lagna_shuddhi(
-        members=[
-            {
-                "name": "member_a",
-                "lat": SAMPLE_A["latitude"],
-                "lon": SAMPLE_A["longitude"],
-                "tz_offset": SAMPLE_A["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-            {
-                "name": "member_b",
-                "lat": SAMPLE_B["latitude"],
-                "lon": SAMPLE_B["longitude"],
-                "tz_offset": SAMPLE_B["timezone_offset_hours"],
-                "birth_nakshatra": None,
-                "birth_moon_sign": None,
-            },
-        ],
-        start_date="2026-06-15",
-        end_date="2026-06-17",
-        activity="generic",
-        step_seconds=60,
-    )
+    result = family_scan_result
     for a in result["alternatives"]:
         assert a["band"] in ("Excellent", "Good", "Fair", "Avoid")
 
@@ -663,8 +469,8 @@ def test_family_alternatives_band_field():
 # Endpoint shape: alternatives present in API responses
 # ---------------------------------------------------------------------------
 
-def test_endpoint_solo_alternatives_in_body():
-    r = client.post("/v1/muhurat/lagna-shuddhi", json=_LAGNA_SHUDDHI_REQ)
+def test_endpoint_solo_alternatives_in_body(solo_endpoint_response):
+    r = solo_endpoint_response
     assert r.status_code == 200
     body = r.json()
     assert "alternatives" in body
@@ -672,8 +478,8 @@ def test_endpoint_solo_alternatives_in_body():
     assert len(body["alternatives"]) <= MAX_ALTERNATIVES
 
 
-def test_endpoint_family_alternatives_in_body():
-    r = client.post("/v1/muhurat/family-lagna-shuddhi", json=_FAMILY_REQ_CLEAN)
+def test_endpoint_family_alternatives_in_body(family_endpoint_response):
+    r = family_endpoint_response
     assert r.status_code == 200
     body = r.json()
     assert "alternatives" in body
@@ -681,17 +487,17 @@ def test_endpoint_family_alternatives_in_body():
     assert len(body["alternatives"]) <= MAX_ALTERNATIVES
 
 
-def test_endpoint_family_alternatives_window_null():
-    r = client.post("/v1/muhurat/family-lagna-shuddhi", json=_FAMILY_REQ_CLEAN)
+def test_endpoint_family_alternatives_window_null(family_endpoint_response):
+    r = family_endpoint_response
     assert r.status_code == 200
     body = r.json()
     for a in body["alternatives"]:
         assert a["window"] is None
 
 
-def test_endpoint_solo_alternatives_contract_shape():
+def test_endpoint_solo_alternatives_contract_shape(solo_endpoint_response):
     """Each alternative in the API response has the contracted fields and valid values."""
-    r = client.post("/v1/muhurat/lagna-shuddhi", json=_LAGNA_SHUDDHI_REQ)
+    r = solo_endpoint_response
     assert r.status_code == 200
     body = r.json()
     for a in body["alternatives"]:
