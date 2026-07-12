@@ -1,0 +1,178 @@
+{
+  "alternatives": [
+    {
+      "band": "Fair",
+      "instant": "2026-05-26 12:00",
+      "score": 0.51,
+      "score_100": 51,
+      "window": null
+    },
+    {
+      "band": "Fair",
+      "instant": "2026-05-26 21:00",
+      "score": 0.5,
+      "score_100": 50,
+      "window": null
+    },
+    {
+      "band": "Fair",
+      "instant": "2026-05-26 20:00",
+      "score": 0.45,
+      "score_100": 45,
+      "window": null
+    },
+    {
+      "band": "Fair",
+      "instant": "2026-05-26 01:00",
+      "score": 0.44,
+      "score_100": 44,
+      "window": null
+    },
+    {
+      "band": "Fair",
+      "instant": "2026-05-26 02:00",
+      "score": 0.38,
+      "score_100": 38,
+      "window": null
+    }
+  ],
+  "band": "Fair",
+  "best_window": {
+    "end": "00:01",
+    "label": "Best joint window for generic",
+    "start": "00:00"
+  },
+  "clearance_summary": "Joint best_effort window for 2 members. Clear of Rahu Kala, Yamaganda and Gulika. Panchanga: Shukla Ekadashi, yoga Siddhi \u2014 suitable. Tara Bala: Paramitra; Chandra Bala: Neutral. Rising Aquarius (lord Saturn) in the 2nd, neutral. Event Navamsha lagna Libra (suitable for generic).",
+  "compromised_members": [
+    "sample_b"
+  ],
+  "consensus_quality": "best_effort",
+  "instant": "2026-05-26 00:00",
+  "per_member": [
+    {
+      "band": "Good",
+      "chandra_bala": "Neutral",
+      "chogadiya_label": "Shubh (Auspicious)",
+      "event_navamsha": "Libra",
+      "event_navamsha_suitable": true,
+      "factors": [
+        {
+          "detail": "Clear of Rahu Kala, Yamaganda and Gulika.",
+          "impact": "positive",
+          "name": "Inauspicious periods"
+        },
+        {
+          "detail": "Paramitra \u2014 favourable.",
+          "impact": "positive",
+          "name": "Tara Bala"
+        },
+        {
+          "detail": "Shukla Ekadashi, Siddhi yoga \u2014 suitable.",
+          "impact": "positive",
+          "name": "Panchanga"
+        },
+        {
+          "detail": "Within Vijaya Muhurtha (Night).",
+          "impact": "positive",
+          "name": "Muhurta"
+        },
+        {
+          "detail": "Shubh (Auspicious).",
+          "impact": "positive",
+          "name": "Chogadiya"
+        },
+        {
+          "detail": "Navamsa lagna Libra suits the activity.",
+          "impact": "positive",
+          "name": "Event Navamsha"
+        }
+      ],
+      "hard_gate_failed": false,
+      "hora_lord": "Moon",
+      "in_auspicious_muhurta": "Vijaya Muhurtha (Night)",
+      "in_durmuhurtam": false,
+      "in_gulika": false,
+      "in_rahu_kala": false,
+      "in_varjyam": false,
+      "in_yamaganda": false,
+      "instant": "2026-05-26 00:00",
+      "lagna_lord": "Saturn",
+      "lagna_lord_dignity": "neutral",
+      "lagna_lord_house": 2,
+      "lagna_sign": "Aquarius",
+      "name": "sample_a",
+      "panchanga_suitable": true,
+      "score": 0.69,
+      "score_100": 69,
+      "tara_bala": "Paramitra",
+      "tithi": "Shukla Ekadashi",
+      "yoga": "Siddhi"
+    },
+    {
+      "band": "Fair",
+      "chandra_bala": "Inauspicious (Avoid)",
+      "chogadiya_label": "Shubh (Auspicious)",
+      "event_navamsha": "Libra",
+      "event_navamsha_suitable": true,
+      "factors": [
+        {
+          "detail": "Clear of Rahu Kala, Yamaganda and Gulika.",
+          "impact": "positive",
+          "name": "Inauspicious periods"
+        },
+        {
+          "detail": "Sadhana \u2014 favourable.",
+          "impact": "positive",
+          "name": "Tara Bala"
+        },
+        {
+          "detail": "Moon poorly placed from the birth sign.",
+          "impact": "negative",
+          "name": "Chandra Bala"
+        },
+        {
+          "detail": "Shukla Ekadashi, Siddhi yoga \u2014 suitable.",
+          "impact": "positive",
+          "name": "Panchanga"
+        },
+        {
+          "detail": "Within Vijaya Muhurtha (Night).",
+          "impact": "positive",
+          "name": "Muhurta"
+        },
+        {
+          "detail": "Shubh (Auspicious).",
+          "impact": "positive",
+          "name": "Chogadiya"
+        },
+        {
+          "detail": "Navamsa lagna Libra suits the activity.",
+          "impact": "positive",
+          "name": "Event Navamsha"
+        }
+      ],
+      "hard_gate_failed": false,
+      "hora_lord": "Moon",
+      "in_auspicious_muhurta": "Vijaya Muhurtha (Night)",
+      "in_durmuhurtam": false,
+      "in_gulika": false,
+      "in_rahu_kala": false,
+      "in_varjyam": false,
+      "in_yamaganda": false,
+      "instant": "2026-05-26 00:00",
+      "lagna_lord": "Saturn",
+      "lagna_lord_dignity": "neutral",
+      "lagna_lord_house": 2,
+      "lagna_sign": "Aquarius",
+      "name": "sample_b",
+      "panchanga_suitable": true,
+      "score": 0.57,
+      "score_100": 57,
+      "tara_bala": "Sadhana",
+      "tithi": "Shukla Ekadashi",
+      "yoga": "Siddhi"
+    }
+  ],
+  "score": 0.57,
+  "score_100": 57
+}
