@@ -462,6 +462,34 @@ class FamilyLagnaShuddhiResponse(BaseModel):
     alternatives: list[LagnaShuddhiAlternative] = []
 
 
+# --- Async scan jobs (CR-4: additive submit/poll variant for the scan-class
+# endpoints above) ---
+
+JobStatusLiteral = Literal["pending", "running", "done", "error"]
+
+
+class JobSubmitted(BaseModel):
+    """Returned immediately by a scan's async submit endpoint."""
+    job_id: str
+    status: JobStatusLiteral = "pending"
+
+
+class LagnaShuddhiJobStatus(BaseModel):
+    job_id: str
+    status: JobStatusLiteral
+    # Populated only once status == "done"; None while pending/running/error.
+    result: LagnaShuddhiResponse | None = None
+    # Populated only once status == "error"; the underlying exception's message.
+    error: str | None = None
+
+
+class FamilyLagnaShuddhiJobStatus(BaseModel):
+    job_id: str
+    status: JobStatusLiteral
+    result: FamilyLagnaShuddhiResponse | None = None
+    error: str | None = None
+
+
 # --- Compatibility ---
 
 class CompatRequest(BaseModel):
