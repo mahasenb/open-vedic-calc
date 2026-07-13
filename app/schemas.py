@@ -20,6 +20,29 @@ IsoDateStr = Annotated[str, AfterValidator(_validate_iso_date)]
 # The dasha systems the timeline builder actually computes; see get_dasha_timeline.
 DashaSystem = Literal["vimshottari", "yogini"]
 
+# Ephemeris data files ship AD 1800-2400 (see EPHEMERIS_LICENSE.md: seas_18/
+# semo_18/sepl_18 cover "AD 1800-2400"). A birth_date outside that span still
+# reaches swe.julday() unguarded downstream (bphs_core/chart.py, lagna_shuddhi.py,
+# muhurat.py, transits.py) — at best an inaccurate/undefined ephemeris result,
+# at worst a native-level fault in the single-worker container. Reject it at
+# the schema boundary as a clean 422 instead.
+MIN_EPHEMERIS_YEAR = 1800
+MAX_EPHEMERIS_YEAR = 2400
+
+
+def _validate_ephemeris_year(value: date) -> date:
+    if not (MIN_EPHEMERIS_YEAR <= value.year <= MAX_EPHEMERIS_YEAR):
+        raise ValueError(
+            f"birth_date year must be between {MIN_EPHEMERIS_YEAR} and "
+            f"{MAX_EPHEMERIS_YEAR} (the supported ephemeris data range)"
+        )
+    return value
+
+
+# A birth date carried on the wire as a date, bounded to the ephemeris range
+# supported by the shipped Swiss Ephemeris data files.
+BoundedBirthDate = Annotated[date, AfterValidator(_validate_ephemeris_year)]
+
 
 class BoundedPersonFields(BaseModel):
     """Shared, bounded name / birth_place / birth_date fields for every
@@ -27,15 +50,17 @@ class BoundedPersonFields(BaseModel):
 
     Theme-K (forensic review): FamilyMember previously redefined these three
     fields from scratch instead of inheriting them, and in doing so silently
-    dropped PersonalDataIn's string-length bounds. Centralizing them here
-    means any new person-like model gets the same bounds by construction; a
-    future field can't drop a guard by copy-paste omission.
+    dropped PersonalDataIn's string-length bounds and picked up no birth_date
+    guard at all -- a request/log-inflation vector plus an unguarded
+    out-of-range ephemeris year. Centralizing the guards here means any new
+    person-like model gets them by construction; a future field can't drop
+    a guard by copy-paste omission.
     """
     # Bounded so an oversized free-text field can't be used to inflate request
     # size / log volume. name and place are display-only labels here; the
     # computation keys off the date/time/coordinates.
     name: str = Field(min_length=1, max_length=120)
-    birth_date: date
+    birth_date: BoundedBirthDate
     birth_place: str = Field(min_length=1, max_length=200)
 
 
@@ -439,9 +464,9 @@ class LagnaShuddhiResponse(BaseModel):
 class FamilyMember(BoundedPersonFields):
     # latitude/longitude/timezone_offset_hours are intentionally redefined
     # here (not inherited from PersonalDataIn) -- see tests/test_coord_bounds.py
-    # TestFamilyCoordBounds. name/birth_place now come from BoundedPersonFields
-    # so this model can no longer drop those string bounds the way it
-    # previously did (FR-MED-23).
+    # TestFamilyCoordBounds. name/birth_place/birth_date now come from
+    # BoundedPersonFields so this model can no longer drop those bounds the
+    # way it previously did (FR-MED-23 / FR-LOW-2).
     birth_time: time
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
