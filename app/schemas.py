@@ -21,14 +21,26 @@ IsoDateStr = Annotated[str, AfterValidator(_validate_iso_date)]
 DashaSystem = Literal["vimshottari", "yogini"]
 
 
-class PersonalDataIn(BaseModel):
+class BoundedPersonFields(BaseModel):
+    """Shared, bounded name / birth_place / birth_date fields for every
+    person-like request model (PersonalDataIn, FamilyMember, ...).
+
+    Theme-K (forensic review): FamilyMember previously redefined these three
+    fields from scratch instead of inheriting them, and in doing so silently
+    dropped PersonalDataIn's string-length bounds. Centralizing them here
+    means any new person-like model gets the same bounds by construction; a
+    future field can't drop a guard by copy-paste omission.
+    """
     # Bounded so an oversized free-text field can't be used to inflate request
     # size / log volume. name and place are display-only labels here; the
     # computation keys off the date/time/coordinates.
     name: str = Field(min_length=1, max_length=120)
     birth_date: date
-    birth_time: time
     birth_place: str = Field(min_length=1, max_length=200)
+
+
+class PersonalDataIn(BoundedPersonFields):
+    birth_time: time
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
@@ -424,11 +436,13 @@ class LagnaShuddhiResponse(BaseModel):
 
 # --- Family (multi-person) Lagna Shuddhi ---
 
-class FamilyMember(BaseModel):
-    name: str
-    birth_date: date
+class FamilyMember(BoundedPersonFields):
+    # latitude/longitude/timezone_offset_hours are intentionally redefined
+    # here (not inherited from PersonalDataIn) -- see tests/test_coord_bounds.py
+    # TestFamilyCoordBounds. name/birth_place now come from BoundedPersonFields
+    # so this model can no longer drop those string bounds the way it
+    # previously did (FR-MED-23).
     birth_time: time
-    birth_place: str
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
