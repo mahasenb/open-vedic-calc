@@ -106,6 +106,15 @@ app = FastAPI(
     title="Open Vedic Calc",
     description="Generic BPHS calculation service — AGPL-3.0",
     version="1.0.0",
+    # FR-MED-22: every business route is gated by the require_token dependency,
+    # but FastAPI's auto-generated docs/schema endpoints are not routes with
+    # that dependency attached -- they are wired by the FastAPI app object
+    # itself, so leaving them enabled exposes the full API schema (including
+    # internal field names/bounds) to anyone with network reach, with no
+    # token required. Disable them; /healthz stays open by design (see below).
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
