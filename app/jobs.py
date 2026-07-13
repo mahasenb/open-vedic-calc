@@ -16,17 +16,36 @@ infrastructure: an in-memory dict guarded by a lock, plus a stdlib
 process-local and does not survive a restart -- acceptable here because the
 existing synchronous ``/v1/*`` endpoints remain fully intact as the
 canonical, durable path; this store only backs the additive async variant.
+
+FR-MED-21: ``submit()`` used to insert into ``self._jobs`` and nothing ever
+removed an entry -- ``get()`` only reads. A long-lived container fielding a
+steady trickle of scan submissions would grow the dict (and the completed
+job's ``result``/``error`` payload it holds) without bound until the process
+is OOM-killed. ``JobStore`` is now capped at ``max_jobs`` entries: each
+``submit()`` prunes the oldest terminal (``done``/``error``) jobs first, and
+falls back to dropping the oldest entry outright if the cap is still
+exceeded (which only happens if more jobs are in flight than the cap allows,
+an already-pathological case for a 4-worker pool). Both endpoints are
+authenticated (trusted caller), so this is a memory-hygiene bound, not an
+abuse control.
 """
 from __future__ import annotations
 
+import os
 import threading
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
 JobStatus = Literal["pending", "running", "done", "error"]
+
+# Upper bound on how many jobs (any status) the store retains at once. Sized
+# generously above realistic in-flight/recently-polled job counts for a
+# 4-worker pool -- this is a memory-hygiene ceiling, not a throughput knob.
+DEFAULT_MAX_JOBS = int(os.environ.get("JOB_STORE_MAX_JOBS", "1000"))
 
 
 @dataclass
@@ -49,14 +68,44 @@ class JobStore:
     contention; a small bound simply lets a handful of scans queue and run
     to completion without blocking submission of new jobs or polling of
     existing ones (both of which only touch the lock-protected dict).
+
+    ``max_jobs`` bounds the dict itself (FR-MED-21): without it, a
+    long-lived container fielding a steady stream of submissions grows
+    ``self._jobs`` -- and every completed job's retained result/error --
+    without bound, since nothing ever removed a completed entry.
     """
 
-    def __init__(self, max_workers: int = 4) -> None:
-        self._jobs: dict[str, Job] = {}
+    def __init__(self, max_workers: int = 4, max_jobs: int = DEFAULT_MAX_JOBS) -> None:
+        self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._lock = threading.Lock()
+        self._max_jobs = max_jobs
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="calc-scan-job"
         )
+
+    def _evict_over_capacity_locked(self) -> None:
+        """Bound ``self._jobs`` to ``max_jobs``. Caller must hold ``self._lock``.
+
+        Oldest terminal (``done``/``error``) jobs are dropped first, since
+        those are the ones nothing needs any more -- a caller that hasn't
+        polled a finished job yet is not this store's problem to hold onto
+        indefinitely. If the store is still over capacity after that pass
+        (only possible if more jobs are simultaneously pending/running than
+        the cap allows), the oldest entries are dropped regardless: the
+        bound must never be exceeded, and a dropped pending/running job just
+        means a subsequent poll sees 404 (unknown job) instead of its status
+        -- acceptable for this additive convenience path (see module
+        docstring), not acceptable for the dict to grow forever.
+        """
+        if len(self._jobs) <= self._max_jobs:
+            return
+        for job_id, job in list(self._jobs.items()):
+            if len(self._jobs) <= self._max_jobs:
+                return
+            if job.status in ("done", "error"):
+                del self._jobs[job_id]
+        while len(self._jobs) > self._max_jobs:
+            self._jobs.popitem(last=False)
 
     def submit(self, fn: Callable[[], Any]) -> str:
         """Register a new job and hand its execution to the background pool.
@@ -70,6 +119,7 @@ class JobStore:
         job = Job(id=job_id)
         with self._lock:
             self._jobs[job_id] = job
+            self._evict_over_capacity_locked()
 
         def _run() -> None:
             with self._lock:
