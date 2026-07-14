@@ -313,11 +313,13 @@ class SourceInfo(BaseModel):
 
 # --- Muhurat ---
 
-class MuhurtRequest(BaseModel):
-    name: str
-    birth_date: date
+class MuhurtRequest(BoundedPersonFields):
+    # Inherits the bounded name / birth_place and the ephemeris-range-checked
+    # birth_date from BoundedPersonFields (see PersonalDataIn / FamilyMember), so
+    # this model can no longer accept an oversized name (request/log-inflation) or
+    # an out-of-range birth year that would reach the ephemeris unguarded. The
+    # fields below are muhurat-specific.
     birth_time: time
-    birth_place: str
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
@@ -396,11 +398,10 @@ class MuhurtResponse(BaseModel):
 
 # --- Lagna Shuddhi (electional muhurat) ---
 
-class LagnaShuddhiRequest(BaseModel):
-    name: str
-    birth_date: date
+class LagnaShuddhiRequest(BoundedPersonFields):
+    # Inherits the bounded name / birth_place / ephemeris-range birth_date from
+    # BoundedPersonFields (see MuhurtRequest); the fields below are scan-specific.
     birth_time: time
-    birth_place: str
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
