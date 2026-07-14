@@ -28,6 +28,12 @@ exceeded (which only happens if more jobs are in flight than the cap allows,
 an already-pathological case for a 4-worker pool). Both endpoints are
 authenticated (trusted caller), so this is a memory-hygiene bound, not an
 abuse control.
+
+DESIGN NOTE: This module solves the caller-connection-timeout problem for
+long-running scans but does NOT eliminate GIL contention between CPU-bound
+scans and sync handlers. The full accepted trade-off rationale (what it solves,
+residual contention behavior, why it is acceptable, and when the decision would
+reverse) is recorded in CLAUDE.md → "Async scanning design".
 """
 from __future__ import annotations
 

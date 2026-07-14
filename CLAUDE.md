@@ -46,6 +46,18 @@ Endpoints are versioned under `/v1/*` (chart, strength, dashas, yogas, transits,
 - Keep-alive / stale-connection handling is a two-sided contract. Server side: uvicorn runs with `--timeout-keep-alive 75` (Dockerfile CMD) so idle pooled connections aren't closed out from under a client mid-send (which otherwise surfaces as an `httpx.ReadError`) — keep this value at or above any upstream/load-balancer idle timeout. Client-side retry of the residual race is the caller's responsibility, not this repo's. If you change one side of this contract, reason about both.
 - CORS `allow_origins` is driven by the `ALLOWED_ORIGINS` env var (main.py:91,111) and is empty by default — this is a server-to-server service. Do not introduce a wildcard `["*"]` origin.
 
+## Async scanning design — the GIL trade-off
+
+The service runs single-threaded under Python's GIL. A wide date-range electional scan (up to `MAX_LAGNA_SHUDDHI_DAYS` days) can occupy a request thread for its full duration, starving concurrent chart requests and risking the caller's connection/proxy timeout. The async submit/poll endpoint (`app/jobs.py`) solves this: it hands back a job id immediately and runs the scan on a small background thread pool, decoupled from the submitting request's lifecycle.
+
+**What it solves:** the connection timeout problem for long-running scans. The HTTP call that submits a scan returns right away; the caller polls for results separately.
+
+**What it does NOT solve:** GIL contention. The background thread pool and the sync `/v1/*` handlers share the single process's GIL. CPU-bound scans and interactive chart requests still contend, degrading latency of concurrent sync handlers while a scan runs. The design's own docstring (`app/jobs.py` lines 1–18) already acknowledges this. The thread pool is deliberately kept small (`max_workers=4`) to bound the contention, and the design ensures submissions and polls (which only touch a lock-protected dict) remain O(1) and never wait on scan compute.
+
+**Why the trade-off is accepted:** (1) it solves a real, reported problem (caller connection timeouts); (2) residual latency degradation is bounded by `max_workers=4` and occurs only during a scan; (3) the caller has a durable synchronous path (`/v1/muhurat`, `/v1/muhurat.lagna-shuddhi`) as the canonical route — the async variant is strictly additive; (4) job state is process-local and does not survive a restart, acceptable because the sync path remains intact; (5) no evidence of a breached latency SLO today.
+
+**If the decision reverses:** should a latency SLO be breached or the caller profile change to many concurrent scans, isolate scan CPU in a subprocess or `multiprocessing.Pool` to eliminate GIL contention. This would require separate infrastructure (subprocess management, IPC, cleanup on restart) — acceptable at that point, but not now.
+
 ## Supply-chain & image hygiene
 
 - The shipped Docker image must install from the committed lockfile so the deployed dependency set equals the tested one. Current defect tracked under the audit (FORENSIC_AUDIT_2026-07-02.md, MED-47): the Dockerfile's `pip install --no-cache-dir -e .` (Dockerfile, `RUN pip install` step) never copies `uv.lock` into the build context, so the image resolves floating ranges (e.g. `pyjhora>=4.8.0`, `fastapi>=0.111.0`) at build time and can diverge from the locked, tested set — unacceptable for a temp=0, deterministic-accuracy engine. Rule: copy `uv.lock` into the image and install frozen (`uv sync --frozen`); CI must test exactly what the Dockerfile ships.
