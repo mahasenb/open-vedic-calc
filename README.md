@@ -25,7 +25,11 @@ Download Swiss Ephemeris files into `data/ephe/` — see `EPHEMERIS_LICENSE.md`.
 
 ## API
 
-OpenAPI spec: `openapi.yaml` (or `/docs` when running).
+The API contract is defined in `app/schemas.py` (request/response models) and the
+endpoint table below. `/docs` and `/openapi.json` are intentionally disabled at
+runtime (unauthenticated introspection endpoints were a security risk) — there is
+no served or committed OpenAPI document; read `app/schemas.py` for the exact
+shapes.
 
 Endpoints under `/v1/`:
 

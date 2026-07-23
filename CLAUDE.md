@@ -60,8 +60,8 @@ The service runs single-threaded under Python's GIL. A wide date-range electiona
 
 ## Supply-chain & image hygiene
 
-- The shipped Docker image must install from the committed lockfile so the deployed dependency set equals the tested one. Current defect tracked under the audit (FORENSIC_AUDIT_2026-07-02.md, MED-47): the Dockerfile's `pip install --no-cache-dir -e .` (Dockerfile, `RUN pip install` step) never copies `uv.lock` into the build context, so the image resolves floating ranges (e.g. `pyjhora>=4.8.0`, `fastapi>=0.111.0`) at build time and can diverge from the locked, tested set — unacceptable for a temp=0, deterministic-accuracy engine. Rule: copy `uv.lock` into the image and install frozen (`uv sync --frozen`); CI must test exactly what the Dockerfile ships.
-- Add and keep dependency CVE scanning (e.g. `pip-audit`) and a `dependabot.yml`. `pyswisseph` is a hard-pinned compiled C extension that parses ephemeris files — a CVE there must not go unmonitored. This is baseline hygiene expected of a public AGPL project.
+- The shipped Docker image installs from the committed, frozen lockfile: `Dockerfile` copies `pyproject.toml`/`uv.lock` into the build context and runs `uv sync --frozen` (once for third-party deps, once for the project itself), so the deployed dependency set is provably the tested one — there is no floating `pip install -e .` step left. Keep it this way; never reintroduce an unpinned resolve at build time.
+- Dependency CVE scanning and `dependabot.yml` are both live: `.github/workflows/test.yml` runs `pip-audit --requirement requirements.frozen.txt` against the frozen lock, and `.github/dependabot.yml` watches `pip` + `github-actions` weekly. `pyswisseph` is a hard-pinned compiled C extension that parses ephemeris files — keep it covered by this scan; this is baseline hygiene expected of a public AGPL project.
 
 ## Tests & local gate
 
@@ -71,7 +71,7 @@ The service runs single-threaded under Python's GIL. A wide date-range electiona
 
 ## PR review & merge gate
 
-Every PR here is reviewed **and** merged by a *separate Opus review session* — a fresh `claude-opus-4-8` session, never the session that authored the change and never a human. Its independent `--approve` authorizes the merge (`gh pr merge <n> --rebase --delete-branch`); the authoring session opens the PR and stops. Fail closed: no independent Opus approval, no merge. The reviewer is bound by the product-neutrality rule above — its PR review text, like every artifact here, names no downstream consumer. Full hand-off mechanism and reviewer instructions live in the workspace-root `CLAUDE.md` → "PR review — separate Opus session".
+Every PR here is reviewed **and** merged by a separate, independent review session on the strongest available model (currently Claude Fable 5), never the session that authored the change and never a human. Its independent `--approve` authorizes the merge (`gh pr merge <n> --rebase --delete-branch`); the authoring session opens the PR and stops. Fail closed: no independent approval, no merge. The reviewer is bound by the product-neutrality rule above — its PR review text, like every artifact here, names no downstream consumer. Full hand-off mechanism and reviewer instructions live in the workspace-root `CLAUDE.md` → "PR review — separate independent review session".
 
 ## Active remediation
 
