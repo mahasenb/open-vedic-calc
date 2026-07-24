@@ -18,6 +18,7 @@ for the duration of its computation.
 from __future__ import annotations
 
 import threading
+import time as time_mod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time
 
@@ -62,14 +63,19 @@ def test_ephemeris_lock_exists_and_is_reentrant():
 
 
 def test_every_c_library_entry_point_is_serialized():
-    """Each public compute path that enters pyswisseph/pyjhora carries the
+    """Each INNER compute path that enters pyswisseph/pyjhora carries the
     ``_holds_ephemeris_lock`` marker set by the ``serialized_ephemeris``
-    decorator — a new entry point added without the lock fails this list."""
+    decorator. The lock is held at inner (millisecond-bounded) granularity —
+    one chart, one day, one instant, one JD conversion — never across a whole
+    scan, so interactive routes and async submits stay responsive while a
+    scan runs. This list pins the currently-known entry points; the standing
+    convention for NEW paths lives in CLAUDE.md (Engine conventions)."""
     entry_points = [
         Chart._compute,
         muhurat.compute_muhurat_for_day,
-        lagna_shuddhi.scan_lagna_shuddhi,
-        lagna_shuddhi.scan_family_lagna_shuddhi,
+        lagna_shuddhi._jd_for_local,
+        lagna_shuddhi.compute_lagna_at_jd,
+        lagna_shuddhi._score_instant,
         transits.get_current_transits,
         transits.get_sade_sati_info,
     ]
@@ -78,6 +84,78 @@ def test_every_c_library_entry_point_is_serialized():
             f"{fn.__qualname__} enters the C library but does not hold "
             "EPHEMERIS_LOCK (missing @serialized_ephemeris)"
         )
+
+
+def test_scan_entry_points_are_not_serialized_wholesale():
+    """The OUTER scan functions must NOT hold EPHEMERIS_LOCK for their full
+    duration: a whole-scan hold (seconds to minutes at the API's range caps)
+    would block every interactive chart route AND the async submit path
+    (which builds a natal chart at submit time) for the scan's remaining
+    duration — reversing the accepted async-scan design's "submissions never
+    wait on scan compute" property. Scans serialize through their inner
+    per-instant entry points instead."""
+    for fn in (
+        lagna_shuddhi.scan_lagna_shuddhi,
+        lagna_shuddhi.scan_family_lagna_shuddhi,
+    ):
+        assert not getattr(fn, "_holds_ephemeris_lock", False), (
+            f"{fn.__qualname__} must not hold EPHEMERIS_LOCK for the whole "
+            "scan — serialize the inner entry points it calls instead"
+        )
+
+
+def test_long_scan_does_not_block_concurrent_chart_compute():
+    """Behavioural proof of the granularity: while a multi-second scan runs
+    on a background thread, a concurrent Chart build (the same lock use as an
+    async submit's natal-Moon extraction) completes in bounded time by
+    interleaving between the scan's millisecond lock holds — it does not wait
+    for the scan to finish."""
+    # Warm-up so imports/ephemeris init don't inflate the timing below.
+    Chart(_PERSON_A)
+
+    scan_started = threading.Event()
+    scan_finished_at: dict[str, float] = {}
+
+    def _run_scan() -> None:
+        scan_started.set()
+        lagna_shuddhi.scan_lagna_shuddhi(
+            lat=7.0,
+            lon=80.0,
+            tz_offset=5.5,
+            birth_nakshatra="Ashwini",
+            birth_moon_sign="Aries",
+            start_date="2026-06-01",
+            end_date="2026-06-12",
+            activity="generic",
+            step_seconds=600,
+        )
+        scan_finished_at["t"] = time_mod.monotonic()
+
+    t = threading.Thread(target=_run_scan, daemon=True)
+    t.start()
+    assert scan_started.wait(5)
+    time_mod.sleep(0.1)  # let the scan get into its sampling loop
+
+    t0 = time_mod.monotonic()
+    Chart(_PERSON_B)
+    chart_done_at = time_mod.monotonic()
+    chart_elapsed = chart_done_at - t0
+
+    t.join(timeout=120)
+    assert "t" in scan_finished_at, "scan never finished"
+
+    # The scan (~3 s at 12 days / 600 s steps) must still have been
+    # running when the chart completed — i.e. the chart interleaved with it.
+    assert scan_finished_at["t"] > chart_done_at, (
+        "scan finished before the concurrent chart — timing assertion vacuous; "
+        "increase the scan range"
+    )
+    # A warm chart is ~ms; anything approaching the scan's duration means the
+    # chart waited for the whole scan (whole-scan lock hold).
+    assert chart_elapsed < 1.5, (
+        f"concurrent Chart build took {chart_elapsed:.2f}s while a scan was "
+        "running — the scan is holding EPHEMERIS_LOCK for its full duration"
+    )
 
 
 def test_chart_compute_actually_blocks_on_the_lock():
