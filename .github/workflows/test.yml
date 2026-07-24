@@ -53,3 +53,36 @@ jobs:
           python -m pip install --upgrade uv
           uv export --frozen --no-dev --no-emit-project -o requirements.frozen.txt
           pip-audit --requirement requirements.frozen.txt
+
+  docker-test-image:
+    name: Build Dockerfile.test
+    runs-on: ubuntu-latest
+    # CALC-7: Dockerfile.test is what scripts/test-in-docker.* runs locally to
+    # exercise real Swiss ephemeris data, and it installs from uv.lock with
+    # `--frozen` (fails closed on any pyproject.toml/uv.lock drift). Nothing
+    # else in CI builds this image, so without this job a frozen-install
+    # regression here would only surface for a contributor running the local
+    # Docker loop, not on the PR itself. Skipped on the weekly schedule run —
+    # same rationale as the "Run tests" step above, nothing about the image
+    # changed, only the vulnerability database might have.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          # Same mirror.gcr.io routing as publish.yml — anonymous docker.io
+          # pulls (the python:3.10-slim base) intermittently rate-limit on
+          # GitHub-hosted runners.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.test
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
