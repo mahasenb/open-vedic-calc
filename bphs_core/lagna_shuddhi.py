@@ -301,6 +301,7 @@ def _label_at(time_mins: int, windows: list[dict]) -> str | None:
     return None
 
 
+@utils.serialized_ephemeris
 def _jd_for_local(date_str: str, time_mins: int, tz_offset: float) -> float:
     d = datetime.strptime(date_str, "%Y-%m-%d")
     local_h = time_mins / 60.0
@@ -326,6 +327,7 @@ def compute_hora_lord(date_str: str, time_hhmm: str, sunrise_hhmm: str) -> str:
 # Lagna at a specific JD
 # ---------------------------------------------------------------------------
 
+@utils.serialized_ephemeris
 def compute_lagna_at_jd(jd: float, lat: float, lon: float) -> tuple[str, str, float]:
     """Return (lagna_sign, lagna_lord, sidereal_ascendant_longitude) for the JD (UT)."""
     drik.set_ayanamsa_mode('LAHIRI')
@@ -347,6 +349,7 @@ def compute_lagna_at_jd(jd: float, lat: float, lon: float) -> tuple[str, str, fl
 # Per-minute scoring
 # ---------------------------------------------------------------------------
 
+@utils.serialized_ephemeris
 def _score_instant(
     jd: float,
     lagna_sign: str,
@@ -926,7 +929,6 @@ def _family_band(min_score: float, consensus_quality: str,
 # Main scan function
 # ---------------------------------------------------------------------------
 
-@utils.serialized_ephemeris
 def scan_lagna_shuddhi(
     lat: float,
     lon: float,
@@ -1125,7 +1127,6 @@ _TARA_BAD = {"Janma", "Vipat", "Pratyak", "Naidhana"}
 # Family (multi-person) joint scan
 # ---------------------------------------------------------------------------
 
-@utils.serialized_ephemeris
 def scan_family_lagna_shuddhi(
     members: list[dict],
     start_date: str,

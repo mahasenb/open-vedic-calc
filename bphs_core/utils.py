@@ -25,11 +25,16 @@ drik.set_ayanamsa_mode('LAHIRI')
 # concurrent requests — invisible, and unacceptable for a determinism-first
 # engine.
 #
-# Every public entry point that calls into swisseph/pyjhora must hold this
-# lock for the duration of its computation (apply @serialized_ephemeris).
-# It is an RLock so nested entry points — e.g. a family scan that builds
-# per-member Charts — re-acquire it on the same thread without deadlock.
-# The throughput cost of serializing is accepted: these are CPU-bound
+# Every entry point that calls into swisseph/pyjhora must hold this lock
+# (apply @serialized_ephemeris) at INNER, millisecond-bounded granularity —
+# one chart, one day, one instant, one JD conversion. Never decorate a
+# whole scan: a whole-scan hold (seconds to minutes at the API range caps)
+# would block every interactive route and the async submit path for the
+# scan's remaining duration, reversing the async-scan design's
+# "submissions never wait on scan compute" property (see CLAUDE.md). It is
+# an RLock so nested entry points — e.g. a per-instant scorer that builds
+# a Chart — re-acquire it on the same thread without deadlock. The
+# throughput cost of serializing is accepted: these are CPU-bound
 # computations on a GIL-bound process, so true parallelism was never
 # available; the lock only removes the correctness risk.
 # ---------------------------------------------------------------------------

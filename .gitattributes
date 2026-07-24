@@ -1,0 +1,4 @@
+# Normalize line endings: Python sources are always LF in the repo and on
+# checkout, so cross-platform contributions can never introduce wholesale
+# CRLF churn that destroys diffs and git blame.
+*.py text eol=lf
