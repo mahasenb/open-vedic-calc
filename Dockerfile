@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.14-slim
 
 # Bake the building commit into the image so /source can return the authoritative
 # running-commit (the value a downstream consumer keys its cache on). The CI build

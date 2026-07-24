@@ -1,6 +1,6 @@
 # Test-only image: installs dev deps and runs pytest.
 # Production image uses the regular Dockerfile.
-FROM python:3.10-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
