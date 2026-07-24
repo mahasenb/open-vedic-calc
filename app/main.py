@@ -481,140 +481,45 @@ def muhurat_endpoint(req: MuhurtRequest):
     return MuhurtResponse(days=days)
 
 
-@app.post("/v1/muhurat/lagna-shuddhi", response_model=LagnaShuddhiResponse, dependencies=AUTH)
-def lagna_shuddhi_endpoint(req: LagnaShuddhiRequest):
-    start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
-    end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
-    if end_dt < start_dt:
-        raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
-    if (end_dt - start_dt).days > MAX_LAGNA_SHUDDHI_DAYS:
-        raise HTTPException(status_code=422, detail=f"Date range exceeds {MAX_LAGNA_SHUDDHI_DAYS} days")
-
-    _, s = _get_chart(req)
-    moon_pd = s.rasi_chart.get("Moon")
-    birth_nak = moon_pd.nakshatra if moon_pd else None
-    birth_sign = moon_pd.sign if moon_pd else None
-
-    result = lagna_shuddhi_mod.scan_lagna_shuddhi(
-        lat=req.latitude,
-        lon=req.longitude,
-        tz_offset=req.timezone_offset_hours,
-        birth_nakshatra=birth_nak,
-        birth_moon_sign=birth_sign,
-        start_date=req.start_date,
-        end_date=req.end_date,
-        activity=req.activity_category,
-        step_seconds=req.step_seconds,
-    )
-
-    best_raw = result["best_instant"]
-    best_window_raw = result["best_window"]
-    top_raw = result["top_samples"]
-
-    def _to_sample(d: dict) -> LagnaShuddhiSample:
-        return LagnaShuddhiSample(**d)
-
-    return LagnaShuddhiResponse(
-        best_instant=_to_sample(best_raw) if best_raw else None,
-        best_window=TimeWindow(**best_window_raw) if best_window_raw else None,
-        top_samples=[_to_sample(d) for d in top_raw],
-        clearance_summary=result.get("clearance_summary"),
-        alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
-    )
-
+# ---------------------------------------------------------------------------
+# Shared scan pipeline for the lagna-shuddhi endpoint pairs.
+#
+# Each ``_prepare_*`` helper performs ALL request validation (raising 422 to
+# the caller immediately, for the async submit as well as the sync call) and
+# the natal-Moon extraction, then returns a zero-arg callable that runs the
+# scan and assembles the response model. The sync endpoint invokes the
+# callable inline; the async submit hands the SAME callable to the job store.
+# One pipeline means a validation or assembly change lands once and applies
+# to both paths by construction — the parity tests in
+# tests/test_async_scan_jobs.py then verify output equality end-to-end.
+# ---------------------------------------------------------------------------
 
 MAX_FAMILY_MEMBERS = 6
 
 
-@app.post("/v1/muhurat/family-lagna-shuddhi", response_model=FamilyLagnaShuddhiResponse, dependencies=AUTH)
-def family_lagna_shuddhi_endpoint(req: FamilyLagnaShuddhiRequest):
-    if len(req.members) < 2:
-        raise HTTPException(status_code=422, detail="At least 2 members required")
-    if len(req.members) > MAX_FAMILY_MEMBERS:
-        raise HTTPException(status_code=422, detail=f"At most {MAX_FAMILY_MEMBERS} members allowed")
-
-    start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
-    end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+def _validate_lagna_shuddhi_range(start_date: str, end_date: str) -> None:
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
     if end_dt < start_dt:
         raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
     if (end_dt - start_dt).days > MAX_LAGNA_SHUDDHI_DAYS:
         raise HTTPException(status_code=422, detail=f"Date range exceeds {MAX_LAGNA_SHUDDHI_DAYS} days")
 
-    # Build per-member dicts for the scan, extracting natal Moon from chart.
-    member_dicts = []
-    for m in req.members:
-        _, s = _get_chart(m)
-        moon_pd = s.rasi_chart.get("Moon")
-        birth_nak = moon_pd.nakshatra if moon_pd else None
-        birth_sign = moon_pd.sign if moon_pd else None
-        member_dicts.append({
-            "name": m.name,
-            "lat": m.latitude,
-            "lon": m.longitude,
-            "tz_offset": m.timezone_offset_hours,
-            "birth_nakshatra": birth_nak,
-            "birth_moon_sign": birth_sign,
-        })
 
-    result = lagna_shuddhi_mod.scan_family_lagna_shuddhi(
-        members=member_dicts,
-        start_date=req.start_date,
-        end_date=req.end_date,
-        activity=req.activity_category,
-        step_seconds=req.step_seconds,
-    )
-
-    per_member_out = [FamilyMemberSample(**md) for md in result["per_member"]]
-    best_window_raw = result["best_window"]
-
-    return FamilyLagnaShuddhiResponse(
-        instant=result["instant"],
-        best_window=TimeWindow(**best_window_raw) if best_window_raw else None,
-        score=result["score"],
-        score_100=result["score_100"],
-        band=result["band"],
-        per_member=per_member_out,
-        consensus_quality=result["consensus_quality"],
-        compromised_members=result["compromised_members"],
-        clearance_summary=result.get("clearance_summary"),
-        alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Async scan-job variant (CR-4) -- ADDITIVE ONLY.
-#
-# The two endpoints above stay exactly as they were: fully synchronous, same
-# request/response contract, unchanged behaviour. The submit/poll pair below
-# is a parallel path for the same two scans that hands back a job id
-# immediately instead of blocking the caller's connection for the full scan
-# duration (see app/jobs.py for why, and the concurrency model used).
-#
-# Each submit handler duplicates the same date-range/member-count guards and
-# the same raw-dict -> response-model assembly as its synchronous twin above,
-# rather than refactoring the synchronous handler to share a helper -- this
-# keeps the existing synchronous endpoints textually untouched, which is the
-# strongest guarantee that this change cannot alter their behaviour.
-# ---------------------------------------------------------------------------
-
-@app.post(
-    "/v1/muhurat/lagna-shuddhi/async",
-    response_model=JobSubmitted,
-    status_code=202,
-    dependencies=AUTH,
-)
-def lagna_shuddhi_async_submit(req: LagnaShuddhiRequest):
-    start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
-    end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
-    if end_dt < start_dt:
-        raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
-    if (end_dt - start_dt).days > MAX_LAGNA_SHUDDHI_DAYS:
-        raise HTTPException(status_code=422, detail=f"Date range exceeds {MAX_LAGNA_SHUDDHI_DAYS} days")
-
-    _, s = _get_chart(req)
+def _natal_moon(person) -> tuple[str | None, str | None]:
+    """Extract (nakshatra, sign) of the natal Moon from a person's chart."""
+    _, s = _get_chart(person)
     moon_pd = s.rasi_chart.get("Moon")
-    birth_nak = moon_pd.nakshatra if moon_pd else None
-    birth_sign = moon_pd.sign if moon_pd else None
+    return (
+        moon_pd.nakshatra if moon_pd else None,
+        moon_pd.sign if moon_pd else None,
+    )
+
+
+def _prepare_lagna_shuddhi(req: LagnaShuddhiRequest):
+    """Validate ``req`` (422 now) and return the scan runnable."""
+    _validate_lagna_shuddhi_range(req.start_date, req.end_date)
+    birth_nak, birth_sign = _natal_moon(req)
 
     def _run_scan() -> LagnaShuddhiResponse:
         result = lagna_shuddhi_mod.scan_lagna_shuddhi(
@@ -643,52 +548,21 @@ def lagna_shuddhi_async_submit(req: LagnaShuddhiRequest):
             alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
         )
 
-    job_id = job_store.submit(_run_scan)
-    return JobSubmitted(job_id=job_id, status="pending")
+    return _run_scan
 
 
-@app.get(
-    "/v1/muhurat/lagna-shuddhi/jobs/{job_id}",
-    response_model=LagnaShuddhiJobStatus,
-    dependencies=AUTH,
-)
-def lagna_shuddhi_job_status(job_id: str):
-    job = job_store.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return LagnaShuddhiJobStatus(
-        job_id=job.id,
-        status=job.status,
-        result=job.result if job.status == "done" else None,
-        error=job.error,
-    )
-
-
-@app.post(
-    "/v1/muhurat/family-lagna-shuddhi/async",
-    response_model=JobSubmitted,
-    status_code=202,
-    dependencies=AUTH,
-)
-def family_lagna_shuddhi_async_submit(req: FamilyLagnaShuddhiRequest):
+def _prepare_family_lagna_shuddhi(req: FamilyLagnaShuddhiRequest):
+    """Validate ``req`` (422 now) and return the family-scan runnable."""
     if len(req.members) < 2:
         raise HTTPException(status_code=422, detail="At least 2 members required")
     if len(req.members) > MAX_FAMILY_MEMBERS:
         raise HTTPException(status_code=422, detail=f"At most {MAX_FAMILY_MEMBERS} members allowed")
+    _validate_lagna_shuddhi_range(req.start_date, req.end_date)
 
-    start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
-    end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
-    if end_dt < start_dt:
-        raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
-    if (end_dt - start_dt).days > MAX_LAGNA_SHUDDHI_DAYS:
-        raise HTTPException(status_code=422, detail=f"Date range exceeds {MAX_LAGNA_SHUDDHI_DAYS} days")
-
+    # Build per-member dicts for the scan, extracting natal Moon from chart.
     member_dicts = []
     for m in req.members:
-        _, s = _get_chart(m)
-        moon_pd = s.rasi_chart.get("Moon")
-        birth_nak = moon_pd.nakshatra if moon_pd else None
-        birth_sign = moon_pd.sign if moon_pd else None
+        birth_nak, birth_sign = _natal_moon(m)
         member_dicts.append({
             "name": m.name,
             "lat": m.latitude,
@@ -722,7 +596,66 @@ def family_lagna_shuddhi_async_submit(req: FamilyLagnaShuddhiRequest):
             alternatives=[LagnaShuddhiAlternative(**a) for a in result.get("alternatives", [])],
         )
 
-    job_id = job_store.submit(_run_scan)
+    return _run_scan
+
+
+@app.post("/v1/muhurat/lagna-shuddhi", response_model=LagnaShuddhiResponse, dependencies=AUTH)
+def lagna_shuddhi_endpoint(req: LagnaShuddhiRequest):
+    return _prepare_lagna_shuddhi(req)()
+
+
+@app.post("/v1/muhurat/family-lagna-shuddhi", response_model=FamilyLagnaShuddhiResponse, dependencies=AUTH)
+def family_lagna_shuddhi_endpoint(req: FamilyLagnaShuddhiRequest):
+    return _prepare_family_lagna_shuddhi(req)()
+
+
+# ---------------------------------------------------------------------------
+# Async scan-job variant (CR-4) -- ADDITIVE ONLY.
+#
+# The submit/poll pair below is a parallel path for the same two scans that
+# hands back a job id immediately instead of blocking the caller's connection
+# for the full scan duration (see app/jobs.py for why, and the concurrency
+# model used). Validation runs at submit time (422 to the caller); only the
+# scan itself runs on the background pool. Both paths share the exact same
+# ``_prepare_*`` pipeline above, so they cannot drift apart.
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/v1/muhurat/lagna-shuddhi/async",
+    response_model=JobSubmitted,
+    status_code=202,
+    dependencies=AUTH,
+)
+def lagna_shuddhi_async_submit(req: LagnaShuddhiRequest):
+    job_id = job_store.submit(_prepare_lagna_shuddhi(req))
+    return JobSubmitted(job_id=job_id, status="pending")
+
+
+@app.get(
+    "/v1/muhurat/lagna-shuddhi/jobs/{job_id}",
+    response_model=LagnaShuddhiJobStatus,
+    dependencies=AUTH,
+)
+def lagna_shuddhi_job_status(job_id: str):
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return LagnaShuddhiJobStatus(
+        job_id=job.id,
+        status=job.status,
+        result=job.result if job.status == "done" else None,
+        error=job.error,
+    )
+
+
+@app.post(
+    "/v1/muhurat/family-lagna-shuddhi/async",
+    response_model=JobSubmitted,
+    status_code=202,
+    dependencies=AUTH,
+)
+def family_lagna_shuddhi_async_submit(req: FamilyLagnaShuddhiRequest):
+    job_id = job_store.submit(_prepare_family_lagna_shuddhi(req))
     return JobSubmitted(job_id=job_id, status="pending")
 
 

@@ -172,7 +172,9 @@ class Chart:
         self._snapshot: Optional[ChartSnapshot] = None
         self._compute()
 
+    @utils.serialized_ephemeris
     def _compute(self):
+        # CALC-2: EPHEMERIS_LOCK is held for the whole computation (see utils).
         drik.set_ayanamsa_mode('LAHIRI')
         jd = _jd_from_person(self.person)  # LOCAL JD — pyjhora subtracts tz itself
         jd_utc = jd - self.person.timezone_offset_hours / 24.0  # true UT for swisseph

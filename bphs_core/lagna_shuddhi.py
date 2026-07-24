@@ -926,6 +926,7 @@ def _family_band(min_score: float, consensus_quality: str,
 # Main scan function
 # ---------------------------------------------------------------------------
 
+@utils.serialized_ephemeris
 def scan_lagna_shuddhi(
     lat: float,
     lon: float,
@@ -1124,6 +1125,7 @@ _TARA_BAD = {"Janma", "Vipat", "Pratyak", "Naidhana"}
 # Family (multi-person) joint scan
 # ---------------------------------------------------------------------------
 
+@utils.serialized_ephemeris
 def scan_family_lagna_shuddhi(
     members: list[dict],
     start_date: str,

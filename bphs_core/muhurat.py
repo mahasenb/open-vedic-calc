@@ -181,6 +181,7 @@ def _is_adhik_maasa(jd: float, place: drik.Place) -> bool | None:
         return None
 
 
+@utils.serialized_ephemeris
 def compute_muhurat_for_day(
     place: drik.Place,
     target_date: date_type,

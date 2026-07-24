@@ -1,4 +1,7 @@
+import functools
 import os
+import threading
+
 import swisseph as swe
 from jhora.panchanga import drik
 
@@ -7,6 +10,45 @@ swe.set_ephe_path(EPHE_PATH)
 
 # Initialize pyjhora ayanamsa mode
 drik.set_ayanamsa_mode('LAHIRI')
+
+# ---------------------------------------------------------------------------
+# Process-wide serialization of Swiss-Ephemeris / pyjhora access.
+#
+# pyswisseph and pyjhora carry process-GLOBAL mutable state (the ephemeris
+# path and sidereal/ayanamsa mode set above; Chart._compute re-asserts the
+# ayanamsa on every call), and the Swiss Ephemeris C library is not
+# documented as safe for concurrent swe_calc/swe_houses calls from multiple
+# threads. Two thread pools can enter it concurrently in one process:
+# Starlette's per-request pool for the synchronous ``def`` route handlers,
+# and the background scan-job pool (app/jobs.py). Without serialization the
+# failure mode is not a crash but a silently wrong chart for one of two
+# concurrent requests — invisible, and unacceptable for a determinism-first
+# engine.
+#
+# Every public entry point that calls into swisseph/pyjhora must hold this
+# lock for the duration of its computation (apply @serialized_ephemeris).
+# It is an RLock so nested entry points — e.g. a family scan that builds
+# per-member Charts — re-acquire it on the same thread without deadlock.
+# The throughput cost of serializing is accepted: these are CPU-bound
+# computations on a GIL-bound process, so true parallelism was never
+# available; the lock only removes the correctness risk.
+# ---------------------------------------------------------------------------
+EPHEMERIS_LOCK = threading.RLock()
+
+
+def serialized_ephemeris(fn):
+    """Decorator: run ``fn`` while holding the process-wide ephemeris lock.
+
+    Sets ``_holds_ephemeris_lock`` on the wrapper so the test suite can
+    assert every C-library entry point is covered.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with EPHEMERIS_LOCK:
+            return fn(*args, **kwargs)
+
+    wrapper._holds_ephemeris_lock = True
+    return wrapper
 
 SIGNS = [
     "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
