@@ -9,3 +9,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # CALC-6: the base image (python:3.10-slim, pinned in Dockerfile/Dockerfile.test)
+  # was never revisited for CVE-driven bumps -- the pip ecosystem entry only
+  # tracks the Python dependency tree, not the OS-level packages (glibc,
+  # openssl, etc.) baked into the image itself.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
