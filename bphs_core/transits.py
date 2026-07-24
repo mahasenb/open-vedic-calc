@@ -80,6 +80,7 @@ def _jd_utc_from_local(dt: datetime, timezone_offset_hours: float) -> float:
     return swe.julday(dt.year, dt.month, dt.day, utc_hour)
 
 
+@utils.serialized_ephemeris
 def get_current_transits(snapshot: ChartSnapshot, at: datetime,
                          timezone_offset_hours: float = 0.0) -> dict:
     """Compute current planetary transits at *at* (local datetime).
@@ -110,6 +111,7 @@ def get_current_transits(snapshot: ChartSnapshot, at: datetime,
     return result
 
 
+@utils.serialized_ephemeris
 def get_sade_sati_info(snapshot: ChartSnapshot, at: datetime) -> SadeSatiInfo:
     moon = snapshot.rasi_chart.get("Moon")
     if moon is None:
