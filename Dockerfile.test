@@ -9,12 +9,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ make git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md LICENSE EPHEMERIS_LICENSE.md ./
-RUN pip install --no-cache-dir -e ".[dev]"
+# Install uv itself (matches the production Dockerfile's installer).
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# CALC-7: install from the committed, hash-pinned lockfile only -- this used
+# to be a floating `pip install -e ".[dev]"`, the exact pattern the
+# production Dockerfile deliberately moved away from because it ignores
+# uv.lock entirely and could pull an unpinned/compromised transitive
+# dependency version. `--frozen` fails the build if pyproject.toml and
+# uv.lock have drifted, instead of silently re-resolving. This image is what
+# scripts/test-in-docker.* runs to exercise real Swiss ephemeris data (see
+# CALC-1) -- without this fix that was the one test surface validating a
+# different dependency set than what actually ships.
+COPY pyproject.toml uv.lock README.md LICENSE EPHEMERIS_LICENSE.md ./
+RUN uv sync --frozen --no-install-project --extra dev
+ENV PATH="/app/.venv/bin:${PATH}"
 
 COPY bphs_core ./bphs_core
 COPY app ./app
 COPY tests ./tests
+
+# Second `uv sync --frozen` installs the project itself now that its source
+# is present -- still frozen against the same committed lockfile.
+RUN uv sync --frozen --extra dev
 
 # data/ephe is volume-mounted at runtime (see docker-compose.test.yml)
 RUN mkdir -p data/ephe
