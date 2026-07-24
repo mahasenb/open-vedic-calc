@@ -22,7 +22,7 @@ import time as time_mod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time
 
-from bphs_core import lagna_shuddhi, muhurat, transits, utils
+from bphs_core import lagna_shuddhi, muhurat, profile, transits, utils
 from bphs_core.chart import Chart, PersonalData
 
 # Synthetic sample data (mirrors tests/conftest.py — no real personal data).
@@ -78,6 +78,10 @@ def test_every_c_library_entry_point_is_serialized():
         lagna_shuddhi._score_instant,
         transits.get_current_transits,
         transits.get_sade_sati_info,
+        # Reached UNDECORATED from profile.sade_sati_lifetime's quarterly
+        # sweep (the sync /v1/profile route) — must hold the lock per call.
+        transits._transit_longitude,
+        transits._jd_from_date,
     ]
     for fn in entry_points:
         assert getattr(fn, "_holds_ephemeris_lock", False), (
@@ -97,6 +101,10 @@ def test_scan_entry_points_are_not_serialized_wholesale():
     for fn in (
         lagna_shuddhi.scan_lagna_shuddhi,
         lagna_shuddhi.scan_family_lagna_shuddhi,
+        # The ~320-step quarterly lifetime sweep behind /v1/profile: the
+        # profile route must acquire only per-call bounded holds.
+        profile.sade_sati_lifetime,
+        profile.compute_profile,
     ):
         assert not getattr(fn, "_holds_ephemeris_lock", False), (
             f"{fn.__qualname__} must not hold EPHEMERIS_LOCK for the whole "
