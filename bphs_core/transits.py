@@ -55,14 +55,23 @@ class SadeSatiInfo:
     end_date: datetime
 
 
+@utils.serialized_ephemeris
 def _transit_longitude(jd: float, planet_id: int) -> float:
     # Ayanamsa mode is a process-global set once at import (utils.py). Setting it
     # on every call mutates that C-level global 60+ times per request and can race
-    # with concurrent requests, so it is deliberately not set here.
+    # with concurrent requests, so it is deliberately not set here. The
+    # @serialized_ephemeris hold (per-call, millisecond-bounded) makes the single
+    # sidereal_longitude call safe against concurrent ephemeris users: this
+    # helper is also reached from profile.sade_sati_lifetime's quarterly sweep,
+    # OUTSIDE the decorated get_current_transits/get_sade_sati_info entry
+    # points (nested acquisition there is fine — the lock is an RLock).
     return drik.sidereal_longitude(jd, planet_id)
 
 
+@utils.serialized_ephemeris
 def _jd_from_date(dt: datetime) -> float:
+    # Also reached undecorated from profile.sade_sati_lifetime — held per call
+    # for the same reason as _transit_longitude above.
     return swe.julday(dt.year, dt.month, dt.day,
                       dt.hour + dt.minute / 60 + dt.second / 3600)
 
