@@ -92,6 +92,22 @@ _COMMIT = _resolve_version()
 
 _ALLOWED_ORIGINS = [o for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o]
 
+# CALC-4: CLAUDE.md's CORS rule ("do not introduce a wildcard origin") was
+# documented but never enforced -- ALLOWED_ORIGINS flowed straight into
+# CORSMiddleware with no validation, so a deploy-time typo/copy-paste of
+# ALLOWED_ORIGINS=* would silently open the API to any browser origin with
+# no test or startup check catching it. Fail closed at import time, the same
+# way app.auth refuses to boot on a missing/weak CALC_SERVICE_TOKEN, rather
+# than waiting for the first request.
+for _origin in _ALLOWED_ORIGINS:
+    if _origin.strip() == "*":
+        raise RuntimeError(
+            f"ALLOWED_ORIGINS contains a bare wildcard origin ('*') in "
+            f"{os.environ.get('ALLOWED_ORIGINS', '')!r}. A wildcard CORS "
+            "origin is never permitted -- set ALLOWED_ORIGINS to an explicit "
+            "comma-separated list of allowed origins."
+        )
+
 MAX_MUHURAT_DAYS = int(os.environ.get("MAX_MUHURAT_DAYS", "365"))
 MAX_LAGNA_SHUDDHI_DAYS = int(os.environ.get("MAX_LAGNA_SHUDDHI_DAYS", "365"))
 # Vimshottari is a 120-year (43,830-day) cycle.  The cap must be large enough
