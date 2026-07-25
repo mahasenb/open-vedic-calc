@@ -74,19 +74,6 @@ _SAMPLES = {"sample_a": SAMPLE_A, "sample_b": SAMPLE_B, "sample_c": SAMPLE_C}
 # ---------------------------------------------------------------------------
 
 
-def _probe_ephemeris_source() -> tuple[bool, int]:
-    """(swiss_active, retflag) for a sidereal Sun position requesting Swiss data.
-
-    Held under the process-wide ephemeris lock like every other swisseph call in
-    this repo (see ``bphs_core.utils.serialized_ephemeris``).
-    """
-    with utils.EPHEMERIS_LOCK:
-        jd = swe.julday(2000, 1, 1, 12.0)
-        _values, retflag = swe.calc_ut(jd, swe.SUN, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
-    swiss_active = bool(retflag & swe.FLG_SWIEPH) and not bool(retflag & swe.FLG_MOSEPH)
-    return swiss_active, retflag
-
-
 def _required() -> bool:
     return os.environ.get(_REQUIRE_ENV) == "1"
 
@@ -98,7 +85,7 @@ def swiss_ephemeris() -> int:
     Hard-fails (never skips) when ``REQUIRE_SWISS_EPHEMERIS=1``: the whole point of
     the accuracy job is that it cannot pass by quietly not running.
     """
-    swiss_active, retflag = _probe_ephemeris_source()
+    swiss_active, retflag = utils.probe_ephemeris_source()
     if swiss_active:
         return retflag
 
@@ -133,25 +120,40 @@ def test_swiss_data_is_really_active(swiss_ephemeris: int) -> None:
         assert (ephe_dir / name).is_file(), f"{name} missing from {ephe_dir}"
 
 
-def test_fail_closed_flag_is_honoured_by_the_probe() -> None:
+def test_fail_closed_flag_is_honoured_by_the_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """The detector must not be able to certify Moshier as Swiss.
 
-    Runs regardless of which engine is present: it asserts the classification logic
-    itself, so a future edit that inverts or loosens the flag test (making the whole
-    module vacuous) fails here even on the ordinary Moshier CI job.
+    This calls ``utils.probe_ephemeris_source()`` itself — the exact function the
+    ``swiss_ephemeris`` fixture above and ``/healthz`` (app/main.py) both call — with
+    ``swe.calc_ut`` monkeypatched to return a controlled retflag, rather than
+    asserting against a hand-duplicated copy of its classification logic. A
+    duplicate copy would keep passing even if the real probe were neutered (e.g.
+    hardcoding its ``swiss_active`` result to ``True``); calling the real probe
+    means that regression fails HERE. Runs regardless of which engine is actually
+    present, so it also fails here even on the ordinary Moshier CI job.
     """
     swiss_only = swe.FLG_SWIEPH | swe.FLG_SIDEREAL
     moshier_only = swe.FLG_MOSEPH | swe.FLG_SIDEREAL
-
-    def classify(retflag: int) -> bool:
-        return bool(retflag & swe.FLG_SWIEPH) and not bool(retflag & swe.FLG_MOSEPH)
-
-    assert classify(swiss_only) is True
-    assert classify(moshier_only) is False
     # The real-world shape: a Moshier fallback carries BOTH the sidereal bit and
     # MOSEPH, and must still classify as "not Swiss".
-    assert classify(swe.FLG_SIDEREAL | swe.FLG_MOSEPH) is False
-    assert classify(swe.FLG_SIDEREAL) is False
+    moshier_with_sidereal = swe.FLG_SIDEREAL | swe.FLG_MOSEPH
+
+    for fixed_retflag, expected in (
+        (swiss_only, True),
+        (moshier_only, False),
+        (moshier_with_sidereal, False),
+        (swe.FLG_SIDEREAL, False),
+    ):
+        def fake_calc_ut(_jd, _body, _flags, _retflag=fixed_retflag):
+            return (0.0,) * 6, _retflag
+
+        monkeypatch.setattr(swe, "calc_ut", fake_calc_ut)
+        swiss_active, observed_retflag = utils.probe_ephemeris_source()
+        assert observed_retflag == fixed_retflag
+        assert swiss_active is expected, (
+            f"utils.probe_ephemeris_source() classified retflag={fixed_retflag} as "
+            f"swiss_active={swiss_active}, expected {expected}"
+        )
 
 
 def test_swiss_and_moshier_agree_coarsely_but_are_not_identical(swiss_ephemeris: int) -> None:

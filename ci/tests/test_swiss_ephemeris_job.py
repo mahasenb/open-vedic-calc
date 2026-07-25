@@ -24,6 +24,7 @@ re-invoke it so an unproven parser can never certify the workflow green.
 """
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 
@@ -45,6 +46,21 @@ def _job(document: dict, name: str) -> dict | None:
     jobs = document.get("jobs") or {}
     job = jobs.get(name)
     return job if isinstance(job, dict) else None
+
+
+def _workflow_triggers(document: dict) -> dict:
+    """The workflow's ``on:`` mapping.
+
+    PyYAML's default (YAML 1.1) resolver reads the unquoted key ``on`` as the
+    boolean ``True``, not the string ``"on"`` -- a well-known gotcha specific to
+    GitHub Actions workflow YAML. ``document.get("on")`` is silently ``None`` on
+    every real workflow file for this reason. Check both spellings so this
+    guard doesn't mistake that parser quirk for "no triggers declared".
+    """
+    triggers = document.get("on")
+    if triggers is None:
+        triggers = document.get(True)
+    return triggers if isinstance(triggers, dict) else {}
 
 
 def _steps(job: dict) -> list[dict]:
@@ -115,6 +131,163 @@ def _job_self_tests_fetcher(job: dict) -> bool:
 
 def _uses(job: dict) -> list[str]:
     return [str(step["uses"]) for step in _steps(job) if "uses" in step]
+
+
+# ---------------------------------------------------------------------------
+# Enablement — does the job actually RUN, or can its `if:` skip it entirely?
+#
+# Every check above inspects the job's CONTENTS (its steps, their env, the
+# cache key, ...). None of them notice if the job itself never runs: add
+# `if: false` to the job and every one of them keeps passing, because the
+# steps they inspect are still correctly written — they simply never
+# execute. That is the exact fail-open shape this whole file exists to
+# prevent, one level up. The checks below parse and evaluate the job's `if:`
+# condition instead of grepping for it, for the same reason the rest of this
+# file parses rather than scans: `if: 'false'` inside a comment, or the
+# string "false" inside an unrelated step, must not be mistaken for the
+# job's real condition.
+# ---------------------------------------------------------------------------
+
+
+class _UnsupportedExpression(ValueError):
+    """Raised when a job's `if:` uses syntax this mini-evaluator does not model.
+
+    The caller must treat this as "cannot prove the job is enabled" and fail the
+    test — never silently assume the job runs just because its condition could
+    not be evaluated.
+    """
+
+
+_EXPR_TOKEN_RE = re.compile(
+    r"""\s*(?:(?P<op>==|!=|&&|\|\||!|\(|\))|(?P<str>'[^']*'|"[^"]*")|(?P<ident>[A-Za-z_][A-Za-z0-9_.]*))"""
+)
+
+
+def _tokenize_expression(expr: str) -> list[str]:
+    tokens: list[str] = []
+    pos = 0
+    while pos < len(expr):
+        match = _EXPR_TOKEN_RE.match(expr, pos)
+        if not match or match.end() == pos:
+            if expr[pos:].strip() == "":
+                break
+            raise _UnsupportedExpression(f"cannot tokenize {expr[pos:]!r} in {expr!r}")
+        pos = match.end()
+        token = match.group("op") or match.group("str") or match.group("ident")
+        tokens.append(token)
+    return tokens
+
+
+class _ExpressionParser:
+    """Recursive-descent evaluator for a deliberately small subset of GitHub
+    Actions `if:` expression syntax: `==`, `!=`, `&&`, `||`, `!`, parens, quoted
+    string literals, bare `true`/`false`, and the single context reference
+    `github.event_name` (substituted with the event name under test). Anything
+    else — a function call, a different context, a matrix reference — raises
+    _UnsupportedExpression rather than guessing a truth value.
+    """
+
+    def __init__(self, tokens: list[str], event_name: str) -> None:
+        self._tokens = tokens
+        self._pos = 0
+        self._event_name = event_name
+
+    def parse(self) -> bool:
+        value = self._or_expr()
+        if self._pos != len(self._tokens):
+            raise _UnsupportedExpression(f"unconsumed tokens: {self._tokens[self._pos:]}")
+        return value
+
+    def _peek(self) -> str | None:
+        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
+
+    def _advance(self) -> str:
+        token = self._peek()
+        if token is None:
+            raise _UnsupportedExpression("unexpected end of expression")
+        self._pos += 1
+        return token
+
+    def _or_expr(self) -> bool:
+        value = self._and_expr()
+        while self._peek() == "||":
+            self._advance()
+            value = self._and_expr() or value
+        return value
+
+    def _and_expr(self) -> bool:
+        value = self._not_expr()
+        while self._peek() == "&&":
+            self._advance()
+            value = self._not_expr() and value
+        return value
+
+    def _not_expr(self) -> bool:
+        if self._peek() == "!":
+            self._advance()
+            return not self._not_expr()
+        return self._comparison_or_primary()
+
+    def _comparison_or_primary(self):
+        lhs = self._primary()
+        if self._peek() in ("==", "!="):
+            op = self._advance()
+            rhs = self._primary()
+            equal = lhs == rhs
+            return equal if op == "==" else not equal
+        return bool(lhs)
+
+    def _primary(self):
+        if self._peek() == "(":
+            self._advance()
+            value = self._or_expr()
+            if self._advance() != ")":
+                raise _UnsupportedExpression("expected closing ')'")
+            return value
+        token = self._advance()
+        if token.startswith("'") or token.startswith('"'):
+            return token[1:-1]
+        if token == "true":
+            return True
+        if token == "false":
+            return False
+        if token == "github.event_name":
+            return self._event_name
+        raise _UnsupportedExpression(f"unsupported identifier or context ref: {token!r}")
+
+
+def _evaluate_gha_if(expr: str, event_name: str) -> bool:
+    return _ExpressionParser(_tokenize_expression(expr), event_name).parse()
+
+
+def _job_condition(job: dict) -> bool | str | None:
+    """The job's raw `if:` value: a bool if YAML parsed a bare literal, the
+    unwrapped expression string otherwise, or None if there is no `if:` at all
+    (which means the job always runs)."""
+    if "if" not in job:
+        return None
+    value = job["if"]
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    return text
+
+
+def _job_runs_for_event(job: dict, event_name: str) -> bool:
+    """Whether the job's `if:` (if any) lets it run for the given event.
+
+    Raises _UnsupportedExpression when the condition cannot be evaluated by this
+    guard's supported subset — the caller must fail the test on that, not treat
+    it as "probably fine".
+    """
+    condition = _job_condition(job)
+    if condition is None:
+        return True
+    if isinstance(condition, bool):
+        return condition
+    return _evaluate_gha_if(condition, event_name)
 
 
 def _step_env_flag_values(job: dict, flag: str) -> list[str]:
@@ -405,6 +578,142 @@ def test_swiss_job_caches_the_data_by_manifest_hash() -> None:
         assert "ci/swiss_ephemeris.json" in key, (
             "the ephemeris cache key no longer includes ci/swiss_ephemeris.json, so a "
             f"stale cache could survive a checksum change. key={key!r}"
+        )
+
+
+def test_enablement_parser_discriminates() -> None:
+    """Fixtures for the `if:`-evaluator, mirroring ``test_parser_discriminates``:
+    every case here is something a textual scan (or a check that only reads the
+    job's contents) gets wrong."""
+    # A blanket `if: false` — the exact mutation this guard exists to catch —
+    # must be rejected for both real triggers, however it is spelled.
+    disabled_literal = _job(
+        yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: false\n    steps: []\n"),
+        _JOB,
+    )
+    assert _job_runs_for_event(disabled_literal, "push") is False
+    assert _job_runs_for_event(disabled_literal, "pull_request") is False
+
+    disabled_expr = _job(
+        yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: ${{ false }}\n    steps: []\n"),
+        _JOB,
+    )
+    assert _job_runs_for_event(disabled_expr, "push") is False
+
+    disabled_quoted_string = _job(
+        yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: \"false\"\n    steps: []\n"),
+        _JOB,
+    )
+    assert _job_runs_for_event(disabled_quoted_string, "push") is False
+
+    # No `if:` at all means the job always runs.
+    always_runs = _job(
+        yaml.safe_load("jobs:\n  swiss-ephemeris:\n    steps: []\n"), _JOB
+    )
+    assert _job_runs_for_event(always_runs, "push") is True
+    assert _job_runs_for_event(always_runs, "pull_request") is True
+
+    # THE INVERSE: the repo's real, legitimate schedule-only skip must NOT be
+    # rejected. It must run on push/PR and may legitimately skip on schedule.
+    legitimate = _job(
+        yaml.safe_load(
+            "jobs:\n  swiss-ephemeris:\n"
+            "    if: github.event_name != 'schedule'\n    steps: []\n"
+        ),
+        _JOB,
+    )
+    assert _job_runs_for_event(legitimate, "push") is True
+    assert _job_runs_for_event(legitimate, "pull_request") is True
+    assert _job_runs_for_event(legitimate, "schedule") is False
+
+    # Equivalent spellings of the same legitimate condition must also be accepted.
+    for text in (
+        "${{ github.event_name != 'schedule' }}",
+        "github.event_name != 'schedule' && true",
+        "!(github.event_name == 'schedule')",
+    ):
+        job = _job(
+            yaml.safe_load(f"jobs:\n  swiss-ephemeris:\n    if: \"{text}\"\n    steps: []\n"),
+            _JOB,
+        )
+        assert _job_runs_for_event(job, "push") is True, f"rejected legitimate form: {text!r}"
+
+    # A condition using syntax outside the supported subset must fail closed —
+    # "cannot prove enablement" — rather than being silently treated as enabled.
+    unsupported = _job(
+        yaml.safe_load(
+            "jobs:\n  swiss-ephemeris:\n"
+            "    if: contains(github.event.head_commit.message, 'skip-ci')\n"
+            "    steps: []\n"
+        ),
+        _JOB,
+    )
+    try:
+        _job_runs_for_event(unsupported, "push")
+    except _UnsupportedExpression:
+        pass
+    else:
+        raise AssertionError("an unsupported expression form was silently evaluated")
+
+
+def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
+    """A guard that only checks the job's CONTENTS can be defeated trivially: add
+    `if: false` to the job and every other test in this file keeps passing,
+    because the steps it inspects are still correctly written — they simply
+    never run. This proves the job is reachable on the workflow's real
+    push/pull_request triggers, not merely well-formed.
+
+    A schedule-only skip (`github.event_name != 'schedule'`) is fine and is
+    deliberately NOT what this assertion checks — see
+    test_enablement_parser_discriminates for the proof that such a condition is
+    not falsely rejected.
+    """
+    test_enablement_parser_discriminates()
+    document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    job = _job(document, _JOB)
+    assert job is not None
+
+    triggers = _workflow_triggers(document)
+    assert "push" in triggers and "pull_request" in triggers, (
+        f"{_TEST_WORKFLOW} no longer declares push/pull_request triggers at the "
+        "workflow level -- update this guard's assumptions if that changed deliberately"
+    )
+
+    condition = _job_condition(job)
+    for event_name in ("push", "pull_request"):
+        try:
+            enabled = _job_runs_for_event(job, event_name)
+        except _UnsupportedExpression as exc:
+            raise AssertionError(
+                f"the `{_JOB}` job's `if:` condition ({condition!r}) uses syntax this "
+                f"guard cannot evaluate ({exc}), so it cannot prove the job actually "
+                "runs on a real push/PR event. Rewrite the condition using the "
+                "supported subset (==, !=, &&, ||, !, parens, string/bool literals, "
+                "github.event_name), or extend this guard deliberately."
+            ) from exc
+        assert enabled, (
+            f"the `{_JOB}` job's `if:` condition ({condition!r}) evaluates to False "
+            f"for github.event_name == {event_name!r}. A job whose steps are all "
+            "correctly written but never RUNS is exactly the fail-open shape this "
+            "guard exists to prevent -- every other test in this file would still "
+            "pass. Fix the condition so the job runs on real push/PR events; a "
+            "schedule-only skip (github.event_name != 'schedule') is fine and is "
+            "not what this assertion checks."
+        )
+
+
+def test_swiss_job_does_not_continue_on_error() -> None:
+    """`continue-on-error: true` lets a job (or a step) fail without failing the
+    workflow -- a second way to make a red accuracy run look green. Neither the
+    job nor any of its steps may set it."""
+    job = _real_job()
+    assert job.get("continue-on-error") is not True, (
+        f"the `{_JOB}` job sets continue-on-error: true -- a failing accuracy run "
+        "would no longer fail CI"
+    )
+    for step in _steps(job):
+        assert step.get("continue-on-error") is not True, (
+            f"a step in the `{_JOB}` job sets continue-on-error: true: {step}"
         )
 
 

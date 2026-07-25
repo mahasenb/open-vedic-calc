@@ -10,8 +10,10 @@ auth.py
   ✓ require_token: wrong token rejected (401)
 
 main.py – /healthz
-  ✓ ephe_loaded = True  (covered by test_endpoints)
-  ✓ (ephe_loaded = False is environment-dependent, status always "ok")
+  ✓ status "ok" + ephe_loaded is a bool (covered by test_endpoints)
+  ✓ ephe_loaded reflects utils.probe_ephemeris_source()'s retflag classification,
+    not data/ephe/ directory existence (CALC-1) -- monkeypatched both ways below,
+    since which engine is actually active is environment-dependent
 
 main.py – /source
   ✓ commit resolved from git
@@ -691,10 +693,35 @@ class TestHealthz:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
-        # ephe_loaded is a bool reflecting whether data/ephe/ exists
+        # ephe_loaded is a bool derived from the Swiss/Moshier retflag probe
+        # (utils.probe_ephemeris_source), not data/ephe/ directory existence.
         assert isinstance(body["ephe_loaded"], bool)
 
     def test_healthz_no_auth_required(self):
         """healthz is a public endpoint — no Authorization header needed."""
         r = anon_client.get("/healthz")
         assert r.status_code == 200
+
+    def test_healthz_reflects_the_retflag_probe_not_directory_existence(self, monkeypatch):
+        """CALC-1 residual: the old check (``os.path.isdir(data/ephe)``) reports
+        ephe_loaded=True for an EMPTY directory -- exactly what `mkdir -p
+        data/ephe` (Dockerfile) leaves behind when the volume mount fails or
+        carries no real ``.se1`` files. Every worker thread was silently on the
+        Moshier fallback while this probe reported healthy throughout (see
+        bphs_core/utils.py). ephe_loaded must instead come from the SAME
+        retflag evidence tests/test_swiss_ephemeris.py uses -- proven here by
+        making ``utils.probe_ephemeris_source`` itself say each way and
+        confirming /healthz agrees, independent of whatever data/ephe/ happens
+        to contain in this environment.
+        """
+        import app.main as main_mod
+
+        monkeypatch.setattr(main_mod.utils, "probe_ephemeris_source", lambda: (False, 65604))
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "ephe_loaded": False}
+
+        monkeypatch.setattr(main_mod.utils, "probe_ephemeris_source", lambda: (True, 65602))
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok", "ephe_loaded": True}
