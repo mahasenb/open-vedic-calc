@@ -16,6 +16,20 @@ on:
   schedule:
     - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
 
+# Least-privilege GITHUB_TOKEN. With no explicit block a job inherits the
+# repository default token scope, which is read across EVERY scope (actions,
+# checks, issues, packages, pull-requests, statuses, ...) — far more than this
+# workflow uses. Both jobs only clone the repo: `test` runs pytest + pip-audit,
+# and `docker-test-image` builds Dockerfile.test with push: false (its buildx
+# layer cache uses the Actions cache service, which is authenticated by the
+# runtime token, not GITHUB_TOKEN). So contents: read is the whole requirement —
+# note that publish.yml, which genuinely pushes to GHCR, declares its own
+# packages: write on the publishing job only. This matters more here than in a
+# private repo: any fork can open a pull request, so every needless scope on the
+# workflow token is reachable from an untrusted PR.
+permissions:
+  contents: read
+
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
