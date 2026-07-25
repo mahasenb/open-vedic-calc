@@ -35,9 +35,9 @@ never as the file-wide default.
 
 WHY A PARSER, NOT A LINE-SCAN
 -----------------------------
-Guards of this shape have repeatedly, and recently, gone
-comment-blind. The most recent: a line-scanning version of this very gate had its
-top-level entry regex anchored to end-of-line, so `id-token: write  # required for
+Guards of this shape go comment-blind in practice, and this one's own predecessor
+did. A line-scanning version of this very gate had its top-level entry regex
+anchored to end-of-line, so `id-token: write  # required for
 WIF` — the exact idiom used in the workflows it was guarding — did not match, was
 silently dropped, and the guard reported "present + read-only" and exited 0. Its
 own "comment-blindness" self-checks all still passed with comment-stripping
