@@ -6,10 +6,61 @@ import swisseph as swe
 from jhora.panchanga import drik
 
 EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
-swe.set_ephe_path(EPHE_PATH)
 
-# Initialize pyjhora ayanamsa mode
-drik.set_ayanamsa_mode('LAHIRI')
+# ---------------------------------------------------------------------------
+# pyswisseph's state is THREAD-LOCAL, so it must be applied per thread.
+#
+# pyswisseph 2.10.3.2 ships swisseph's thread-safe (thread-local ``swed``)
+# configuration: the ephemeris path and the sidereal/ayanamsa mode are
+# per-THREAD, not per-process. Setting them once at import therefore configures
+# only the importing thread. Every other thread starts with:
+#
+#   * no ephemeris path -> swe_calc silently falls back to the built-in Moshier
+#     analytical ephemeris. It does NOT raise: it returns a plausible result
+#     with SEFLG_MOSEPH set in retflag instead of SEFLG_SWIEPH.
+#   * no sidereal mode  -> swisseph's default Fagan/Bradley ayanamsa, which
+#     differs from Lahiri by ~0.88 degrees (53 arcmin) — enough to move a
+#     nakshatra pada, and a sign near a boundary.
+#
+# That matters because this service does nearly all of its computing on
+# non-importing threads: Starlette's threadpool for the synchronous ``def``
+# ``/v1/*`` handlers, and the background scan-job pool in ``app/jobs.py``. The
+# mounted Swiss ephemeris data was being bypassed on exactly the paths that
+# serve real requests, while ``/healthz``'s ``ephe_loaded`` — a directory
+# existence check — reported fine.
+#
+# Measured on a CI runner with the data files present (the ``swiss-ephemeris``
+# job in .github/workflows/test.yml, which is what surfaced this):
+#   main thread                      -> retflag 65602, SEFLG_SWIEPH set
+#   worker thread, path not applied  -> retflag 65604, SEFLG_MOSEPH set
+#   worker thread, path applied      -> retflag 65602, SEFLG_SWIEPH set
+#
+# ``_ensure_thread_ephemeris_state()`` applies both settings once per thread and
+# ``serialized_ephemeris`` calls it, so every C-library entry point in this
+# package is covered by construction rather than by remembering — and
+# tests/test_ephemeris_lock.py already pins that every entry point carries that
+# decorator.
+# ---------------------------------------------------------------------------
+_THREAD_EPHEMERIS_STATE = threading.local()
+
+
+def _ensure_thread_ephemeris_state() -> None:
+    """Apply the ephemeris path + Lahiri ayanamsa to the CALLING thread, once.
+
+    Idempotent, and after the first call per thread it costs one attribute
+    lookup — so it is safe on every serialized entry point.
+    """
+    if getattr(_THREAD_EPHEMERIS_STATE, "initialised", False):
+        return
+    swe.set_ephe_path(EPHE_PATH)
+    # Initialize pyjhora ayanamsa mode
+    drik.set_ayanamsa_mode('LAHIRI')
+    _THREAD_EPHEMERIS_STATE.initialised = True
+
+
+# Configure the importing thread eagerly, so a direct ``swe.*`` call made
+# outside a @serialized_ephemeris entry point (a test, a REPL) behaves as before.
+_ensure_thread_ephemeris_state()
 
 # ---------------------------------------------------------------------------
 # Process-wide serialization of Swiss-Ephemeris / pyjhora access.
@@ -50,6 +101,11 @@ def serialized_ephemeris(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         with EPHEMERIS_LOCK:
+            # Inside the lock: pyswisseph's state is thread-local, so a worker
+            # thread must be configured before it computes anything, or it
+            # silently runs on the Moshier fallback with a Fagan/Bradley
+            # ayanamsa. See _ensure_thread_ephemeris_state's rationale above.
+            _ensure_thread_ephemeris_state()
             return fn(*args, **kwargs)
 
     wrapper._holds_ephemeris_lock = True
