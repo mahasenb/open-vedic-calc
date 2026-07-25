@@ -9,6 +9,16 @@ on:
   push:
   pull_request:
 
+# Least-privilege GITHUB_TOKEN. With no explicit block a job inherits the
+# repository default token scope, which is read across EVERY scope (actions,
+# checks, issues, packages, pull-requests, statuses, ...) — far more than this
+# workflow uses. The boundary job only clones the repo, so contents: read is the
+# whole requirement. This matters more here than in a private repo: any fork can
+# open a pull request, so every needless scope on the workflow token is reachable
+# from an untrusted PR.
+permissions:
+  contents: read
+
 jobs:
   boundary:
     name: No proprietary references

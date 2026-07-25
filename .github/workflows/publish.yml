@@ -15,6 +15,21 @@ on:
   release:
     types: [published]
 
+# Least-privilege GITHUB_TOKEN, as the workflow DEFAULT. The `publish` job below
+# already declares its own contents: read + packages: write (it logs in to GHCR
+# and pushes), but the `test` job declared nothing and so inherited the
+# repository default token scope — read across EVERY scope (actions, checks,
+# issues, packages, pull-requests, statuses, ...), when all it does is clone and
+# run pytest. Declaring the default here also means any job added later starts
+# least-privilege and must opt in to more explicitly. A job-level block fully
+# REPLACES this default, so `publish` keeps exactly the two scopes it declares.
+# This matters more here than in a private repo: any fork can open a pull
+# request, so every needless scope on the workflow token is reachable from an
+# untrusted PR (and note `publish` is already `if: github.event_name !=
+# 'pull_request'`, so the packages: write path never runs for one).
+permissions:
+  contents: read
+
 # Cancel a superseded run when a new commit lands on the same PR/branch, so the
 # test job doesn't run to completion on every intermediate push.
 concurrency:
