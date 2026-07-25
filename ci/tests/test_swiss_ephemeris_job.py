@@ -21,6 +21,17 @@ structure: a job exists, its steps include one whose ``run`` invokes the fetcher
 its pytest step's ``env`` mapping carries the flag. ``test_parser_discriminates``
 feeds that logic the fixtures a textual scanner gets wrong, and the real assertions
 re-invoke it so an unproven parser can never certify the workflow green.
+
+STRUCTURAL BACKSTOP (round 4). Three rounds of review each found a NEW way to
+silently disable the job/workflow that the semantic checks above did not
+model. Reimplementing GitHub Actions' full `if:`/trigger-filter semantics is
+an unbounded surface, so this file also carries a snapshot assertion (see
+the module-level comment above ``test_swiss_job_enablement_snapshot_matches_committed_shape``,
+near the end of this file) over the raw enablement-relevant shape of the
+workflow. The semantic checks are the diagnostics -- they give a precise
+reason a specific `if:`/filter form is wrong; the snapshot is the backstop --
+it catches any change to that shape, known or not, without evaluating
+anything. Keep both; neither is redundant with the other.
 """
 from __future__ import annotations
 
@@ -68,18 +79,50 @@ def _workflow_triggers(document: dict) -> dict:
     return triggers if isinstance(triggers, dict) else {}
 
 
-def _glob_matches_any(patterns: object, value: str) -> bool:
-    """True when ``value`` matches at least one glob in ``patterns``.
+class _UnverifiedFilterShape(ValueError):
+    """Raised when a `paths`/`paths-ignore`/`branches`/`branches-ignore` value
+    is present but is not a list (e.g. a bare scalar string).
 
-    Not a re-implementation of GitHub's own path/branch matcher (which has its
-    own `**`/negation semantics) -- ``fnmatch`` is close enough to prove or
-    disprove the specific minimal cases this guard cares about: a `**`-style
-    pattern matching everything, and literal/glob branch names. ``patterns``
-    that isn't a list (missing key, or a YAML scalar) matches nothing.
+    Whether GitHub Actions even accepts a scalar there -- and if so, whether
+    it treats it as a single-element list or something else -- could not be
+    verified without pushing to a real repository (round 4, non-blocking
+    item 3). Rather than guess and silently treat it as "no filter" (which
+    was the previous, permissive behaviour), this guard fails closed: an
+    unverified shape can never certify enablement.
     """
-    if not isinstance(patterns, list):
+
+
+def _glob_matches_any(patterns: object, value: str) -> bool:
+    """True when ``value`` is matched under GitHub's own filter algorithm.
+
+    Not a re-implementation of GitHub's full path/branch matcher (which has
+    its own `**`/`?` semantics) -- ``fnmatch`` is close enough for the cases
+    this guard cares about, PROVIDED negation is handled the way GHA actually
+    handles it: patterns are evaluated in order and the LAST pattern that
+    matches ``value`` decides the outcome, with a `!`-prefixed pattern
+    excluding on match rather than including. ``fnmatch`` alone has no such
+    concept and would treat each pattern in isolation -- exactly why
+    `paths: ["**", "!**"]` or `branches: ["**", "!main"]` used to be
+    completely invisible to this guard despite fully disabling the workflow
+    (round 4, finding 3). A missing key (`patterns is None`) means "no
+    filter" and matches nothing; a *present* non-list value is a shape this
+    guard cannot verify GHA's handling of, so it fails closed rather than
+    silently treating it as "no filter" (round 4, non-blocking item 3).
+    """
+    if patterns is None:
         return False
-    return any(fnmatch.fnmatch(value, str(pattern)) for pattern in patterns)
+    if not isinstance(patterns, list):
+        raise _UnverifiedFilterShape(
+            f"filter value is not a list of glob patterns: {patterns!r}"
+        )
+    matched = False
+    for pattern in patterns:
+        pattern = str(pattern)
+        negated = pattern.startswith("!")
+        glob = pattern[1:] if negated else pattern
+        if fnmatch.fnmatch(value, glob):
+            matched = not negated
+    return matched
 
 
 def _paths_filter_excludes_own_workflow(trigger_body: object) -> bool:
@@ -98,7 +141,7 @@ def _paths_filter_excludes_own_workflow(trigger_body: object) -> bool:
     if _glob_matches_any(trigger_body.get("paths-ignore"), _WORKFLOW_RELATIVE_PATH):
         return True
     paths = trigger_body.get("paths")
-    if isinstance(paths, list) and not _glob_matches_any(paths, _WORKFLOW_RELATIVE_PATH):
+    if paths is not None and not _glob_matches_any(paths, _WORKFLOW_RELATIVE_PATH):
         return True
     return False
 
@@ -116,7 +159,7 @@ def _branches_filter_excludes_default_branch(trigger_body: object) -> bool:
     if _glob_matches_any(trigger_body.get("branches-ignore"), _DEFAULT_BRANCH):
         return True
     branches = trigger_body.get("branches")
-    if isinstance(branches, list) and not _glob_matches_any(branches, _DEFAULT_BRANCH):
+    if branches is not None and not _glob_matches_any(branches, _DEFAULT_BRANCH):
         return True
     return False
 
@@ -208,17 +251,52 @@ def _uses(job: dict) -> list[str]:
 
 
 class _UnsupportedExpression(ValueError):
-    """Raised when a job's `if:` uses syntax this mini-evaluator does not model.
+    """Raised when a job's or step's `if:` uses syntax this mini-evaluator does
+    not model.
 
-    The caller must treat this as "cannot prove the job is enabled" and fail the
-    test — never silently assume the job runs just because its condition could
-    not be evaluated.
+    The caller must treat this as "cannot prove the job/step is enabled" and
+    fail the test — never silently assume it runs just because its condition
+    could not be evaluated.
     """
 
 
 _EXPR_TOKEN_RE = re.compile(
     r"""\s*(?:(?P<op>==|!=|&&|\|\||!|\(|\))|(?P<str>'[^']*'|"[^"]*")|(?P<ident>[A-Za-z_][A-Za-z0-9_.]*))"""
 )
+
+
+def _to_number(value: bool | str) -> float:
+    """GitHub Actions' number-coercion table for a comparison between
+    mismatched types: Boolean -> 1.0/0.0, String -> parsed as a JSON number,
+    otherwise NaN (an empty string is 0). See
+    https://docs.github.com/actions/reference/evaluate-expressions-in-workflows-and-actions
+    """
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if value == "":
+        return 0.0
+    try:
+        return float(value)
+    except ValueError:
+        return float("nan")
+
+
+def _loose_equals(lhs: bool | str, rhs: bool | str) -> bool | None:
+    """GitHub Actions' `==` semantics: same-type operands compare directly;
+    differently-typed operands are both coerced to numbers first (see
+    `_to_number`). Returns None when that coercion makes either side NaN --
+    GHA documents a NaN operand as always `false` for the relational
+    operators, and round 4 finding 2's reproduced cases show the same holds
+    for `==` *and* `!=`: a NaN operand makes BOTH evaluate to `false`, not
+    just `==`. The caller is responsible for turning that `None` into
+    `False` regardless of which operator (`==`/`!=`) is being evaluated.
+    """
+    if type(lhs) is type(rhs):
+        return lhs == rhs
+    lhs_num, rhs_num = _to_number(lhs), _to_number(rhs)
+    if lhs_num != lhs_num or rhs_num != rhs_num:  # NaN is never equal to itself
+        return None
+    return lhs_num == rhs_num
 
 
 def _tokenize_expression(expr: str) -> list[str]:
@@ -264,6 +342,24 @@ class _ExpressionParser:
     directly: `_or_expr` wraps `_and_expr` wraps `_comparison` wraps `_unary`
     wraps `_primary`, so `!` (in `_unary`) sits strictly BELOW `==`/`!=` (in
     `_comparison`) and can only ever bind to the primary right next to it.
+
+    PAREN GROUPING MUST NOT CHANGE A VALUE'S TYPE (round 4, finding 2). GitHub
+    Actions parens are pure grouping. A round-2/round-3 version of `_primary`'s
+    paren branch returned `self._or_expr()`, which funnelled through
+    `_comparison`'s bare-operand fallback -- and that fallback used to return
+    `bool(lhs)` unconditionally, so `(github.event_name)` became the Python
+    bool `True` instead of the string `'push'`. Any later comparison against
+    that parenthesised value then compared against an already-mangled type
+    and guessed wrong in both directions: `(github.event_name) == true`
+    reported the job enabled (comparing `True == True`) when GHA's own
+    type-coercion table (string -> NaN, boolean -> 1/0, NaN never equal to
+    anything) makes it `false` for every event; `(github.event_name) ==
+    'push'` reported disabled (comparing `True == 'push'`) when a real push
+    event makes it `true`. `_comparison` below now returns its bare operand
+    completely unchanged when no `==`/`!=` follows, so a parenthesised value
+    keeps its real type all the way up; `bool()` is applied only where GHA
+    itself requires a boolean -- combining two operands with `&&`/`||`, `!`'s
+    negation, and the final result of `parse()`.
     """
 
     def __init__(self, tokens: list[str], event_name: str) -> None:
@@ -275,7 +371,7 @@ class _ExpressionParser:
         value = self._or_expr()
         if self._pos != len(self._tokens):
             raise _UnsupportedExpression(f"unconsumed tokens: {self._tokens[self._pos:]}")
-        return value
+        return bool(value)
 
     def _peek(self) -> str | None:
         return self._tokens[self._pos] if self._pos < len(self._tokens) else None
@@ -287,28 +383,41 @@ class _ExpressionParser:
         self._pos += 1
         return token
 
-    def _or_expr(self) -> bool:
+    def _or_expr(self) -> bool | str:
         value = self._and_expr()
         while self._peek() == "||":
             self._advance()
-            value = self._and_expr() or value
+            value = bool(self._and_expr()) or bool(value)
         return value
 
-    def _and_expr(self) -> bool:
+    def _and_expr(self) -> bool | str:
         value = self._comparison()
         while self._peek() == "&&":
             self._advance()
-            value = self._comparison() and value
+            value = bool(self._comparison()) and bool(value)
         return value
 
-    def _comparison(self):
+    def _comparison(self) -> bool | str:
+        """`==`/`!=`, or the bare operand unchanged when neither follows.
+
+        Round 4, finding 2: this used to `return bool(lhs)` on the no-operator
+        path, which is what silently mangled every parenthesised value's type
+        (see the class docstring). It must return `lhs` exactly as received --
+        a genuine boolean is only produced here when an actual `==`/`!=`
+        comparison was evaluated.
+        """
         lhs = self._unary()
         if self._peek() in ("==", "!="):
             op = self._advance()
             rhs = self._unary()
-            equal = lhs == rhs
+            equal = _loose_equals(lhs, rhs)
+            if equal is None:
+                # A NaN-producing type coercion: GHA's documented rule for the
+                # relational operators ("NaN is never equal, even to itself")
+                # holds here too, for BOTH `==` and `!=` -- see `_loose_equals`.
+                return False
             return equal if op == "==" else not equal
-        return bool(lhs)
+        return lhs
 
     def _unary(self):
         """`!`, unary — binds tighter than `==`/`!=` (see class docstring), so
@@ -342,13 +451,17 @@ def _evaluate_gha_if(expr: str, event_name: str) -> bool:
     return _ExpressionParser(_tokenize_expression(expr), event_name).parse()
 
 
-def _job_condition(job: dict) -> bool | str | None:
-    """The job's raw `if:` value: a bool if YAML parsed a bare literal, the
-    unwrapped expression string otherwise, or None if there is no `if:` at all
-    (which means the job always runs)."""
-    if "if" not in job:
+def _condition(mapping: dict) -> bool | str | None:
+    """A job's or step's raw `if:` value: a bool if YAML parsed a bare
+    literal, the unwrapped expression string otherwise, or None if there is
+    no `if:` at all (which means it always runs).
+
+    GitHub Actions' `if:` grammar is identical for jobs and steps, so this
+    reads either mapping the same way (round 4, finding 1 -- the step-level
+    guard reuses this rather than duplicating it)."""
+    if "if" not in mapping:
         return None
-    value = job["if"]
+    value = mapping["if"]
     if isinstance(value, bool):
         return value
     text = str(value).strip()
@@ -357,14 +470,15 @@ def _job_condition(job: dict) -> bool | str | None:
     return text
 
 
-def _job_runs_for_event(job: dict, event_name: str) -> bool:
-    """Whether the job's `if:` (if any) lets it run for the given event.
+def _runs_for_event(mapping: dict, event_name: str) -> bool:
+    """Whether the job's or step's `if:` (if any) lets it run for the given
+    event.
 
     Raises _UnsupportedExpression when the condition cannot be evaluated by this
     guard's supported subset — the caller must fail the test on that, not treat
     it as "probably fine".
     """
-    condition = _job_condition(job)
+    condition = _condition(mapping)
     if condition is None:
         return True
     if isinstance(condition, bool):
@@ -395,8 +509,15 @@ def _runs_the_test_suite(run: str) -> bool:
     return False
 
 
-def _runs_the_suite_with_the_flag(job: dict) -> bool:
-    """A step must BOTH invoke pytest over tests/ AND carry the flag=1 in scope."""
+def _suite_step(job: dict) -> dict | None:
+    """The step that invokes pytest over tests/ WITH the flag=1 in scope, if
+    any -- a step must BOTH invoke pytest over tests/ AND carry the flag=1 in
+    scope to count.
+
+    Returning the step itself (not just a bool) is what round 4, finding 1's
+    step-level enablement check needs: the job's `if:` being fine says
+    nothing about whether GHA would actually reach the step that runs the
+    suite (see test_swiss_job_suite_step_is_not_conditionally_skipped)."""
     job_env = job.get("env")
     job_level = isinstance(job_env, dict) and str(job_env.get(_FLAG)) == "1"
     for step in _steps(job):
@@ -409,8 +530,13 @@ def _runs_the_suite_with_the_flag(job: dict) -> bool:
         # so the same string inside a quoted echo argument does not count.
         inline = any(f"{_FLAG}=1" in tokens for tokens in _commands(str(run)))
         if job_level or step_level or inline:
-            return True
-    return False
+            return step
+    return None
+
+
+def _runs_the_suite_with_the_flag(job: dict) -> bool:
+    """A step must BOTH invoke pytest over tests/ AND carry the flag=1 in scope."""
+    return _suite_step(job) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -673,27 +799,27 @@ def test_enablement_parser_discriminates() -> None:
         yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: false\n    steps: []\n"),
         _JOB,
     )
-    assert _job_runs_for_event(disabled_literal, "push") is False
-    assert _job_runs_for_event(disabled_literal, "pull_request") is False
+    assert _runs_for_event(disabled_literal, "push") is False
+    assert _runs_for_event(disabled_literal, "pull_request") is False
 
     disabled_expr = _job(
         yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: ${{ false }}\n    steps: []\n"),
         _JOB,
     )
-    assert _job_runs_for_event(disabled_expr, "push") is False
+    assert _runs_for_event(disabled_expr, "push") is False
 
     disabled_quoted_string = _job(
         yaml.safe_load("jobs:\n  swiss-ephemeris:\n    if: \"false\"\n    steps: []\n"),
         _JOB,
     )
-    assert _job_runs_for_event(disabled_quoted_string, "push") is False
+    assert _runs_for_event(disabled_quoted_string, "push") is False
 
     # No `if:` at all means the job always runs.
     always_runs = _job(
         yaml.safe_load("jobs:\n  swiss-ephemeris:\n    steps: []\n"), _JOB
     )
-    assert _job_runs_for_event(always_runs, "push") is True
-    assert _job_runs_for_event(always_runs, "pull_request") is True
+    assert _runs_for_event(always_runs, "push") is True
+    assert _runs_for_event(always_runs, "pull_request") is True
 
     # THE INVERSE: the repo's real, legitimate schedule-only skip must NOT be
     # rejected. It must run on push/PR and may legitimately skip on schedule.
@@ -704,9 +830,9 @@ def test_enablement_parser_discriminates() -> None:
         ),
         _JOB,
     )
-    assert _job_runs_for_event(legitimate, "push") is True
-    assert _job_runs_for_event(legitimate, "pull_request") is True
-    assert _job_runs_for_event(legitimate, "schedule") is False
+    assert _runs_for_event(legitimate, "push") is True
+    assert _runs_for_event(legitimate, "pull_request") is True
+    assert _runs_for_event(legitimate, "schedule") is False
 
     # Equivalent spellings of the same legitimate condition must also be accepted.
     for text in (
@@ -718,7 +844,7 @@ def test_enablement_parser_discriminates() -> None:
             yaml.safe_load(f"jobs:\n  swiss-ephemeris:\n    if: \"{text}\"\n    steps: []\n"),
             _JOB,
         )
-        assert _job_runs_for_event(job, "push") is True, f"rejected legitimate form: {text!r}"
+        assert _runs_for_event(job, "push") is True, f"rejected legitimate form: {text!r}"
 
     # PRECEDENCE (round 3, finding 1a): GitHub Actions binds `!` tighter than
     # `==`/`!=` (see the precedence table on _ExpressionParser). So
@@ -739,7 +865,7 @@ def test_enablement_parser_discriminates() -> None:
             yaml.safe_load(f"jobs:\n  swiss-ephemeris:\n    if: \"{typo}\"\n    steps: []\n"),
             _JOB,
         )
-        assert _job_runs_for_event(job, "push") is False, (
+        assert _runs_for_event(job, "push") is False, (
             f"precedence bug: {typo!r} must evaluate to False (disabled) for push -- "
             "'!' binds tighter than '==' in GHA, so this is (!github.event_name) == "
             "'schedule', not !(github.event_name == 'schedule')"
@@ -756,11 +882,63 @@ def test_enablement_parser_discriminates() -> None:
         _JOB,
     )
     try:
-        _job_runs_for_event(unsupported, "push")
+        _runs_for_event(unsupported, "push")
     except _UnsupportedExpression:
         pass
     else:
         raise AssertionError("an unsupported expression form was silently evaluated")
+
+
+def test_paren_grouping_does_not_coerce_to_bool() -> None:
+    """Round 4, finding 2: `_primary`'s paren branch used to funnel through
+    `_comparison`'s bare-operand fallback, which returned `bool(lhs)`
+    unconditionally -- so `(github.event_name)` became the Python bool
+    `True` instead of the real string `'push'`/`'pull_request'` before any
+    enclosing comparison ever saw it. GitHub Actions parens are pure
+    grouping and must never change a value's type.
+
+    Every form below is something the coercion bug got wrong -- either by
+    reporting a job enabled that GHA would actually skip, or (over-strictly)
+    reporting one disabled that GHA would actually run. None of these
+    depend on which real event is under test except where noted, since they
+    are comparisons against literal `true`/`false`.
+    """
+    # Under GHA's own number-coercion table (string -> NaN if non-numeric,
+    # boolean -> 1/0, NaN never equal to anything -- see _to_number /
+    # _loose_equals), comparing the real string event name against a
+    # boolean literal is false for EVERY event. The coercion bug reported
+    # all five of these as enabled on both push and pull_request instead.
+    for expr in (
+        "(github.event_name) == true",
+        "((github.event_name)) == true",
+        "true == (github.event_name)",
+        "(github.event_name) != false",
+    ):
+        for event_name in ("push", "pull_request"):
+            assert _evaluate_gha_if(expr, event_name) is False, (
+                f"{expr!r} must evaluate False for {event_name!r} -- a string "
+                "event name is never loosely equal to a boolean literal under "
+                "GHA's own coercion rules, but the paren-coercion bug reported "
+                "every one of these as enabled"
+            )
+
+    # Over-strict in the other direction: a paren-wrapped value compared
+    # against its OWN real string value must still equal it. The coercion
+    # bug reported this as False (disabled) for a real push event, which
+    # would falsely red a legitimate condition shaped like this.
+    assert _evaluate_gha_if("(github.event_name) == 'push'", "push") is True
+    assert _evaluate_gha_if("(github.event_name) == 'push'", "pull_request") is False
+
+    # A realistic parenthesised form equivalent to the real job's own
+    # `github.event_name != 'schedule'` condition: two paren-wrapped
+    # inequality checks ANDed together. Parens must not flip this to
+    # "enabled" for push/pull_request or to "disabled" for schedule.
+    combined = (
+        "(github.event_name) != 'push' && (github.event_name) != 'pull_request'"
+    )
+    assert _evaluate_gha_if(combined, "push") is False
+    assert _evaluate_gha_if(combined, "pull_request") is False
+    assert _evaluate_gha_if(combined, "schedule") is True
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +1024,78 @@ jobs:
     steps: []
 """
 
+# Round 4, finding 3: `fnmatch` has no notion of GHA's `!`-exclusion, and GHA
+# filters are order-dependent -- the LAST matching pattern wins. Each fixture
+# below fully disables the trigger (every path/branch that the first pattern
+# would ever match is immediately excluded by a later `!`-prefixed one) while
+# a match-any-pattern check (no negation awareness) stays green.
+
+_FIXTURE_TRIGGERS_PATHS_STAR_THEN_NEGATE_ALL = """
+on:
+  push:
+    paths:
+      - "**"
+      - "!**"
+  pull_request:
+    paths:
+      - "**"
+      - "!**"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_PATHS_REALISTIC_NEGATED_ALLOWLIST = """
+on:
+  push:
+    paths:
+      - "**"
+      - "!.github/**"
+      - "!bphs_core/**"
+      - "!tests/**"
+      - "!ci/**"
+  pull_request:
+    paths:
+      - "**"
+      - "!.github/**"
+      - "!bphs_core/**"
+      - "!tests/**"
+      - "!ci/**"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_BRANCHES_DOUBLESTAR_NEGATE_MAIN = """
+on:
+  push:
+    branches:
+      - "**"
+      - "!main"
+  pull_request:
+    branches:
+      - "**"
+      - "!main"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_BRANCHES_STAR_NEGATE_MAIN = """
+on:
+  push:
+    branches:
+      - "*"
+      - "!main"
+  pull_request:
+    branches:
+      - "*"
+      - "!main"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
 
 def test_trigger_body_parser_discriminates() -> None:
     """Fixtures for the trigger-body checks: `push`/`pull_request` being keys in
@@ -900,6 +1150,67 @@ def test_trigger_body_parser_discriminates() -> None:
             f"excludes the default branch ({_DEFAULT_BRANCH!r})"
         )
 
+    # Round 4, finding 3: `!`-negation with last-match-wins. A `paths:`/
+    # `branches:` allowlist that matches everything and then immediately
+    # negates it (or negates specifically the default branch / this
+    # workflow's own path) must be flagged exactly like an outright
+    # `paths-ignore: ["**"]` -- `fnmatch.fnmatch` alone cannot see this at
+    # all, since it evaluates each pattern in isolation.
+    for fixture in (
+        _FIXTURE_TRIGGERS_PATHS_STAR_THEN_NEGATE_ALL,
+        _FIXTURE_TRIGGERS_PATHS_REALISTIC_NEGATED_ALLOWLIST,
+    ):
+        triggers = triggers_of(fixture)
+        for event in ("push", "pull_request"):
+            assert _paths_filter_excludes_own_workflow(triggers.get(event)), (
+                f"negated paths allowlist in {fixture!r} was not flagged on {event} "
+                "-- GHA filters are order-dependent (last match wins) and this "
+                "negates every path, including the workflow's own"
+            )
+
+    for fixture in (
+        _FIXTURE_TRIGGERS_BRANCHES_DOUBLESTAR_NEGATE_MAIN,
+        _FIXTURE_TRIGGERS_BRANCHES_STAR_NEGATE_MAIN,
+    ):
+        triggers = triggers_of(fixture)
+        for event in ("push", "pull_request"):
+            assert _branches_filter_excludes_default_branch(triggers.get(event)), (
+                f"negated branches allowlist in {fixture!r} was not flagged on "
+                f"{event} -- it matches everything and then excludes exactly "
+                f"the default branch ({_DEFAULT_BRANCH!r})"
+            )
+
+
+def test_scalar_filter_value_fails_closed() -> None:
+    """Round 4, non-blocking item 3, handled honestly rather than waved
+    through: whether GHA even accepts a scalar (non-list) `paths` /
+    `paths-ignore` / `branches` / `branches-ignore` value -- and if so, how
+    -- could not be verified without pushing to a real repository. The
+    previous behaviour silently treated a present scalar as "no filter"
+    (permissive on an unverified assumption). This guard now fails closed
+    instead: a present scalar value raises rather than being read as
+    "no restriction"."""
+    for trigger_body in ({"paths-ignore": "**.md"}, {"paths": "src/**"}):
+        try:
+            _paths_filter_excludes_own_workflow(trigger_body)
+        except _UnverifiedFilterShape:
+            pass
+        else:
+            raise AssertionError(
+                f"a scalar filter value in {trigger_body!r} was silently treated "
+                "as 'no filter' instead of failing closed"
+            )
+    for trigger_body in ({"branches-ignore": "main"}, {"branches": "main"}):
+        try:
+            _branches_filter_excludes_default_branch(trigger_body)
+        except _UnverifiedFilterShape:
+            pass
+        else:
+            raise AssertionError(
+                f"a scalar filter value in {trigger_body!r} was silently treated "
+                "as 'no filter' instead of failing closed"
+            )
+
 
 def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
     """A guard that only checks the job's CONTENTS can be defeated trivially: add
@@ -944,10 +1255,10 @@ def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
             f"never run this job. trigger body: {trigger_body!r}"
         )
 
-    condition = _job_condition(job)
+    condition = _condition(job)
     for event_name in ("push", "pull_request"):
         try:
-            enabled = _job_runs_for_event(job, event_name)
+            enabled = _runs_for_event(job, event_name)
         except _UnsupportedExpression as exc:
             raise AssertionError(
                 f"the `{_JOB}` job's `if:` condition ({condition!r}) uses syntax this "
@@ -967,6 +1278,106 @@ def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
         )
 
 
+def test_step_enablement_parser_discriminates() -> None:
+    """Fixtures for the STEP-level `if:` evaluator (round 4, finding 1),
+    mirroring test_enablement_parser_discriminates. `_runs_for_event` is the
+    exact same evaluator used for jobs -- GitHub Actions' `if:` grammar is
+    identical for a job and a step -- applied here directly to a step
+    mapping instead of a job mapping."""
+    for disabling in (
+        {"if": False},
+        {"if": "${{ false }}"},
+        {"if": "github.event_name == 'schedule'"},
+    ):
+        for event_name in ("push", "pull_request"):
+            assert _runs_for_event(disabling, event_name) is False, disabling
+
+    # No `if:` at all -- the step always runs.
+    assert _runs_for_event({}, "push") is True
+    assert _runs_for_event({}, "pull_request") is True
+
+    # The real workflow's own legitimate spelling (test.yml:65, :72) must not
+    # be false-rejected by the step-level evaluator either.
+    legitimate = {"if": "github.event_name != 'schedule'"}
+    assert _runs_for_event(legitimate, "push") is True
+    assert _runs_for_event(legitimate, "pull_request") is True
+    assert _runs_for_event(legitimate, "schedule") is False
+
+
+def test_swiss_job_suite_step_is_not_conditionally_skipped() -> None:
+    """Round 4, finding 1: every check above -- including
+    test_swiss_job_runs_the_suite_with_the_fail_closed_flag and
+    test_swiss_job_is_actually_enabled_on_its_real_triggers -- inspects the
+    JOB's `if:` but never looks at the STEP's own `if:`. Add a disabling
+    `if:` to ONLY the suite step (`.github/workflows/test.yml:140-145`): the
+    job has no job-level `if:` blocking it, every other step still runs, and
+    GitHub Actions marks that one step `skipped` while the JOB still reports
+    `success`. Every other test in this file would still pass -- the exact
+    fail-open shape this whole file exists to prevent, one level below the
+    job's own `if:` (see test_swiss_job_is_actually_enabled_on_its_real_triggers's
+    docstring for the job-level version of this same argument).
+
+    This is not scope creep: test_swiss_job_does_not_continue_on_error
+    already iterates steps for the sibling `continue-on-error` vector, and
+    this file's own module
+    docstring already frames "correctly written but never RUNS" as the
+    invariant to defend. `test.yml:65` and `:72` use step-level `if:`
+    legitimately (on the *other* job, `test`) -- see
+    test_legitimate_step_level_if_in_the_test_job_is_not_false_rejected for
+    the concrete proof this guard does not false-reject that spelling.
+    """
+    test_step_enablement_parser_discriminates()
+    job = _real_job()
+    step = _suite_step(job)
+    assert step is not None, (
+        "no step in the swiss-ephemeris job runs pytest tests/ with "
+        f"{_FLAG}=1 in scope -- see test_swiss_job_runs_the_suite_with_the_fail_closed_flag"
+    )
+    condition = _condition(step)
+    for event_name in ("push", "pull_request"):
+        try:
+            enabled = _runs_for_event(step, event_name)
+        except _UnsupportedExpression as exc:
+            raise AssertionError(
+                f"the suite step's `if:` condition ({condition!r}) uses syntax this "
+                f"guard cannot evaluate ({exc}), so it cannot prove the step actually "
+                "runs on a real push/PR event. Rewrite the condition using the "
+                "supported subset, or extend this guard deliberately."
+            ) from exc
+        assert enabled, (
+            f"the suite step's `if:` condition ({condition!r}) evaluates to False "
+            f"for github.event_name == {event_name!r}. A step-level `if:` that skips "
+            "the one step that actually runs the accuracy suite lets the job report "
+            "success while validating nothing -- every other test in this file would "
+            "still pass."
+        )
+
+
+def test_legitimate_step_level_if_in_the_test_job_is_not_false_rejected() -> None:
+    """`.github/workflows/test.yml:65` and `:72` use step-level
+    `if: github.event_name != 'schedule'` legitimately, on the `test` job's
+    own steps ("Run tests" and "Run CI gate regression suite") -- skipping
+    pytest on the weekly schedule-only run, exactly like the job-level
+    condition on `swiss-ephemeris`. The step-level evaluator introduced for
+    round 4, finding 1 must not mistake these for a disabling condition."""
+    document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    test_job = _job(document, "test")
+    assert test_job is not None, f"{_TEST_WORKFLOW} no longer has a `test` job"
+    for step_name in ("Run tests", "Run CI gate regression suite"):
+        step = next((s for s in _steps(test_job) if s.get("name") == step_name), None)
+        assert step is not None, f"the `test` job no longer has a step named {step_name!r}"
+        assert _runs_for_event(step, "push") is True, (
+            f"step {step_name!r}'s `if:` was false-rejected for push"
+        )
+        assert _runs_for_event(step, "pull_request") is True, (
+            f"step {step_name!r}'s `if:` was false-rejected for pull_request"
+        )
+        assert _runs_for_event(step, "schedule") is False, (
+            f"step {step_name!r}'s `if:` should legitimately skip the weekly "
+            "schedule-only run, but the evaluator reports it enabled"
+        )
+
+
 def test_swiss_job_does_not_continue_on_error() -> None:
     """`continue-on-error: true` lets a job (or a step) fail without failing the
     workflow -- a second way to make a red accuracy run look green. Neither the
@@ -980,6 +1391,172 @@ def test_swiss_job_does_not_continue_on_error() -> None:
         assert step.get("continue-on-error") is not True, (
             f"a step in the `{_JOB}` job sets continue-on-error: true: {step}"
         )
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL BACKSTOP (round 4). Rounds 1, 2 and 3 each hardened the semantic
+# checks above and each time a NEW disabling vector appeared that they did
+# not model: job-level `if:` -> `!` precedence -> presence-only triggers ->
+# step-level `if:` -> paren-coercion -> glob negation. Reimplementing GHA's
+# full semantics one gap at a time is an unbounded surface, and the score so
+# far is round 1-3 each losing that race exactly once.
+#
+# The assertion below does not evaluate semantics at all, so a semantics
+# divergence cannot defeat it: it snapshots every field that can affect
+# whether the swiss-ephemeris job actually runs (the job's `if:`, every
+# step's `if:`, `continue-on-error` at job and step level, and the full
+# `on:` trigger bodies) and diffs that shape against a value committed here.
+# ANY change to the shape reds, and updating _EXPECTED_ENABLEMENT_SNAPSHOT is
+# a deliberate, reviewed act -- not something a stray workflow edit does by
+# accident.
+#
+# THE SEMANTIC CHECKS ABOVE ARE NOT MADE REDUNDANT BY THIS. Keep both: the
+# semantic checks give a precise, actionable error message for the forms
+# they know about ("this `if:` evaluates False for push because ..."); this
+# snapshot is the catch-all for a form nobody has thought of yet. A future
+# reader should not delete either one thinking it duplicates the other --
+# see test_enablement_snapshot_catches_forms_the_semantic_checks_do_not for
+# concrete proof the two are not redundant.
+# ---------------------------------------------------------------------------
+
+
+def _enablement_snapshot(document: dict, job: dict) -> dict:
+    """The full enablement-relevant shape of the workflow, for the structural
+    backstop above: everything that decides whether `job` actually executes
+    on a real push/PR, captured verbatim rather than evaluated."""
+    return {
+        "job_if": job.get("if"),
+        "job_continue_on_error": job.get("continue-on-error"),
+        "steps": [
+            {
+                "name": step.get("name"),
+                "if": step.get("if"),
+                "continue_on_error": step.get("continue-on-error"),
+            }
+            for step in _steps(job)
+        ],
+        "on": _workflow_triggers(document),
+    }
+
+
+_EXPECTED_ENABLEMENT_SNAPSHOT = {
+    "job_if": "github.event_name != 'schedule'",
+    "job_continue_on_error": None,
+    "steps": [
+        {"name": None, "if": None, "continue_on_error": None},
+        {"name": None, "if": None, "continue_on_error": None},
+        {
+            "name": "Cache Swiss ephemeris data files",
+            "if": None,
+            "continue_on_error": None,
+        },
+        {
+            "name": "Self-test the checksum verifier",
+            "if": None,
+            "continue_on_error": None,
+        },
+        {
+            "name": "Fetch + verify the Swiss ephemeris data files",
+            "if": None,
+            "continue_on_error": None,
+        },
+        {
+            "name": "Install the FROZEN dependency set",
+            "if": None,
+            "continue_on_error": None,
+        },
+        {
+            "name": "Run the full suite against real Swiss data",
+            "if": None,
+            "continue_on_error": None,
+        },
+    ],
+    "on": {
+        "push": {"paths-ignore": ["**.md", "LICENSE"]},
+        "pull_request": {"paths-ignore": ["**.md", "LICENSE"]},
+        "schedule": [{"cron": "0 6 * * 1"}],
+    },
+}
+
+
+def test_swiss_job_enablement_snapshot_matches_committed_shape() -> None:
+    """THE STRUCTURAL BACKSTOP -- see the module-level comment just above this
+    function for why it exists alongside, not instead of, the semantic
+    checks. This assertion does not evaluate `if:` expressions or glob
+    filters at all; it snapshots their raw shape and diffs against a value
+    committed here. ANY change to that shape reds and requires a deliberate,
+    reviewed update to _EXPECTED_ENABLEMENT_SNAPSHOT.
+    """
+    document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    job = _job(document, _JOB)
+    assert job is not None
+    snapshot = _enablement_snapshot(document, job)
+    assert snapshot == _EXPECTED_ENABLEMENT_SNAPSHOT, (
+        f"the `{_JOB}` job's enablement-relevant shape changed. If this is a "
+        "deliberate, reviewed change, update _EXPECTED_ENABLEMENT_SNAPSHOT to "
+        f"match it. Actual snapshot:\n{snapshot!r}"
+    )
+
+
+def test_enablement_snapshot_catches_forms_the_semantic_checks_do_not() -> None:
+    """Proof the backstop is not redundant with the semantic checks above:
+    two disabling mutations that the EVALUATOR does not model at all (so
+    none of the `if:`/trigger checks would flag them) still change the
+    snapshot -- which is exactly what would turn
+    test_swiss_job_enablement_snapshot_matches_committed_shape red if either
+    mutation were made to the real workflow file. Mutating in-memory copies
+    here (rather than the tracked test.yml) proves the same thing without
+    ever leaving the real workflow in a broken state.
+    """
+    document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    job = _job(document, _JOB)
+    assert job is not None
+    baseline = _enablement_snapshot(document, job)
+    assert baseline == _EXPECTED_ENABLEMENT_SNAPSHOT
+
+    # Form 1: `pull_request.types` restricted to an event type a normal PR
+    # push/update never produces. This is the acknowledged non-blocking gap
+    # ("types: filters unhandled") -- neither
+    # _paths_filter_excludes_own_workflow nor
+    # _branches_filter_excludes_default_branch inspects `types` at all, and
+    # _runs_for_event never looks at trigger bodies, so nothing above would
+    # flag it. The snapshot, which captures the full trigger body verbatim,
+    # still catches it.
+    mutated_types = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    mutated_types[True]["pull_request"]["types"] = ["closed"]
+    mutated_job_1 = _job(mutated_types, _JOB)
+    assert mutated_job_1 is not None
+    mutated_snapshot_1 = _enablement_snapshot(mutated_types, mutated_job_1)
+    assert mutated_snapshot_1 != _EXPECTED_ENABLEMENT_SNAPSHOT, (
+        "a pull_request `types` restriction did not change the snapshot -- "
+        "the backstop would not have caught it"
+    )
+
+    # Form 2: `if: false` on the FETCHER step -- not the suite step round 4
+    # finding 1's fix specifically checks (test_swiss_job_suite_step_is_not_
+    # conditionally_skipped only looks at the step _suite_step identifies).
+    # _job_invokes_fetcher only checks that some `run:` body in the job's
+    # steps textually invokes the fetcher; it never checks whether that
+    # step itself would actually execute. The snapshot, which captures
+    # every step's `if:` by position, still catches it.
+    mutated_step_if = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    fetch_step = next(
+        step
+        for step in mutated_step_if["jobs"][_JOB]["steps"]
+        if step.get("name") == "Fetch + verify the Swiss ephemeris data files"
+    )
+    fetch_step["if"] = False
+    mutated_job_2 = _job(mutated_step_if, _JOB)
+    assert mutated_job_2 is not None
+    assert _job_invokes_fetcher(mutated_job_2), (
+        "sanity check: the mutated fixture must still structurally look like "
+        "it invokes the fetcher, or this isn't testing what it claims"
+    )
+    mutated_snapshot_2 = _enablement_snapshot(mutated_step_if, mutated_job_2)
+    assert mutated_snapshot_2 != _EXPECTED_ENABLEMENT_SNAPSHOT, (
+        "an `if: false` on the fetcher step did not change the snapshot -- "
+        "the backstop would not have caught it"
+    )
 
 
 def test_manifest_and_goldens_are_committed() -> None:
