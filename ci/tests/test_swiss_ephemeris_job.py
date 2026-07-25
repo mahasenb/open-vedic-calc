@@ -24,6 +24,7 @@ re-invoke it so an unproven parser can never certify the workflow green.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 import shlex
 from pathlib import Path
@@ -35,6 +36,10 @@ _TEST_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "test.yml"
 _JOB = "swiss-ephemeris"
 _FLAG = "REQUIRE_SWISS_EPHEMERIS"
 _FETCHER = "ci/fetch_swiss_ephemeris.py"
+_WORKFLOW_RELATIVE_PATH = _TEST_WORKFLOW.relative_to(_REPO_ROOT).as_posix()
+# This repo's default branch (confirmed live, not assumed) -- the branch a
+# real push/PR targets. If it ever changes, update this alongside it.
+_DEFAULT_BRANCH = "main"
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +66,59 @@ def _workflow_triggers(document: dict) -> dict:
     if triggers is None:
         triggers = document.get(True)
     return triggers if isinstance(triggers, dict) else {}
+
+
+def _glob_matches_any(patterns: object, value: str) -> bool:
+    """True when ``value`` matches at least one glob in ``patterns``.
+
+    Not a re-implementation of GitHub's own path/branch matcher (which has its
+    own `**`/negation semantics) -- ``fnmatch`` is close enough to prove or
+    disprove the specific minimal cases this guard cares about: a `**`-style
+    pattern matching everything, and literal/glob branch names. ``patterns``
+    that isn't a list (missing key, or a YAML scalar) matches nothing.
+    """
+    if not isinstance(patterns, list):
+        return False
+    return any(fnmatch.fnmatch(value, str(pattern)) for pattern in patterns)
+
+
+def _paths_filter_excludes_own_workflow(trigger_body: object) -> bool:
+    """True when this trigger's `paths`/`paths-ignore` filter would stop a push
+    that touches ONLY the workflow file itself (``_WORKFLOW_RELATIVE_PATH``)
+    from firing the trigger.
+
+    `paths-ignore: ["**"]` is the fixture this exists to catch (round 3,
+    finding 1b): it matches every path, so the job can never run on any push
+    -- including one that edits this very file to re-enable it. A `paths:`
+    allowlist that never matches the workflow's own path is symmetric: it
+    means editing the workflow can never itself re-trigger the job either.
+    """
+    if not isinstance(trigger_body, dict):
+        return False
+    if _glob_matches_any(trigger_body.get("paths-ignore"), _WORKFLOW_RELATIVE_PATH):
+        return True
+    paths = trigger_body.get("paths")
+    if isinstance(paths, list) and not _glob_matches_any(paths, _WORKFLOW_RELATIVE_PATH):
+        return True
+    return False
+
+
+def _branches_filter_excludes_default_branch(trigger_body: object) -> bool:
+    """True when this trigger's `branches`/`branches-ignore` filter would stop
+    a push to the repo's real default branch (``_DEFAULT_BRANCH``) from firing.
+
+    `branches: ["no-such-branch-xyz"]` is the fixture this exists to catch
+    (round 3, finding 1b): the key is present, so a presence-only check stays
+    green, but no real push/PR against the default branch would ever satisfy it.
+    """
+    if not isinstance(trigger_body, dict):
+        return False
+    if _glob_matches_any(trigger_body.get("branches-ignore"), _DEFAULT_BRANCH):
+        return True
+    branches = trigger_body.get("branches")
+    if isinstance(branches, list) and not _glob_matches_any(branches, _DEFAULT_BRANCH):
+        return True
+    return False
 
 
 def _steps(job: dict) -> list[dict]:
@@ -185,6 +243,27 @@ class _ExpressionParser:
     `github.event_name` (substituted with the event name under test). Anything
     else — a function call, a different context, a matrix reference — raises
     _UnsupportedExpression rather than guessing a truth value.
+
+    OPERATOR PRECEDENCE (round 3, finding 1a). GitHub Actions' documented order
+    of evaluation, highest-binding first, is:
+
+        1. ()                  grouping
+        2. !                   logical NOT (unary)
+        3. <  <=  >  >=        relational          (NOT supported here)
+        4. ==  !=              equality
+        5. &&                  logical AND
+        6. ||                  logical OR
+
+    So `!` binds to the single operand right after it, TIGHTER than `==`/`!=`:
+    `!github.event_name == 'schedule'` is `(!github.event_name) == 'schedule'`,
+    NOT `!(github.event_name == 'schedule')`. A round-1/round-2 version of this
+    evaluator applied `!` above comparison (between `_and_expr` and comparison),
+    which silently inverted every un-parenthesized `!x == y` condition — see
+    the mutation fixtures in `test_enablement_parser_discriminates` for the
+    concrete case this broke. The grammar below encodes the table above
+    directly: `_or_expr` wraps `_and_expr` wraps `_comparison` wraps `_unary`
+    wraps `_primary`, so `!` (in `_unary`) sits strictly BELOW `==`/`!=` (in
+    `_comparison`) and can only ever bind to the primary right next to it.
     """
 
     def __init__(self, tokens: list[str], event_name: str) -> None:
@@ -216,26 +295,29 @@ class _ExpressionParser:
         return value
 
     def _and_expr(self) -> bool:
-        value = self._not_expr()
+        value = self._comparison()
         while self._peek() == "&&":
             self._advance()
-            value = self._not_expr() and value
+            value = self._comparison() and value
         return value
 
-    def _not_expr(self) -> bool:
-        if self._peek() == "!":
-            self._advance()
-            return not self._not_expr()
-        return self._comparison_or_primary()
-
-    def _comparison_or_primary(self):
-        lhs = self._primary()
+    def _comparison(self):
+        lhs = self._unary()
         if self._peek() in ("==", "!="):
             op = self._advance()
-            rhs = self._primary()
+            rhs = self._unary()
             equal = lhs == rhs
             return equal if op == "==" else not equal
         return bool(lhs)
+
+    def _unary(self):
+        """`!`, unary — binds tighter than `==`/`!=` (see class docstring), so
+        it wraps only the single primary/parenthesised operand right after it,
+        never a whole comparison."""
+        if self._peek() == "!":
+            self._advance()
+            return not self._unary()
+        return self._primary()
 
     def _primary(self):
         if self._peek() == "(":
@@ -638,6 +720,31 @@ def test_enablement_parser_discriminates() -> None:
         )
         assert _job_runs_for_event(job, "push") is True, f"rejected legitimate form: {text!r}"
 
+    # PRECEDENCE (round 3, finding 1a): GitHub Actions binds `!` tighter than
+    # `==`/`!=` (see the precedence table on _ExpressionParser). So
+    # `!github.event_name == 'schedule'` parses as
+    # `(!github.event_name) == 'schedule'` -- i.e. `false == 'schedule'`,
+    # which is false for EVERY event, including push and pull_request. An
+    # evaluator that instead applies `!` to the whole comparison (reading it
+    # as `!(github.event_name == 'schedule')`) gets this exactly backwards:
+    # it would report the job enabled when the real workflow disables it on
+    # every push and PR. Every spelling below must evaluate to False, not
+    # True -- the opposite of the "legitimate" list just above.
+    for typo in (
+        "!github.event_name == 'schedule'",
+        "! github.event_name == 'schedule'",
+        "${{ !github.event_name == 'schedule' }}",
+    ):
+        job = _job(
+            yaml.safe_load(f"jobs:\n  swiss-ephemeris:\n    if: \"{typo}\"\n    steps: []\n"),
+            _JOB,
+        )
+        assert _job_runs_for_event(job, "push") is False, (
+            f"precedence bug: {typo!r} must evaluate to False (disabled) for push -- "
+            "'!' binds tighter than '==' in GHA, so this is (!github.event_name) == "
+            "'schedule', not !(github.event_name == 'schedule')"
+        )
+
     # A condition using syntax outside the supported subset must fail closed —
     # "cannot prove enablement" — rather than being silently treated as enabled.
     unsupported = _job(
@@ -656,6 +763,144 @@ def test_enablement_parser_discriminates() -> None:
         raise AssertionError("an unsupported expression form was silently evaluated")
 
 
+# ---------------------------------------------------------------------------
+# Trigger-BODY checks (round 3, finding 1b) — presence of `push`/`pull_request`
+# as keys in `on:` proves nothing about whether the filters inside them let a
+# real push/PR through. `paths-ignore: ["**"]` or `branches: ["no-such-branch"]`
+# keep those keys present while silencing the workflow entirely.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_TRIGGERS_GOOD = """
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_NO_FILTERS = """
+on:
+  push: {}
+  pull_request: {}
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_BRANCHES_INCLUDE_MAIN = """
+on:
+  push:
+    branches:
+      - "main"
+  pull_request: {}
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_PATHS_IGNORE_STAR = """
+on:
+  push:
+    paths-ignore:
+      - "**"
+  pull_request:
+    paths-ignore:
+      - "**"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_PATHS_IGNORE_STAR_SLASH_STAR = """
+on:
+  push:
+    paths-ignore:
+      - "**/*"
+      - "**"
+  pull_request:
+    paths-ignore:
+      - "**/*"
+      - "**"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+_FIXTURE_TRIGGERS_WRONG_BRANCH = """
+on:
+  push:
+    branches:
+      - "no-such-branch-xyz"
+  pull_request:
+    branches:
+      - "no-such-branch-xyz"
+jobs:
+  swiss-ephemeris:
+    steps: []
+"""
+
+
+def test_trigger_body_parser_discriminates() -> None:
+    """Fixtures for the trigger-body checks: `push`/`pull_request` being keys in
+    `on:` is necessary but not sufficient -- each fixture below is something a
+    presence-only check ("is the key there") gets wrong, because it never looks
+    at the filters nested inside."""
+
+    def triggers_of(text: str) -> dict:
+        return _workflow_triggers(yaml.safe_load(text))
+
+    # Legitimate forms — mirrors the real workflow's own paths-ignore, plus a
+    # branches allowlist that DOES include the default branch, plus no filters
+    # at all. None of these may be flagged.
+    for fixture in (
+        _FIXTURE_TRIGGERS_GOOD,
+        _FIXTURE_TRIGGERS_NO_FILTERS,
+        _FIXTURE_TRIGGERS_BRANCHES_INCLUDE_MAIN,
+    ):
+        triggers = triggers_of(fixture)
+        for event in ("push", "pull_request"):
+            body = triggers.get(event)
+            assert not _paths_filter_excludes_own_workflow(body), (
+                f"legitimate fixture {fixture!r} was flagged on {event} for its path filter"
+            )
+            assert not _branches_filter_excludes_default_branch(body), (
+                f"legitimate fixture {fixture!r} was flagged on {event} for its branch filter"
+            )
+
+    # `paths-ignore: ["**"]` matches every path, including the workflow file's
+    # own path -- a push that edits test.yml to re-enable the job would itself
+    # never trigger it. Must be flagged on both triggers.
+    star = triggers_of(_FIXTURE_TRIGGERS_PATHS_IGNORE_STAR)
+    for event in ("push", "pull_request"):
+        assert _paths_filter_excludes_own_workflow(star.get(event)), (
+            f"paths-ignore: ['**'] on {event} was not flagged, but it excludes every "
+            "path, including the workflow file itself"
+        )
+
+    # Same shape, two glob spellings for "everything".
+    star_slash_star = triggers_of(_FIXTURE_TRIGGERS_PATHS_IGNORE_STAR_SLASH_STAR)
+    for event in ("push", "pull_request"):
+        assert _paths_filter_excludes_own_workflow(star_slash_star.get(event)), (
+            f"paths-ignore: ['**/*', '**'] on {event} was not flagged"
+        )
+
+    # `branches: ["no-such-branch-xyz"]` excludes the repo's actual default
+    # branch -- a real push/PR against it would never run this job.
+    wrong_branch = triggers_of(_FIXTURE_TRIGGERS_WRONG_BRANCH)
+    for event in ("push", "pull_request"):
+        assert _branches_filter_excludes_default_branch(wrong_branch.get(event)), (
+            f"branches: ['no-such-branch-xyz'] on {event} was not flagged, but it "
+            f"excludes the default branch ({_DEFAULT_BRANCH!r})"
+        )
+
+
 def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
     """A guard that only checks the job's CONTENTS can be defeated trivially: add
     `if: false` to the job and every other test in this file keeps passing,
@@ -669,6 +914,7 @@ def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
     not falsely rejected.
     """
     test_enablement_parser_discriminates()
+    test_trigger_body_parser_discriminates()
     document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
     job = _job(document, _JOB)
     assert job is not None
@@ -678,6 +924,25 @@ def test_swiss_job_is_actually_enabled_on_its_real_triggers() -> None:
         f"{_TEST_WORKFLOW} no longer declares push/pull_request triggers at the "
         "workflow level -- update this guard's assumptions if that changed deliberately"
     )
+
+    # Presence of the keys above is necessary but not sufficient (finding 1b):
+    # a paths/paths-ignore filter that can never match the workflow's own path,
+    # or a branches filter that excludes the default branch, keeps `push`/
+    # `pull_request` declared while the job can never actually run for a real
+    # push or PR against this repo.
+    for event_name in ("push", "pull_request"):
+        trigger_body = triggers.get(event_name)
+        assert not _paths_filter_excludes_own_workflow(trigger_body), (
+            f"the `{event_name}` trigger's path filters would exclude changes to "
+            f"{_WORKFLOW_RELATIVE_PATH} itself -- a paths-ignore/paths filter this "
+            f"broad silences the whole workflow while `{event_name}` stays declared "
+            f"as a trigger. trigger body: {trigger_body!r}"
+        )
+        assert not _branches_filter_excludes_default_branch(trigger_body), (
+            f"the `{event_name}` trigger's branch filters exclude the default branch "
+            f"({_DEFAULT_BRANCH!r}) -- a real push/PR against {_DEFAULT_BRANCH!r} would "
+            f"never run this job. trigger body: {trigger_body!r}"
+        )
 
     condition = _job_condition(job)
     for event_name in ("push", "pull_request"):
