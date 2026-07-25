@@ -122,7 +122,7 @@ jobs:
         # Ordering matters: a verifier that has stopped verifying must never get as
         # far as certifying the real download. These fixtures cover a mismatching
         # checksum, an unpinned (null) checksum, a missing file, a truncated file and
-        # five structurally invalid manifests.
+        # eight structurally invalid manifests.
         run: python ci/fetch_swiss_ephemeris.py --self-test
 
       - name: Fetch + verify the Swiss ephemeris data files

@@ -1,19 +1,29 @@
 """Process-wide serialization of Swiss-Ephemeris / pyjhora C-library access.
 
-pyswisseph and pyjhora carry process-global mutable state (the ephemeris
-path set at import in ``bphs_core/utils.py`` and the sidereal/ayanamsa mode
-that ``Chart._compute`` re-asserts on every call), and the underlying Swiss
-Ephemeris C library is not documented as safe for concurrent
-``swe_calc``/``swe_houses`` calls from multiple threads. Two compute paths
-now run concurrently in one process: Starlette's per-request thread pool for
-the synchronous ``/v1/*`` handlers, and the background scan-job pool in
-``app/jobs.py``. Without synchronization the failure mode is not a crash but
-a silently wrong chart for one of two concurrent requests — invisible, and
-the worst possible defect for a determinism-first engine.
+pyswisseph's ephemeris path and sidereal/ayanamsa mode are THREAD-local
+(pyswisseph >= 2.10's thread-local ``swed`` struct — see
+``bphs_core/utils.py``), not process-global: every thread must apply them
+itself before it computes anything, or it silently runs on the Moshier
+fallback with the default Fagan/Bradley ayanamsa (~0.88 deg / 53 arcmin off
+Lahiri) instead of raising. ``_ensure_thread_ephemeris_state()`` does that,
+and ``serialized_ephemeris`` calls it on every invocation of every
+C-library entry point, so the guarantee is structural rather than
+remembered.
+
+EPHEMERIS_LOCK exists on top of that for a separate reason: the underlying
+Swiss Ephemeris C library is not documented as safe for concurrent
+``swe_calc``/``swe_houses`` calls from multiple threads, even once each
+thread's own state is correctly configured. Two compute paths run
+concurrently in one process: Starlette's per-request thread pool for the
+synchronous ``/v1/*`` handlers, and the background scan-job pool in
+``app/jobs.py``. Without synchronization the failure mode is not a crash
+but a silently wrong chart for one of two concurrent requests — invisible,
+and the worst possible defect for a determinism-first engine.
 
 These tests pin the fix: a single process-wide re-entrant lock
 (``bphs_core.utils.EPHEMERIS_LOCK``) that every C-library entry point holds
-for the duration of its computation.
+for the duration of its computation, which also guarantees the per-thread
+state above is applied before that entry point's body runs.
 """
 from __future__ import annotations
 
@@ -82,6 +92,9 @@ def test_every_c_library_entry_point_is_serialized():
         # sweep (the sync /v1/profile route) — must hold the lock per call.
         transits._transit_longitude,
         transits._jd_from_date,
+        # /healthz's Swiss/Moshier probe (CALC-1) -- called directly by the
+        # route handler, not nested inside another decorated entry point.
+        utils.probe_ephemeris_source,
     ]
     for fn in entry_points:
         assert getattr(fn, "_holds_ephemeris_lock", False), (

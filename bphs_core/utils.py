@@ -27,7 +27,9 @@ EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
 # ``/v1/*`` handlers, and the background scan-job pool in ``app/jobs.py``. The
 # mounted Swiss ephemeris data was being bypassed on exactly the paths that
 # serve real requests, while ``/healthz``'s ``ephe_loaded`` — a directory
-# existence check — reported fine.
+# existence check — reported fine. (Now fixed: ``/healthz`` calls
+# ``probe_ephemeris_source()`` below, the same retflag-based detector as the
+# accuracy gate, instead of checking whether the directory exists.)
 #
 # Measured on a CI runner with the data files present (the ``swiss-ephemeris``
 # job in .github/workflows/test.yml, which is what surfaced this):
@@ -65,16 +67,27 @@ _ensure_thread_ephemeris_state()
 # ---------------------------------------------------------------------------
 # Process-wide serialization of Swiss-Ephemeris / pyjhora access.
 #
-# pyswisseph and pyjhora carry process-GLOBAL mutable state (the ephemeris
-# path and sidereal/ayanamsa mode set above; Chart._compute re-asserts the
-# ayanamsa on every call), and the Swiss Ephemeris C library is not
+# EPHEMERIS_LOCK is a process-wide RLock that every C-library entry point
+# holds for the duration of its computation. The path/ayanamsa state it
+# guards is THREAD-local (see above) -- pyswisseph's own thread-local
+# ``swed`` struct already protects that from a cross-thread race -- so this
+# lock is not protecting a shared process-global value. It exists for a
+# separate reason: the underlying Swiss Ephemeris C library is not
 # documented as safe for concurrent swe_calc/swe_houses calls from multiple
-# threads. Two thread pools can enter it concurrently in one process:
-# Starlette's per-request pool for the synchronous ``def`` route handlers,
-# and the background scan-job pool (app/jobs.py). Without serialization the
-# failure mode is not a crash but a silently wrong chart for one of two
+# threads, even once each thread's own state is correctly configured. Two
+# thread pools can enter it concurrently in one process: Starlette's
+# per-request pool for the synchronous ``def`` route handlers, and the
+# background scan-job pool (app/jobs.py). Without serialization the failure
+# mode is not necessarily a crash but a silently wrong chart for one of two
 # concurrent requests — invisible, and unacceptable for a determinism-first
 # engine.
+#
+# serialized_ephemeris also calls _ensure_thread_ephemeris_state() on EVERY
+# invocation, not just once: a thread pool reuses worker threads across
+# unrelated requests, so "this thread's first call" recurs for the life of
+# the process, not only at startup. Doing that inside the decorator, at
+# every entry point, makes the per-thread guarantee structural rather than a
+# convention someone has to remember at each new call site.
 #
 # Every entry point that calls into swisseph/pyjhora must hold this lock
 # (apply @serialized_ephemeris) at INNER, millisecond-bounded granularity —
@@ -110,6 +123,34 @@ def serialized_ephemeris(fn):
 
     wrapper._holds_ephemeris_lock = True
     return wrapper
+
+
+@serialized_ephemeris
+def probe_ephemeris_source(jd: float | None = None) -> tuple[bool, int]:
+    """(swiss_active, retflag) for a sidereal Sun position requesting Swiss data.
+
+    The single canonical Swiss-vs-Moshier detector in this package. A
+    directory's existence says nothing about whether swisseph is actually
+    reading it: ``os.path.isdir(EPHE_PATH)`` is True for an empty directory
+    (exactly what ``mkdir -p data/ephe`` in the Dockerfile leaves behind
+    before any volume mount), so a directory-existence check can report
+    healthy while every worker thread silently computes on the Moshier
+    fallback (CALC-1's original ``/healthz`` defect). This asks swisseph
+    directly and reads the FLG_SWIEPH/FLG_MOSEPH bit in its retflag instead
+    -- the only reliable detector, because a Swiss request with the data
+    files absent still succeeds and returns a plausible result.
+
+    Both ``/healthz`` (``app/main.py``) and the accuracy gate
+    (``tests/test_swiss_ephemeris.py``) call this exact function, so there
+    is exactly one classification implementation to keep correct -- never
+    re-derive ``swiss_active`` from a retflag by hand at a second call site.
+    """
+    if jd is None:
+        jd = swe.julday(2000, 1, 1, 12.0)
+    _values, retflag = swe.calc_ut(jd, swe.SUN, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    swiss_active = bool(retflag & swe.FLG_SWIEPH) and not bool(retflag & swe.FLG_MOSEPH)
+    return swiss_active, retflag
+
 
 SIGNS = [
     "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",

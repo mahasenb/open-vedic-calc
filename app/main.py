@@ -721,10 +721,20 @@ def compat_endpoint(req: CompatRequest):
 # docker-compose healthchecks and any orchestrator startup probe hit /healthz
 # with no Authorization header, and the service runs on internal-only ingress.
 # The body carries no sensitive data — only a status string and a boolean for
-# whether the ephemeris data directory is mounted.
+# whether the ephemeris data is genuinely in use.
+#
+# CALC-1: ``ephe_loaded`` used to be ``os.path.isdir(data/ephe)`` -- True for
+# an EMPTY directory (exactly what `mkdir -p data/ephe` in the Dockerfile
+# leaves behind before any volume mount), so this probe reported healthy the
+# entire time every worker thread was silently computing on the Moshier
+# fallback (see bphs_core/utils.py for the root cause). It now derives the
+# signal from the same retflag evidence the accuracy gate uses --
+# ``utils.probe_ephemeris_source()`` asks swisseph directly and reads the
+# FLG_SWIEPH/FLG_MOSEPH bit, so a mounted-but-empty or otherwise unusable
+# ephemeris directory reports False instead of a false "ok".
 @app.get("/healthz")
 def healthz():
-    ephe_ok = os.path.isdir(os.path.join(os.path.dirname(__file__), "../data/ephe"))
+    ephe_ok, _retflag = utils.probe_ephemeris_source()
     return {"status": "ok", "ephe_loaded": ephe_ok}
 
 

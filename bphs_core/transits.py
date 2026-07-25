@@ -57,14 +57,22 @@ class SadeSatiInfo:
 
 @utils.serialized_ephemeris
 def _transit_longitude(jd: float, planet_id: int) -> float:
-    # Ayanamsa mode is a process-global set once at import (utils.py). Setting it
-    # on every call mutates that C-level global 60+ times per request and can race
-    # with concurrent requests, so it is deliberately not set here. The
-    # @serialized_ephemeris hold (per-call, millisecond-bounded) makes the single
-    # sidereal_longitude call safe against concurrent ephemeris users: this
-    # helper is also reached from profile.sade_sati_lifetime's quarterly sweep,
-    # OUTSIDE the decorated get_current_transits/get_sade_sati_info entry
-    # points (nested acquisition there is fine — the lock is an RLock).
+    # The @serialized_ephemeris decorator above already calls
+    # _ensure_thread_ephemeris_state() before this body runs, so the calling
+    # thread's ephemeris path + Lahiri ayanamsa mode are current here. That
+    # state is per-THREAD (pyswisseph's thread-local `swed` struct -- see
+    # utils.py), NOT process-global, so this function must not assume some
+    # earlier import-time assignment still covers whichever thread is running
+    # it now -- the decorator is what guarantees it, on every call.
+    #
+    # Do NOT remove @serialized_ephemeris from this function: doing so drops
+    # that guarantee silently, and this thread would compute on the Moshier
+    # fallback with the default Fagan/Bradley ayanamsa (~0.88 deg / 53 arcmin
+    # off Lahiri) instead of raising. This helper is also reached from
+    # profile.sade_sati_lifetime's quarterly sweep, OUTSIDE the decorated
+    # get_current_transits/get_sade_sati_info entry points (nested
+    # acquisition there is fine — the lock is an RLock; its own decorator
+    # covers that path too).
     return drik.sidereal_longitude(jd, planet_id)
 
 
