@@ -4,6 +4,15 @@ name: Tests
 # Actions minutes. The boundary gate (ci.yml) still runs on those changes.
 # Also runs weekly (independent of any push/PR) so a newly disclosed CVE in a
 # pinned dependency is caught even on a repo with no recent commits.
+#
+# Three jobs:
+#   test              — the fast suite on the Moshier fallback (no data files), plus
+#                       the gate regression suite and the frozen-lock CVE scan.
+#   swiss-ephemeris   — CALC-1: the SAME suite against the REAL Swiss ephemeris data
+#                       files, which is what production runs on. Until this job
+#                       existed, nothing automated had ever validated this engine
+#                       against real ephemeris data.
+#   docker-test-image — CALC-7: builds Dockerfile.test (frozen install).
 on:
   push:
     paths-ignore:
@@ -19,10 +28,13 @@ on:
 # Least-privilege GITHUB_TOKEN. With no explicit block a job inherits the
 # repository default token scope, which is read across EVERY scope (actions,
 # checks, issues, packages, pull-requests, statuses, ...) — far more than this
-# workflow uses. Both jobs only clone the repo: `test` runs pytest + pip-audit,
-# and `docker-test-image` builds Dockerfile.test with push: false (its buildx
-# layer cache uses the Actions cache service, which is authenticated by the
-# runtime token, not GITHUB_TOKEN). So contents: read is the whole requirement —
+# workflow uses. Every job only clones the repo: `test` runs pytest + pip-audit,
+# `swiss-ephemeris` additionally fetches public data files over plain HTTPS (no
+# credentials of any kind), and `docker-test-image` builds Dockerfile.test with
+# push: false (its buildx layer cache uses the Actions cache service, which is
+# authenticated by the runtime token, not GITHUB_TOKEN). Both of those also use
+# actions/cache, likewise authenticated by the runtime token rather than
+# GITHUB_TOKEN. So contents: read is the whole requirement —
 # note that publish.yml, which genuinely pushes to GHCR, declares its own
 # packages: write on the publishing job only. This matters more here than in a
 # private repo: any fork can open a pull request, so every needless scope on the
@@ -67,6 +79,70 @@ jobs:
           python -m pip install --upgrade uv
           uv export --frozen --no-dev --no-emit-project -o requirements.frozen.txt
           pip-audit --requirement requirements.frozen.txt
+
+  swiss-ephemeris:
+    name: Accuracy against real Swiss ephemeris data
+    runs-on: ubuntu-latest
+    # CALC-1. The `test` job above runs with NO ephemeris data files, so swisseph
+    # silently substitutes its built-in Moshier analytical ephemeris and returns
+    # plausible numbers — meaning this repo's entire automated suite had never once
+    # validated the engine against the Swiss data files production is volume-mounted
+    # with. A regression that only manifests with real data (a data-file-dependent
+    # edge case, an off-by-epoch bug) could merge green.
+    #
+    # This job closes that: it fetches the four checksum-pinned data files, then runs
+    # the WHOLE suite against them with REQUIRE_SWISS_EPHEMERIS=1, which makes
+    # tests/test_swiss_ephemeris.py hard-FAIL rather than skip if swisseph turns out
+    # to be on the fallback engine. Fail-closed throughout: a download failure, a
+    # checksum mismatch, or an unpinned checksum all fail the job — never a warning,
+    # because "the accuracy job went green on Moshier" is exactly the outcome this
+    # exists to prevent. ci/tests/test_swiss_ephemeris_job.py parses this workflow and
+    # fails if this job, its fetch step, or that env var goes missing.
+    #
+    # Skipped on the weekly schedule run for the same reason as the `test` job's
+    # pytest step: nothing about the code or the data changed, only the CVE database.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      # Cache keyed on the manifest, so changing a pinned checksum (or adding a
+      # file) invalidates it — a stale cache can never satisfy a new pin. The
+      # fetcher re-verifies every file on every run regardless of cache hit, so a
+      # corrupted cache entry fails the job rather than being trusted.
+      - name: Cache Swiss ephemeris data files
+        uses: actions/cache@v4
+        with:
+          path: data/ephe
+          key: swiss-ephe-${{ hashFiles('ci/swiss_ephemeris.json') }}
+
+      - name: Self-test the checksum verifier
+        # Ordering matters: a verifier that has stopped verifying must never get as
+        # far as certifying the real download. These fixtures cover a mismatching
+        # checksum, an unpinned (null) checksum, a missing file, a truncated file and
+        # five structurally invalid manifests.
+        run: python ci/fetch_swiss_ephemeris.py --self-test
+
+      - name: Fetch + verify the Swiss ephemeris data files
+        run: python ci/fetch_swiss_ephemeris.py
+
+      - name: Install the FROZEN dependency set
+        # uv sync --frozen, not `pip install -e .`: the committed golden values are
+        # only reproducible against a pinned resolve (pyswisseph 2.10.3.2, pyjhora
+        # 4.8.6 — the same set the shipped image installs). A floating resolve would
+        # turn a dependency's own numeric change into a mystery golden failure.
+        run: |
+          python -m pip install --upgrade uv
+          uv sync --frozen --extra dev
+
+      - name: Run the full suite against real Swiss data
+        env:
+          # Turns "Swiss data is not active" from a skip into a hard failure. Without
+          # it this job could pass while quietly testing nothing new.
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ -q
 
   docker-test-image:
     name: Build Dockerfile.test

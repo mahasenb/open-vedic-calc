@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "Swiss Ephemeris data files fetched by ci/fetch_swiss_ephemeris.py for the",
+    "swiss-ephemeris CI job (CALC-1). These are the four files this service needs to",
+    "run on real ephemeris data instead of swisseph's built-in Moshier fallback, so a",
+    "CI run exercises exactly the data the image is volume-mounted with in production.",
+    "",
+    "The files are distributed under the Swiss Ephemeris dual licence (AGPL-3.0 or a",
+    "paid Professional Licence); this service uses them under AGPL-3.0 — the same",
+    "licence it ships under — so fetching them in CI is within those terms. They are",
+    "deliberately NOT committed (see .gitignore: data/ephe/): ~2 MB of binary data",
+    "with its own licence does not belong in this git history.",
+    "",
+    "SOURCE: the upstream Swiss Ephemeris distribution repository (aloistr/swisseph),",
+    "pinned to a COMMIT sha rather than a branch, so the path itself is",
+    "content-addressed and cannot move under us. EPHEMERIS_LICENSE.md used to point at",
+    "https://www.astro.com/ftp/ephe/ ; every astro.com path we probed now returns 404",
+    "(checked 2026-07-25: /ftp/ephe/, /ftp/swisseph/ephe/, /swisseph/ephe/), which is",
+    "why that doc now points here too.",
+    "",
+    "sha256 is trust-on-first-use, exactly like a lockfile entry: recorded from the",
+    "first verified download and pinned thereafter, so a later silent change to a",
+    "published file fails the job instead of quietly shifting every golden value.",
+    "Updating one is a reviewable diff, never an automatic refresh. A null sha256 is",
+    "NOT 'skip the check' — the fetcher fails closed and prints the value to record."
+  ],
+  "upstream_repo": "https://github.com/aloistr/swisseph",
+  "upstream_commit": "59ac051b5a5812c684973ca0fcedb1c8c3e9c5dc",
+  "base_url": "https://raw.githubusercontent.com/aloistr/swisseph/59ac051b5a5812c684973ca0fcedb1c8c3e9c5dc/ephe/",
+  "files": [
+    {
+      "name": "sepl_18.se1",
+      "description": "planets, AD 1800-2400",
+      "sha256": "ca1393ceab3a44fbc895887cf789c68819ae6a1cbc9b22225872dbe4ccd99a66"
+    },
+    {
+      "name": "semo_18.se1",
+      "description": "Moon, AD 1800-2400",
+      "sha256": "1ca07bd67c24374d77226180c20a4f9996cba013697894810518e7eb582ca4f7"
+    },
+    {
+      "name": "seas_18.se1",
+      "description": "main asteroids / derived bodies, AD 1800-2400",
+      "sha256": "a2cd8fc33807c78ca9a700c91c2e042258b12fc4796519e00781440b5ad8b2e2"
+    },
+    {
+      "name": "sefstars.txt",
+      "description": "fixed-stars catalogue",
+      "sha256": "18b0dcafbe5b7240773daba2c038a325f5b3fc4163f61e0a7f4e92abd4f517c6"
+    }
+  ]
+}

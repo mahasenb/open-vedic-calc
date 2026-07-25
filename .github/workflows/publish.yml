@@ -45,9 +45,13 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -e ".[dev]"
-      # Tests run with the Moshier fallback (no Swiss ephemeris data files in CI);
-      # line coverage is identical to a Swiss run — only numeric values differ.
-      # --cov enforces fail_under=90 from pyproject [tool.coverage.report].
+      # This job runs with the Moshier fallback (no Swiss ephemeris data files here);
+      # line coverage is identical to a Swiss run — only numeric values differ, and
+      # tests/test_swiss_ephemeris.py skips. It is NOT the accuracy gate: real Swiss
+      # data is exercised by test.yml's `swiss-ephemeris` job (CALC-1), which fetches
+      # the checksum-pinned data files and re-runs this same suite with
+      # REQUIRE_SWISS_EPHEMERIS=1 so those tests hard-fail instead of skipping.
+      # --cov enforces fail_under from pyproject [tool.coverage.report] (92).
       - run: pytest tests/ --cov --cov-report=term-missing
       # ci/tests/ lives outside the tests/ tree by design (it tests the CI
       # gate script itself, not the calc engine) — pytest tests/ never
