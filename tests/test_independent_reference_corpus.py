@@ -38,10 +38,29 @@ L2  ``test_served_sidereal_longitudes_match_jpl`` — 75 arcsec.
     ``utils.graha_sidereal_longitude``, recomposed to tropical by adding the
     ayanamsa, against the same Horizons value. This is LOOSER than L1 by two
     orders of magnitude, and the reason is a CONVENTION difference, not error:
-    pyjhora's ``PLANET_FLAGS`` (measured: 65810 = FLG_SWIEPH | FLG_TRUEPOS |
-    FLG_SPEED | FLG_SIDEREAL) sets **FLG_TRUEPOS**, so the served positions are
-    geometric — no light-time, no aberration — while Horizons' ObsEcLon is
-    apparent. Measured decomposition of the residual across this corpus:
+    pyjhora's ``PLANET_FLAGS`` (measured under the FROZEN resolve, pyjhora 4.8.6:
+    **66386** = FLG_SWIEPH | FLG_TRUEPOS | FLG_NONUT | FLG_SPEED | FLG_NOGDEFL |
+    FLG_SIDEREAL) sets **FLG_TRUEPOS**, so the served positions are geometric — no
+    light-time, no aberration — while Horizons' ObsEcLon is apparent.
+
+    Two measured facts about that constant, both load-bearing:
+
+    * It is **version-dependent**. pyjhora 4.8.7 reads 65810 — the same value minus
+      FLG_NONUT (64) and FLG_NOGDEFL (512). A patch-level bump moves it. (An earlier
+      draft of this docstring recorded 65810, because it was measured on 4.8.7
+      instead of the pinned resolve. The number here is the frozen one.)
+    * Those two bits are nevertheless **inert on this path**: swapping 66386 for
+      65810 moves the served sidereal longitude by a measured **0.0000 arcsec**
+      across every graha and epoch in this corpus. FLG_NONUT is masked by
+      FLG_SIDEREAL (sidereal positions are referred to the mean equinox, and the
+      ayanamsa is returned without nutation); FLG_NOGDEFL is masked by FLG_TRUEPOS,
+      which already suppresses light-time, aberration and deflection together.
+
+    The coupling is what matters: two of the three flags are inert ONLY because the
+    third is set. If FLG_TRUEPOS ever clears, every served longitude moves by ~50
+    arcsec and the other two become live in the same instant.
+
+    Measured decomposition of the residual across this corpus:
     geometric-vs-apparent alone 50.8162 arcsec, nutation handling alone 15.4169
     arcsec, both together 61.0390 arcsec. The tolerance is that measured envelope
     plus a modest margin. It is NOT a claim that the engine is only good to 75
