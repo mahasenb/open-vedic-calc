@@ -688,14 +688,21 @@ class TestCompatEndpoint:
 # ===========================================================================
 
 class TestHealthz:
-    def test_healthz_returns_ok(self):
+    def test_healthz_status_tracks_the_ephemeris_engine(self):
+        """``status`` FOLLOWS ``ephe_loaded``; it is not the constant "ok".
+
+        It used to be the constant, which is how a deployment answered
+        ``{"status":"ok","ephe_loaded":false}`` while every chart it served
+        came from the Moshier fallback. This test asserts the RELATIONSHIP
+        rather than a fixed value, so it is meaningful under both engines: the
+        suite normally runs without data files, and the Dockerfile.test image
+        runs with them baked in.
+        """
         r = client.get("/healthz")
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] == "ok"
-        # ephe_loaded is a bool derived from the Swiss/Moshier retflag probe
-        # (utils.probe_ephemeris_source), not data/ephe/ directory existence.
         assert isinstance(body["ephe_loaded"], bool)
+        assert body["status"] == ("ok" if body["ephe_loaded"] else "degraded")
 
     def test_healthz_no_auth_required(self):
         """healthz is a public endpoint — no Authorization header needed."""
@@ -719,7 +726,10 @@ class TestHealthz:
         monkeypatch.setattr(main_mod.utils, "probe_ephemeris_source", lambda: (False, 65604))
         r = client.get("/healthz")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok", "ephe_loaded": False}
+        # "degraded", not "ok": this endpoint asserted health while the
+        # fallback engine was in use, which is the fail-closed breach that
+        # let the empty-data/ephe deployment stay invisible.
+        assert r.json() == {"status": "degraded", "ephe_loaded": False}
 
         monkeypatch.setattr(main_mod.utils, "probe_ephemeris_source", lambda: (True, 65602))
         r = client.get("/healthz")

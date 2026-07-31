@@ -9,6 +9,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import ephemeris_guard  # noqa: F401 -- boot guard: raises at import if a
+                              # real deployment is on the Moshier fallback.
 from .auth import require_token
 from .schemas import (
     PersonalDataIn, DashaRequest, TransitRequest,
@@ -732,18 +734,45 @@ def compat_endpoint(req: CompatRequest):
 # ``utils.probe_ephemeris_source()`` asks swisseph directly and reads the
 # FLG_SWIEPH/FLG_MOSEPH bit, so a mounted-but-empty or otherwise unusable
 # ephemeris directory reports False instead of a false "ok".
+#
+# ``status`` now FOLLOWS ``ephe_loaded`` instead of being the constant "ok".
+# It was the constant, so this endpoint asserted health while every chart came
+# from the fallback -- measured 2026-07-31 against the image digest the staging
+# revision was serving: ``200 {"status":"ok","ephe_loaded":false}``. A probe
+# that passes with the control off is not a probe.
+#
+# The HTTP status stays 200 deliberately, and the STATUS STRING carries the
+# signal. ``app/ephemeris_guard.py`` refuses to start a real deployment on the
+# fallback at all, so "degraded" is only ever reachable in
+# development/local/test -- the environments that deliberately tolerate the
+# fallback, where the suite itself runs. A 503 there would break the
+# docker-compose healthcheck and the dev loop while buying no accuracy in any
+# environment that serves anyone. tests/test_ephemeris_baked.py pins both halves.
 @app.get("/healthz")
 def healthz():
     ephe_ok, _retflag = utils.probe_ephemeris_source()
-    return {"status": "ok", "ephe_loaded": ephe_ok}
+    return {"status": "ok" if ephe_ok else "degraded", "ephe_loaded": ephe_ok}
 
 
 # Authenticated: provenance (commit + source URL) is served only to the
 # bearer-token-holding backend. The public AGPL source offer is the public
 # GitHub repository, not this internal endpoint.
+#
+# ``ephe_loaded``/``ephemeris_source`` are carried HERE, not only on /healthz,
+# because /healthz is not reachable through Cloud Run's frontend: it answers
+# that path itself with a Google 404 that never reaches this container
+# (measured 2026-07-31 -- /healthz returns Google's "Error 404 (Not Found)!!1"
+# page while other unmatched paths return a different 404 body). A consumer
+# that must FAIL A DEPLOY on this signal therefore has to read it from an
+# endpoint that actually arrives, and /source is the one such consumers already
+# use. Same canonical detector as /healthz -- never a second copy of the
+# retflag classification.
 @app.get("/source", response_model=SourceInfo, dependencies=AUTH)
 def source():
+    ephe_ok, _retflag = utils.probe_ephemeris_source()
     return SourceInfo(
         source_url=os.environ.get("PUBLIC_SOURCE_URL", "https://github.com/mahasenb/open-vedic-calc"),
         commit=_COMMIT,
+        ephe_loaded=ephe_ok,
+        ephemeris_source="swiss" if ephe_ok else "moshier",
     )

@@ -309,6 +309,16 @@ class SourceInfo(BaseModel):
     source_url: str
     commit: str
     ephemeris_license: str = "Swiss Ephemeris AGPL-3.0 (data/ephe/)"
+    # Which engine actually produced this deployment's numbers. swisseph does
+    # not raise when its data files are absent -- it substitutes its built-in
+    # Moshier analytical ephemeris and returns a plausible result -- so a
+    # consumer cannot infer the engine from a successful call. These two fields
+    # carry the retflag-derived answer (bphs_core.utils.probe_ephemeris_source)
+    # to a caller that can act on it. No default: an omitted value would be
+    # indistinguishable from a genuine "yes", which is the whole class of bug
+    # this exists to close.
+    ephe_loaded: bool
+    ephemeris_source: str  # "swiss" | "moshier"
 
 
 # --- Muhurat ---

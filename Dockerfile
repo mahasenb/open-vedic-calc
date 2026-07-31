@@ -1,3 +1,45 @@
+# ---------------------------------------------------------------------------
+# Stage 1 — the Swiss ephemeris data files.
+#
+# These are BAKED INTO the image, not supplied at runtime. They used to be
+# neither: this file created an empty data/ephe and a comment claimed the data
+# "must be volume-mounted or COPY'd separately", but no mount was ever codified
+# anywhere. swisseph does not raise when its data files are missing — it
+# silently substitutes its built-in Moshier analytical ephemeris and returns a
+# plausible result — so a deployment computed every chart it served on the
+# fallback engine and looked perfectly healthy doing it.
+#
+# Baking rather than mounting, deliberately:
+#   * ~2.1 MB is nothing against a container image;
+#   * the data becomes immutable WITH THE IMAGE DIGEST, so rolling back to an
+#     image is rolling back to its data — which matters because this service is
+#     deployed by resolved digest;
+#   * it removes the whole class of "deployed without its data" rather than
+#     adding one more runtime dependency that can silently be absent;
+#   * and EVERY builder of this Dockerfile gets the data — CI, a downstream
+#     deploy pipeline, a local `docker build`, a compose stack — instead of each
+#     one having to remember a fetch step of its own. That "every caller must
+#     remember" shape is exactly what failed here.
+#
+# The fetch reuses the repo's existing checksum-pinned fetcher against
+# ci/swiss_ephemeris.json; there is deliberately no second mechanism. It is
+# fail-closed in every direction (download failure, checksum mismatch, unpinned
+# checksum, malformed manifest all exit non-zero). --self-test runs FIRST so a
+# verifier that had stopped verifying can never certify the real download, and
+# --verify-only re-checks afterwards, so what stage 2 copies forward is bytes
+# that were checksummed after they landed.
+# ---------------------------------------------------------------------------
+FROM python:3.10-slim AS ephemeris
+WORKDIR /fetch
+COPY ci/fetch_swiss_ephemeris.py ci/fetch_swiss_ephemeris.py
+COPY ci/swiss_ephemeris.json ci/swiss_ephemeris.json
+RUN python ci/fetch_swiss_ephemeris.py --self-test \
+ && python ci/fetch_swiss_ephemeris.py \
+ && python ci/fetch_swiss_ephemeris.py --verify-only
+
+# ---------------------------------------------------------------------------
+# Stage 2 — the shipped service image.
+# ---------------------------------------------------------------------------
 FROM python:3.10-slim
 
 # Bake the building commit into the image so /source can return the authoritative
@@ -26,8 +68,13 @@ ENV PATH="/app/.venv/bin:${PATH}"
 
 COPY bphs_core ./bphs_core
 COPY app ./app
-# data/ephe must be volume-mounted or COPY'd separately (not committed to git)
-RUN mkdir -p data/ephe
+
+# The verified data files, from stage 1. bphs_core/utils.py computes EPHE_PATH
+# as <package>/../data/ephe, which under WORKDIR /app is /app/data/ephe — so
+# this destination is not arbitrary. Nothing needs to mount anything at
+# runtime; a mount here would SHADOW these files and put the service back on
+# the fallback (app/ephemeris_guard.py refuses to start if that happens).
+COPY --from=ephemeris /fetch/data/ephe ./data/ephe
 
 # Second `uv sync --frozen` installs the project itself (editable, into the venv
 # from the first sync) now that its source is present — still frozen against the
@@ -38,6 +85,31 @@ EXPOSE 8000
 
 RUN adduser --disabled-password --gecos '' appuser
 USER appuser
+
+# BUILD-TIME PROOF that swisseph actually reads the baked files, AS THE USER
+# THAT SERVES REQUESTS.
+#
+# A successful COPY proves files were copied. It does NOT prove the engine uses
+# them: a request that asks for FLG_SWIEPH with the data absent, unreadable, or
+# at the wrong path still SUCCEEDS and returns a plausible position with
+# FLG_MOSEPH set. Never infer "Swiss is active" from a call that did not raise
+# — read the retflag bit, which is what probe_ephemeris_source() does.
+#
+# Placed AFTER `USER appuser`, deliberately, and this is not a detail. An
+# earlier draft of this file ran the same assertion as root, above. It PASSED,
+# the image contained all four data files — and `docker run` as appuser still
+# reported retflag 65604, because the fetcher's tempfile left the files 0600
+# and root could read what appuser could not. A control verified as a different
+# principal than the one that runs in production is not verified. (The root
+# cause is fixed in ci/fetch_swiss_ephemeris.py, which now chmods 0644; this
+# placement is what would have caught it, and what catches the next one.)
+#
+# Both bodies are checked because the data set is split across files:
+# sepl_18.se1 carries the planets and semo_18.se1 the Moon, so a Sun-only
+# assertion passes on a data set that leaves every nakshatra, pada and dasha
+# on the fallback. Failing HERE makes an image that computes on the fallback
+# impossible to produce, rather than merely unlikely.
+RUN python -c "import sys, swisseph as swe; from bphs_core.utils import probe_ephemeris_source; bad = [n for n, b in (('Sun', swe.SUN), ('Moon', swe.MOON)) if not probe_ephemeris_source(body=b)[0]]; sys.exit('FATAL: the baked Swiss ephemeris data is not being read by swisseph - it fell back to the Moshier engine for: ' + ', '.join(bad)) if bad else print('Swiss ephemeris data verified active (Sun, Moon)')"
 
 # --timeout-keep-alive 75: the default (5s) closes idle keep-alive connections
 # fast, which races clients that pool connections (the backend's CalcClient keeps

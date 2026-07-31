@@ -179,6 +179,17 @@ def download(url: str, destination: Path) -> None:
         with urllib.request.urlopen(url, timeout=_TIMEOUT_SECONDS) as response:  # noqa: S310
             with temp_path.open("wb") as out:
                 shutil.copyfileobj(response, out, _CHUNK)
+        # tempfile.mkstemp creates its file 0600 (owner-only), and that mode
+        # survives both the rename and a Docker `COPY --from=` into another
+        # build stage. The service image runs as an unprivileged `appuser`
+        # while the build runs as root, so 0600 data files are UNREADABLE to
+        # the process that actually serves requests — and swisseph does not
+        # raise when it cannot read its data files, it silently returns Moshier
+        # results. Measured while writing this: an image containing all four
+        # files, whose build-time assertion passed as root, still reported
+        # retflag 65604 when run as appuser. World-readable is right for
+        # public, licensed reference data that nothing writes at runtime.
+        temp_path.chmod(0o644)
         temp_path.replace(destination)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         temp_path.unlink(missing_ok=True)

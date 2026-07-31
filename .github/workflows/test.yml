@@ -144,6 +144,99 @@ jobs:
           REQUIRE_SWISS_EPHEMERIS: "1"
         run: uv run --frozen python -m pytest tests/ -q
 
+  production-image-ephemeris:
+    name: Production image really ships (and reads) the Swiss data
+    runs-on: ubuntu-latest
+    # The Swiss ephemeris data files are BAKED into the production image (the
+    # `ephemeris` stage in Dockerfile). Before that they were supplied by
+    # nothing at all: the Dockerfile created an empty data/ephe and a comment
+    # said it "must be volume-mounted", but no mount existed in any
+    # environment — so a deployed instance computed on swisseph's Moshier
+    # fallback, which never raises and returns plausible numbers.
+    #
+    # Nothing else in CI builds the PRODUCTION Dockerfile (docker-test-image
+    # below builds Dockerfile.test), so without this job a broken fetch stage
+    # would first surface on a deploy. ci/tests/test_image_bakes_ephemeris.py
+    # checks the Dockerfile's STRUCTURE; this job checks the RESULT.
+    #
+    # The Dockerfile already fails its own build if swisseph does not read the
+    # baked files. This job re-asserts it from OUTSIDE the build, because a
+    # restored layer cache can satisfy an in-build RUN without re-executing
+    # it, and because what must be true is a property of the final image.
+    # Skipped on the weekly schedule run — same rationale as the jobs above.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          # Same mirror.gcr.io routing as publish.yml — anonymous docker.io
+          # pulls intermittently rate-limit on GitHub-hosted runners.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Build the production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: calc-service:ephemeris-check
+          cache-from: type=gha,scope=production-image
+          cache-to: type=gha,scope=production-image,mode=max
+      - name: The four data files are IN the image
+        run: |
+          docker run --rm --entrypoint sh calc-service:ephemeris-check -c '
+            set -e
+            for f in sepl_18.se1 semo_18.se1 seas_18.se1 sefstars.txt; do
+              test -s "/app/data/ephe/$f" || { echo "MISSING: $f"; exit 1; }
+            done
+            ls -l /app/data/ephe'
+      - name: swisseph actually READS them (retflag, not "it did not raise")
+        # A Swiss request with the data files absent still SUCCEEDS — it
+        # returns a plausible position with SEFLG_MOSEPH set instead of
+        # SEFLG_SWIEPH. "The call worked" therefore proves nothing; only the
+        # retflag bit does. Both Sun and Moon: the data set is split across
+        # sepl_18.se1 (planets) and semo_18.se1 (Moon), and a Sun-only check
+        # passes on a data set that leaves every nakshatra and dasha on the
+        # fallback.
+        run: |
+          docker run --rm --entrypoint python calc-service:ephemeris-check -c '
+          import sys
+          import swisseph as swe
+          from bphs_core.utils import probe_ephemeris_source
+          failures = []
+          for name, body in (("Sun", swe.SUN), ("Moon", swe.MOON)):
+              active, retflag = probe_ephemeris_source(body=body)
+              print(f"{name}: swiss_active={active} retflag={retflag} "
+                    f"SWIEPH={bool(retflag & swe.FLG_SWIEPH)} "
+                    f"MOSEPH={bool(retflag & swe.FLG_MOSEPH)}")
+              if not active:
+                  failures.append(name)
+          if failures:
+              sys.exit(f"the shipped image computes on the Moshier fallback for {failures}")
+          print("OK: the production image reads its baked Swiss ephemeris data")'
+      - name: The service refuses to start when that data is shadowed
+        # Proves the boot guard is wired into the SERVED process, not merely
+        # unit-tested. Mounting an empty directory over the baked data is
+        # exactly what a re-added volume would do, and Docker creates an empty
+        # one silently when the host path is absent. The container must die
+        # rather than serve charts computed on the fallback.
+        run: |
+          mkdir -p "$RUNNER_TEMP/empty-ephe"
+          if docker run --rm \
+               -v "$RUNNER_TEMP/empty-ephe:/app/data/ephe:ro" \
+               -e ENVIRONMENT=production \
+               -e CALC_SERVICE_TOKEN=0123456789abcdef0123456789abcdef \
+               --entrypoint python calc-service:ephemeris-check \
+               -c 'import app.main'; then
+            echo "::error::app.main imported cleanly with the ephemeris data shadowed — the boot guard is not wired into the served process"
+            exit 1
+          fi
+          echo "Boot guard fired as required."
+
   docker-test-image:
     name: Build Dockerfile.test
     runs-on: ubuntu-latest

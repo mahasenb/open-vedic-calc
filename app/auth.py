@@ -3,32 +3,22 @@ import logging
 import os
 from fastapi import Header, HTTPException, status
 
+from .deployment import LENIENT_ENVS, environment, is_real_deployment
+
 logger = logging.getLogger(__name__)
 
-# Environments where running without a token is tolerated (local convenience).
-# Any other value (production, staging, …) is treated as a deployment that must
-# never expose unauthenticated calc endpoints.
-_INSECURE_ENVS = {"development", "local", "test"}
-
-
-def _environment() -> str:
-    # Default to 'production' so that a missing ENVIRONMENT variable is
-    # fail-secure: auth is ON unless the operator explicitly sets ENVIRONMENT
-    # to a known insecure value (development / local / test).
-    # The old default 'development' was fail-open — a misconfigured or newly
-    # deployed container with no ENVIRONMENT set would run with auth disabled.
-    return os.environ.get("ENVIRONMENT", "production")
-
-
-def _token_required() -> bool:
-    """True when a missing token must fail closed (non-dev deployments)."""
-    return _environment() not in _INSECURE_ENVS
-
+# The environment policy lives in app/deployment.py, not here. Two independent
+# fail-closed guards read it — this one and app/ephemeris_guard.py — and a
+# second copy of the environment list would let them disagree: a container that
+# enforces its token while tolerating a Moshier ephemeris, or the reverse. The
+# fail-secure default (ENVIRONMENT unset means 'production', so auth is ON
+# unless an operator explicitly names an insecure environment) is defined there
+# and is unchanged; the old default 'development' was fail-open.
 
 # Resolved once at import. ENVIRONMENT does not change within a running process,
 # and caching it prevents a runtime os.environ mutation from silently flipping
 # authentication off mid-process.
-_TOKEN_REQUIRED: bool = _token_required()
+_TOKEN_REQUIRED: bool = is_real_deployment()
 
 # A real deployment token is a long random secret. Reject obvious placeholders
 # and anything too short: a guessable/default token (e.g. left at "changeme")
@@ -62,20 +52,20 @@ if _TOKEN_REQUIRED:
     _weakness = _token_weakness_reason(os.environ.get("CALC_SERVICE_TOKEN", ""))
     if _weakness:
         raise RuntimeError(
-            f"CALC_SERVICE_TOKEN is {_weakness} in ENVIRONMENT={_environment()!r}. "
+            f"CALC_SERVICE_TOKEN is {_weakness} in ENVIRONMENT={environment()!r}. "
             "The calc-service refuses to start with a missing or weak token outside "
-            f"{sorted(_INSECURE_ENVS)}. Set CALC_SERVICE_TOKEN to a long random secret."
+            f"{sorted(LENIENT_ENVS)}. Set CALC_SERVICE_TOKEN to a long random secret."
         )
 else:
-    # Auth is intentionally disabled (ENVIRONMENT is in _INSECURE_ENVS).
+    # Auth is intentionally disabled (ENVIRONMENT is in LENIENT_ENVS).
     # Emit a startup CRITICAL so this insecure mode is impossible to miss in logs.
     logger.critical(
         "Authentication is DISABLED: ENVIRONMENT=%r is in the insecure-env list %r. "
         "ALL calc endpoints are unprotected. "
         "Set ENVIRONMENT to a non-insecure value and supply CALC_SERVICE_TOKEN "
         "before exposing this service.",
-        _environment(),
-        sorted(_INSECURE_ENVS),
+        environment(),
+        sorted(LENIENT_ENVS),
     )
 
 
@@ -104,7 +94,7 @@ def require_token(
             "CALC_SERVICE_TOKEN is not set — ALL ENDPOINTS ARE UNPROTECTED. "
             "ENVIRONMENT=%r is in the insecure-env list. "
             "Set CALC_SERVICE_TOKEN to enable authentication.",
-            _environment(),
+            environment(),
         )
         return
 

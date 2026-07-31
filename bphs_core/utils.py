@@ -126,8 +126,10 @@ def serialized_ephemeris(fn):
 
 
 @serialized_ephemeris
-def probe_ephemeris_source(jd: float | None = None) -> tuple[bool, int]:
-    """(swiss_active, retflag) for a sidereal Sun position requesting Swiss data.
+def probe_ephemeris_source(
+    jd: float | None = None, body: int | None = None
+) -> tuple[bool, int]:
+    """(swiss_active, retflag) for a sidereal position requesting Swiss data.
 
     The single canonical Swiss-vs-Moshier detector in this package. A
     directory's existence says nothing about whether swisseph is actually
@@ -140,14 +142,26 @@ def probe_ephemeris_source(jd: float | None = None) -> tuple[bool, int]:
     -- the only reliable detector, because a Swiss request with the data
     files absent still succeeds and returns a plausible result.
 
-    Both ``/healthz`` (``app/main.py``) and the accuracy gate
-    (``tests/test_swiss_ephemeris.py``) call this exact function, so there
-    is exactly one classification implementation to keep correct -- never
-    re-derive ``swiss_active`` from a retflag by hand at a second call site.
+    ``body`` defaults to the Sun, which is what every historical caller
+    asked for. It is a parameter because the data set is SPLIT across files:
+    ``sepl_18.se1`` carries the planets and ``semo_18.se1`` the Moon. A
+    Sun-only probe therefore reports FLG_SWIEPH on a data set that is
+    missing the Moon file, while the nakshatra, its pada and every dasha in
+    the engine quietly come from the fallback. ``app.ephemeris_guard`` asks
+    about both.
+
+    ``/healthz`` and ``/source`` (``app/main.py``), the boot guard
+    (``app/ephemeris_guard.py``) and the accuracy gate
+    (``tests/test_swiss_ephemeris.py``) all call this exact function, so
+    there is exactly one classification implementation to keep correct --
+    never re-derive ``swiss_active`` from a retflag by hand at a second
+    call site.
     """
     if jd is None:
         jd = swe.julday(2000, 1, 1, 12.0)
-    _values, retflag = swe.calc_ut(jd, swe.SUN, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
+    if body is None:
+        body = swe.SUN
+    _values, retflag = swe.calc_ut(jd, body, swe.FLG_SWIEPH | swe.FLG_SIDEREAL)
     swiss_active = bool(retflag & swe.FLG_SWIEPH) and not bool(retflag & swe.FLG_MOSEPH)
     return swiss_active, retflag
 
