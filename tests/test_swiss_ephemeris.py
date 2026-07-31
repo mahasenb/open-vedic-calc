@@ -56,9 +56,13 @@ import swisseph as swe
 from bphs_core import utils  # sets the ephemeris path + Lahiri mode on import
 from bphs_core.chart import Chart, PersonalData
 
-from tests.conftest import SAMPLE_A, SAMPLE_B, SAMPLE_C
+from tests.conftest import (
+    REQUIRE_SWISS_EPHEMERIS_ENV as _REQUIRE_ENV,
+    SAMPLE_A,
+    SAMPLE_B,
+    SAMPLE_C,
+)
 
-_REQUIRE_ENV = "REQUIRE_SWISS_EPHEMERIS"
 _GOLDENS = pathlib.Path(__file__).resolve().parent / "goldens" / "swiss_ephemeris_goldens.json"
 _UPDATE_ENV = "UPDATE_SWISS_GOLDENS"
 
@@ -72,35 +76,10 @@ _SAMPLES = {"sample_a": SAMPLE_A, "sample_b": SAMPLE_B, "sample_c": SAMPLE_C}
 # ---------------------------------------------------------------------------
 # Swiss-data detection
 # ---------------------------------------------------------------------------
-
-
-def _required() -> bool:
-    return os.environ.get(_REQUIRE_ENV) == "1"
-
-
-@pytest.fixture(scope="session")
-def swiss_ephemeris() -> int:
-    """Gate every test in this module on real Swiss data actually being in use.
-
-    Hard-fails (never skips) when ``REQUIRE_SWISS_EPHEMERIS=1``: the whole point of
-    the accuracy job is that it cannot pass by quietly not running.
-    """
-    swiss_active, retflag = utils.probe_ephemeris_source()
-    if swiss_active:
-        return retflag
-
-    ephe_dir = pathlib.Path(utils.EPHE_PATH)
-    present = sorted(p.name for p in ephe_dir.glob("*")) if ephe_dir.is_dir() else []
-    message = (
-        "Swiss ephemeris data is NOT in use — swisseph fell back to the Moshier "
-        f"engine (retflag={retflag}, FLG_SWIEPH={bool(retflag & swe.FLG_SWIEPH)}, "
-        f"FLG_MOSEPH={bool(retflag & swe.FLG_MOSEPH)}).\n"
-        f"Ephemeris directory: {ephe_dir} (contents: {present or 'empty/absent'}).\n"
-        "Fetch the data with: python ci/fetch_swiss_ephemeris.py"
-    )
-    if _required():
-        pytest.fail(f"{_REQUIRE_ENV}=1 but {message}")
-    pytest.skip(message)
+#
+# The ``swiss_ephemeris`` fixture that gates every accuracy test in this module
+# now lives in tests/conftest.py, because tests/test_independent_reference_corpus.py
+# needs the identical gate. One definition, two readers — never two copies.
 
 
 def test_swiss_data_is_really_active(swiss_ephemeris: int) -> None:

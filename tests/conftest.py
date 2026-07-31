@@ -48,3 +48,49 @@ SAMPLE_C = {
     "longitude": 79.8,
     "timezone_offset_hours": 5.5,
 }
+
+
+# ---------------------------------------------------------------------------
+# Swiss-data gate (shared)
+# ---------------------------------------------------------------------------
+# Lives here rather than in tests/test_swiss_ephemeris.py because BOTH accuracy
+# modules need it: that one (self-recorded goldens) and
+# tests/test_independent_reference_corpus.py (NASA/JPL Horizons values). A second
+# copy would be a second thing to weaken.
+
+REQUIRE_SWISS_EPHEMERIS_ENV = "REQUIRE_SWISS_EPHEMERIS"
+
+
+def swiss_ephemeris_required() -> bool:
+    return os.environ.get(REQUIRE_SWISS_EPHEMERIS_ENV) == "1"
+
+
+@pytest.fixture(scope="session")
+def swiss_ephemeris() -> int:
+    """Gate an accuracy test on real Swiss data actually being in use.
+
+    Hard-fails (never skips) when ``REQUIRE_SWISS_EPHEMERIS=1``: the whole point of
+    the accuracy job is that it cannot pass by quietly not running.
+    """
+    import pathlib
+
+    import swisseph as swe
+
+    from bphs_core import utils
+
+    swiss_active, retflag = utils.probe_ephemeris_source()
+    if swiss_active:
+        return retflag
+
+    ephe_dir = pathlib.Path(utils.EPHE_PATH)
+    present = sorted(p.name for p in ephe_dir.glob("*")) if ephe_dir.is_dir() else []
+    message = (
+        "Swiss ephemeris data is NOT in use — swisseph fell back to the Moshier "
+        f"engine (retflag={retflag}, FLG_SWIEPH={bool(retflag & swe.FLG_SWIEPH)}, "
+        f"FLG_MOSEPH={bool(retflag & swe.FLG_MOSEPH)}).\n"
+        f"Ephemeris directory: {ephe_dir} (contents: {present or 'empty/absent'}).\n"
+        "Fetch the data with: python ci/fetch_swiss_ephemeris.py"
+    )
+    if swiss_ephemeris_required():
+        pytest.fail(f"{REQUIRE_SWISS_EPHEMERIS_ENV}=1 but {message}")
+    pytest.skip(message)

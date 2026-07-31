@@ -1,0 +1,160 @@
+{
+  "epochs": [
+    {
+      "ayanamsa_deg": 23.857092325,
+      "delta_t_seconds": 63.828915,
+      "id": "j2000_epoch",
+      "jd_tdb": 2451545.00073876,
+      "jd_ut": 2451545.0,
+      "moon_osculating_node_j2000_deg": 123.9580149763716,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 25.2530685,
+        "Mars": 327.9632921,
+        "Mercury": 271.8892699,
+        "Moon": 223.323786,
+        "Saturn": 40.3956366,
+        "Sun": 280.3689092,
+        "Venus": 241.5657794
+      },
+      "utc": "2000-01-01T12:00:00Z",
+      "why": "The standard reference epoch J2000.0. Frame conventions coincide here, so a frame error elsewhere shows up as a discrepancy that vanishes at this epoch."
+    },
+    {
+      "ayanamsa_deg": 23.165034923,
+      "delta_t_seconds": 29.105892,
+      "id": "sample_a_instant",
+      "jd_tdb": 2433447.521170207,
+      "jd_ut": 2433447.520833333,
+      "moon_osculating_node_j2000_deg": 4.70014609104997,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 337.2221451,
+        "Mars": 181.1887876,
+        "Mercury": 60.5034561,
+        "Moon": 76.1961073,
+        "Saturn": 163.3787505,
+        "Sun": 83.3519711,
+        "Venus": 45.4840687
+      },
+      "utc": "1950-06-15T00:30:00Z",
+      "why": "The UT instant of tests/conftest.py SAMPLE_A (06:00:00 local at UTC+5:30), so this corpus and swiss_ephemeris_goldens.json describe the same instants from two different sources."
+    },
+    {
+      "ayanamsa_deg": 23.520663482,
+      "delta_t_seconds": 46.371525,
+      "id": "sample_b_instant",
+      "jd_tdb": 2442747.792203374,
+      "jd_ut": 2442747.791666667,
+      "moon_osculating_node_j2000_deg": 232.1542350696874,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 14.8955774,
+        "Mars": 88.325771,
+        "Mercury": 249.7958012,
+        "Moon": 225.3102616,
+        "Saturn": 122.7237019,
+        "Sun": 248.4550282,
+        "Venus": 203.4764174
+      },
+      "utc": "1975-12-01T07:00:00Z",
+      "why": "The UT instant of tests/conftest.py SAMPLE_B (12:30:00 local at UTC+5:30)."
+    },
+    {
+      "ayanamsa_deg": 23.860138359,
+      "delta_t_seconds": 63.892757,
+      "id": "sample_c_instant",
+      "jd_tdb": 2451624.646572833,
+      "jd_ut": 2451624.645833333,
+      "moon_osculating_node_j2000_deg": 121.9848947716922,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 36.778805,
+        "Mars": 28.5921599,
+        "Mercury": 334.5972238,
+        "Moon": 192.6353205,
+        "Saturn": 44.3072321,
+        "Sun": 0.8237071,
+        "Venus": 339.4652813
+      },
+      "utc": "2000-03-21T03:30:00Z",
+      "why": "The UT instant of tests/conftest.py SAMPLE_C (09:00:00 local at UTC+5:30)."
+    },
+    {
+      "ayanamsa_deg": 22.541151057,
+      "delta_t_seconds": 5.970655,
+      "id": "node_model_divergence_extreme",
+      "jd_tdb": 2417129.416735771,
+      "jd_ut": 2417129.416666667,
+      "moon_osculating_node_j2000_deg": 150.7221416015677,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 66.1222929,
+        "Mars": 272.0391957,
+        "Mercury": 195.8656081,
+        "Moon": 349.1125495,
+        "Saturn": 326.556645,
+        "Sun": 196.922224,
+        "Venus": 166.6810776
+      },
+      "utc": "1905-10-10T22:00:00Z",
+      "why": "CLAUDE.md's measured worst-case instant for the true-vs-mean lunar node divergence over the supported span (1.981465100 deg). Pinning the node HERE is what makes the corpus able to tell the two models apart; at a typical epoch they are close enough to be confused."
+    },
+    {
+      "ayanamsa_deg": 22.974794739,
+      "delta_t_seconds": 24.044685,
+      "id": "ephemeris_source_divergence_extreme",
+      "jd_tdb": 2428472.000278295,
+      "jd_ut": 2428472.0,
+      "moon_osculating_node_j2000_deg": 266.2562666141916,
+      "tropical_apparent_longitude_deg": {
+        "Jupiter": 263.1542309,
+        "Mars": 170.8816448,
+        "Mercury": 205.1266499,
+        "Moon": 40.4938835,
+        "Saturn": 346.1233071,
+        "Sun": 216.8901377,
+        "Venus": 248.9256196
+      },
+      "utc": "1936-10-30T12:00:00Z",
+      "why": "CLAUDE.md's measured worst-case instant for Swiss-vs-Moshier divergence on the true node (0.018175452 deg = 65.4316 arcsec) \u2014 the epoch where running on the fallback engine is most visible."
+    }
+  ],
+  "provenance": {
+    "fields": {
+      "ayanamsa_deg": {
+        "independent_of_this_engine": false,
+        "source": "engine",
+        "what": "The Lahiri ayanamsa this engine computes. Recorded so the sidereal->tropical composition can be checked against Horizons, NOT as an independently-sourced expected value: the sidereal zero point is an astrological convention (Indian Calendar Reform Committee) with no counterpart in any solar-system ephemeris. Pinning it to a published authority is tracked as follow-up work."
+      },
+      "jd_tdb": {
+        "independent_of_this_engine": false,
+        "source": "engine (Delta-T only)",
+        "what": "jd_ut + swe.deltat(jd_ut). Names WHICH TDB instant the node was requested at; both sides of the node assertion use this same instant, so Delta-T cancels out of the comparison instead of entering it as an error term."
+      },
+      "jd_ut": {
+        "independent_of_this_engine": true,
+        "source": "ci/fetch_reference_corpus.py",
+        "what": "UT Julian Day by the textbook civil-calendar conversion (Meeus ch. 7), deliberately not swisseph's swe.julday."
+      },
+      "moon_osculating_node_j2000_deg": {
+        "independent_of_this_engine": true,
+        "source": "NASA/JPL Horizons",
+        "what": "Longitude of the ascending node (OM) of the Moon's osculating orbit about the Earth, referred to the ECLIPTIC OF J2000.0, from Horizons EPHEM_TYPE='ELEMENTS' at the epoch's jd_tdb. This is the independent expected value for the declared lunar node model."
+      },
+      "tropical_apparent_longitude_deg": {
+        "independent_of_this_engine": true,
+        "source": "NASA/JPL Horizons",
+        "what": "Apparent geocentric ecliptic longitude referred to the ecliptic and TRUE equinox of date, observer at the geocentre (500@399), Horizons observer QUANTITIES='31' (ObsEcLon). Includes light-time, aberration, relativistic deflection and nutation, matching swisseph's default apparent position."
+      }
+    },
+    "horizons_queries": {
+      "moon_osculating_node_j2000_deg": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27301%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27ELEMENTS%27&CENTER=%27500%40399%27&REF_PLANE=%27ECLIPTIC%27&TLIST=2451545.000738760%202433447.521170207%202442747.792203374%202451624.646572833%202417129.416735771%202428472.000278295&TLIST_TYPE=%27JD%27",
+      "tropical_apparent_longitude_deg.Jupiter": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27599%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Mars": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27499%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Mercury": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27199%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Moon": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27301%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Saturn": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27699%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Sun": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%2710%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27",
+      "tropical_apparent_longitude_deg.Venus": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27299%27&OBJ_DATA=%27NO%27&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27OBSERVER%27&CENTER=%27500%40399%27&QUANTITIES=%2731%27&TLIST=2451545.000000000%202433447.520833333%202442747.791666667%202451624.645833333%202417129.416666667%202428472.000000000&TLIST_TYPE=%27JD%27&TIME_TYPE=%27UT%27&CAL_FORMAT=%27JD%27"
+    },
+    "recorded_utc": "2026-07-31T14:14:21Z",
+    "recorder": "ci/fetch_reference_corpus.py"
+  },
+  "schema_version": 1
+}
