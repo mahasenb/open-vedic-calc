@@ -109,9 +109,9 @@ def _nakshatra_from_moon(jd: float) -> tuple[str, int]:
     is a deterministic function of the Moon's longitude, so it bypasses the
     pyjhora bug where an out-of-range index would otherwise wrap to a wrong
     entry. (Same precedent as chart.py computing the ascendant directly via
-    swisseph. Moon body ID = 1; matches utils.longitude_to_nakshatra.)
+    swisseph. Matches utils.longitude_to_nakshatra.)
     """
-    idx = int((drik.sidereal_longitude(jd, 1) % 360) / _NAK_SPAN) % 27
+    idx = int((utils.graha_sidereal_longitude(jd, "Moon") % 360) / _NAK_SPAN) % 27
     return utils.NAKSHATRAS[idx], idx + 1
 
 
@@ -119,9 +119,10 @@ def _yoga_from_sun_moon(jd: float) -> tuple[str, int]:
     """Yoga at *jd*, computed DIRECTLY from the sum of the Sun and Moon sidereal
     longitudes (13°20' buckets) rather than via the pyjhora index lookup.
 
-    Returns ``(name, index_1_based)``. Sun body ID = 0, Moon body ID = 1.
+    Returns ``(name, index_1_based)``.
     """
-    total = (drik.sidereal_longitude(jd, 0) + drik.sidereal_longitude(jd, 1)) % 360
+    total = (utils.graha_sidereal_longitude(jd, "Sun")
+             + utils.graha_sidereal_longitude(jd, "Moon")) % 360
     idx = int(total / _NAK_SPAN) % 27
     return YOGAS[idx], idx + 1
 
@@ -452,9 +453,9 @@ def compute_muhurat_for_day(
             tara_str = "Unknown"
 
         # Chandra Bala — on failure 'Unknown' (NOT 'Neutral'), same convention.
-        # Use jd_utc: drik.sidereal_longitude expects a UTC Julian Day.
+        # Use jd_utc: utils.graha_sidereal_longitude expects a UTC Julian Day.
         try:
-            transit_moon_lon = drik.sidereal_longitude(jd_utc, 1)  # 1 is Moon ID
+            transit_moon_lon = utils.graha_sidereal_longitude(jd_utc, "Moon")
             transit_moon_sign_idx = int(transit_moon_lon // 30) % 12
             birth_moon_sign_idx = utils.SIGNS.index(birth_moon_sign)
             diff = (transit_moon_sign_idx - birth_moon_sign_idx) % 12 + 1
