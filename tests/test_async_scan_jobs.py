@@ -9,9 +9,16 @@ ADDITIVE async submit/poll variant end-to-end, and separately pins the
 existing synchronous endpoints' output so this change cannot regress them.
 
 Three things this file proves:
-  1. The synchronous endpoints are byte-identical to their pre-existing
-     behaviour (golden snapshot captured from the untouched code at the base
-     commit, before this change -- see tests/fixtures/lagna_shuddhi_*_golden.json).
+  1. The synchronous endpoints are byte-identical to the RECORDED golden
+     snapshot (tests/fixtures/lagna_shuddhi_*_golden.json), so their output
+     cannot drift unnoticed. Provenance: originally captured from the code
+     that predated the async variant; deliberately RE-RECORDED from the
+     corrected engine when the graha/swisseph body-id conflation fix
+     legitimately moved the electional astrology (the old fixtures pinned
+     lord houses and dignities computed from the wrong celestial bodies —
+     see tests/test_graha_body_ids.py). A future intentional astronomy
+     change re-records them again, in the same reviewed change, never
+     silently.
   2. Submitting a scan asynchronously returns a job id immediately (the HTTP
      call does not block for the scan's duration).
   3. Polling a job observes a non-terminal state (pending/running) before it
@@ -59,16 +66,18 @@ FAMILY_REQ = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Existing synchronous endpoints must stay byte-identical.
+# 1. Synchronous endpoints must stay byte-identical to the recorded golden
+#    (re-recorded only deliberately, with the change that moves the astronomy
+#    — see the provenance note in the module docstring).
 # ---------------------------------------------------------------------------
 
-def test_lagna_shuddhi_sync_endpoint_byte_identical_to_before_change():
+def test_lagna_shuddhi_sync_endpoint_matches_recorded_golden():
     r = client.post("/v1/muhurat/lagna-shuddhi", json=SOLO_REQ)
     assert r.status_code == 200
     assert r.json() == _SOLO_GOLDEN
 
 
-def test_family_lagna_shuddhi_sync_endpoint_byte_identical_to_before_change():
+def test_family_lagna_shuddhi_sync_endpoint_matches_recorded_golden():
     r = client.post("/v1/muhurat/family-lagna-shuddhi", json=FAMILY_REQ)
     assert r.status_code == 200
     assert r.json() == _FAMILY_GOLDEN
