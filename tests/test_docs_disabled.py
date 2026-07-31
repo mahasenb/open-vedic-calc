@@ -44,4 +44,8 @@ def test_healthz_still_reachable_without_token():
     # endpoints must not collaterally affect it.
     r = anon_client.get("/healthz")
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    # What this test is about is REACHABILITY without a token, not the engine.
+    # `status` follows `ephe_loaded` (it is not a constant "ok"), so assert the
+    # relationship — valid under both the Moshier and the Swiss CI runtimes.
+    body = r.json()
+    assert body["status"] == ("ok" if body["ephe_loaded"] else "degraded")

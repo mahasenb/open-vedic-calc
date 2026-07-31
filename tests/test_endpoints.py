@@ -23,7 +23,15 @@ client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 def test_healthz():
     r = client.get("/healthz")
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    body = r.json()
+    # `status` FOLLOWS `ephe_loaded`; it is not a constant "ok". Asserting the
+    # RELATIONSHIP keeps this test meaningful under BOTH ephemeris runtimes
+    # this repo runs (see CLAUDE.md): the Moshier job has no data files and
+    # must report "degraded", while the Swiss job and the shipped image (which
+    # bakes the data in) must report "ok". A hardcoded "ok" was true only
+    # because /healthz used to lie.
+    assert isinstance(body["ephe_loaded"], bool)
+    assert body["status"] == ("ok" if body["ephe_loaded"] else "degraded")
 
 
 # ---------------------------------------------------------------------------
