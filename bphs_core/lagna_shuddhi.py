@@ -455,6 +455,14 @@ def _score_instant(
     # no signal that anything failed), which is wrong astrology reported as
     # fine. tests/test_graha_body_ids.py pins the propagation.
     lagna_sign_idx = utils.SIGNS.index(lagna_sign)
+    # The lord-not-a-graha else-path (house 0 / "neutral") is unreachable in
+    # practice: lagna_sign is always one of utils.SIGNS here, and every sign
+    # lord in utils.SIGN_LORDS is a graha. If it were ever reached (an
+    # unknown lord string), house 0 is a VISIBLE sentinel, not a silent one:
+    # _ordinal(0) renders it as "unknown house" in the clearance prose, and
+    # no house bonus is granted. It is deliberately not an exception path —
+    # an unknown NAME is a data problem upstream, unlike a computation
+    # failure for a known graha, which propagates (below).
     lord_house = 0
     lord_dignity = "neutral"
     if lagna_lord in utils.PLANETS:

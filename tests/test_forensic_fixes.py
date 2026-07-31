@@ -69,12 +69,12 @@ class TestMuhuratUTCNakshatra:
 
         y, mo, d = target_date.year, target_date.month, target_date.day
         jd_utc = swe.julday(y, mo, d, 12.0 - place.timezone)
-        expected_idx = int((drik.sidereal_longitude(jd_utc, 1) % 360) / (360.0 / 27)) % 27
+        expected_idx = int((drik.sidereal_longitude(jd_utc, swe.MOON) % 360) / (360.0 / 27)) % 27
         expected_nak = utils.NAKSHATRAS[expected_idx]
 
         # The wrong result from the unfixed local jd
         jd_local = swe.julday(y, mo, d, 12.0)
-        wrong_idx = int((drik.sidereal_longitude(jd_local, 1) % 360) / (360.0 / 27)) % 27
+        wrong_idx = int((drik.sidereal_longitude(jd_local, swe.MOON) % 360) / (360.0 / 27)) % 27
         wrong_nak = utils.NAKSHATRAS[wrong_idx]
 
         # Confirm the boundary: UTC and local give different nakshatras
@@ -101,7 +101,7 @@ class TestMuhuratUTCNakshatra:
 
         y, mo, d = target_date.year, target_date.month, target_date.day
         jd_utc = swe.julday(y, mo, d, 12.0 - place.timezone)
-        expected_idx = int((drik.sidereal_longitude(jd_utc, 1) % 360) / (360.0 / 27)) % 27
+        expected_idx = int((drik.sidereal_longitude(jd_utc, swe.MOON) % 360) / (360.0 / 27)) % 27
         expected_nak = utils.NAKSHATRAS[expected_idx]  # = Krittika
 
         assert reported_nak == expected_nak, (
@@ -160,7 +160,7 @@ class TestTransitTzCorrection:
 
         # UTC jd for this local midnight
         jd_utc = swe.julday(2025, 6, 15, 0.0 - tz_hours)
-        expected_lon = drik.sidereal_longitude(jd_utc, 1)
+        expected_lon = drik.sidereal_longitude(jd_utc, swe.MOON)
         expected_nak = utils.longitude_to_nakshatra(expected_lon)
 
         assert moon_transit.nakshatra == expected_nak, (
