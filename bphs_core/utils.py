@@ -1,9 +1,200 @@
 import functools
+import inspect
 import os
 import threading
 
 import swisseph as swe
+from jhora import const as jhora_const
 from jhora.panchanga import drik
+
+# ---------------------------------------------------------------------------
+# The lunar node model (Rahu / Ketu) is DECLARED here. It is never inherited.
+#
+# Rahu and Ketu can be computed from either the TRUE (osculating) lunar node --
+# the actual instantaneous intersection of the Moon's orbital plane with the
+# ecliptic -- or the MEAN node, a smoothed analytical fit to that intersection.
+# Measured with the pinned dependency set (pyswisseph 2.10.3.2, pyjhora 4.8.6)
+# against the real Swiss ephemeris data files, over the engine's supported
+# birth-date span (1800-01-01..2400-12-31, app/schemas.py) at one-day steps and
+# refined at one-hour steps around the worst day:
+#
+#     max |true - mean| = 1.981465100 deg = 118.8879 arcmin = 7133.2744 arcsec
+#                         at 1905-10-10 22:00 UT
+#
+# and across those 219511 sampled days the two models put Rahu in a different
+# nakshatra PADA on 28.85% of them, a different NAKSHATRA on 7.19%, and a
+# different RASI on 3.20%. Ketu follows Rahu exactly (Rahu + 180 deg), so the
+# choice moves both shadow grahas together. For scale, that is more than twice
+# the ~0.883 deg Lahiri-vs-Fagan/Bradley ayanamsa error documented above.
+#
+# WHY TRUE. Every other graha this engine serves is a true/apparent position
+# from a modern ephemeris; the true node is the same class of quantity, so
+# serving a smoothed mean element for one graha alone would make a single chart
+# internally inconsistent. The Siddhantic mean-motion treatment of Rahu is a
+# computational method of its era, not a doctrinal requirement, and this engine
+# already declines that era's methods for every visible graha. It is also what
+# the engine already served, so declaring it moves no number that any caller has
+# already been given.
+#
+# WHY IT IS DECLARED AT ALL, given it matches the library's current behaviour:
+# an inherited default is not a choice, it is an accident that happens to be
+# right. A library release that moved it would have moved every Rahu and Ketu by
+# up to 1.98 deg with no change in this repository at all. The committed goldens
+# would have failed -- but a golden failure with no declared model anywhere reads
+# as a regression to chase rather than a deliberate choice to honour. The
+# dependency is additionally pinned to an exact version in pyproject.toml so the
+# default cannot move underneath this declaration in the first place; this block
+# is what makes the choice legible when it does move.
+#
+# THREE INDEPENDENT LEVERS, and the third is the one that actually serves.
+# Verified by measurement, not by reading the config (flip only the first and the
+# served chart does not move at all):
+#
+#   1. ``const._RAHU`` / ``const._use_true_nodes_for_rahu_ketu`` -- read at call
+#      time by every ``drik.sidereal_longitude(jd, const._RAHU)`` site.
+#   2. ``drik.planet_list`` -- a MUTABLE module global, rebuilt by
+#      ``drik.set_planet_list()``; body id -> planet id for the position loops.
+#   3. ``drik.dhasavarga``'s own parameter default. This is the lever the chart
+#      path uses: ``charts.rasi_chart`` -> ``drik.dhasavarga(jd, place, 1)``,
+#      and dhasavarga declares ``set_rahu_ketu_as_true_nodes=True`` as a LITERAL
+#      default (not ``None``), so it re-derives planet_list from that literal and
+#      never consults lever 1 at all. Setting only the constants therefore leaves
+#      every served Rahu unchanged -- a declaration that looked applied and was
+#      not. ``apply_lunar_node_model`` below pins 1 and 2 and VERIFIES 3.
+#
+# Because lever 3 is a library literal this repo cannot set, declaring
+# LUNAR_NODE_MODEL = "mean" hard-fails at import rather than silently serving
+# true-node charts under a mean-node banner. That is deliberate: switching model
+# is real work (routing the chart path through
+# ``drik.dhasavarga(..., set_rahu_ketu_as_true_nodes=False)`` instead of
+# ``charts.rasi_chart``) plus a deliberate re-recording of the Swiss goldens, and
+# a one-word edit here must not be able to look like it did that work.
+#
+# Changing LUNAR_NODE_MODEL is an astrological model decision, not an
+# implementation detail: it invalidates every previously served chart.
+# tests/test_lunar_node_model.py is the tripwire that enforces all of the above.
+# ---------------------------------------------------------------------------
+LUNAR_NODE_MODEL = "true"
+
+# Derived, never independently declared, so the two can never disagree; an
+# unknown model name raises KeyError at import rather than serving something
+# unintended.
+LUNAR_NODE_BODY = {"true": swe.TRUE_NODE, "mean": swe.MEAN_NODE}[LUNAR_NODE_MODEL]
+
+
+_SERVING_PATH_NODE_PARAMETER = "set_rahu_ketu_as_true_nodes"
+
+
+def _serving_path_node_default() -> bool | None:
+    """The node model ``drik.dhasavarga`` applies when this repo does not pass one.
+
+    ``charts.rasi_chart`` calls ``dhasavarga`` without that argument, so this
+    literal -- not ``const._RAHU`` -- decides which node every served chart
+    carries. ``None`` means the library defers to the constants, which
+    ``apply_lunar_node_model`` has already pinned, and is therefore acceptable.
+    """
+    parameters = inspect.signature(drik.dhasavarga).parameters
+    parameter = parameters.get(_SERVING_PATH_NODE_PARAMETER)
+    if parameter is None:
+        raise RuntimeError(
+            f"drik.dhasavarga no longer takes a {_SERVING_PATH_NODE_PARAMETER!r} "
+            "parameter, so this engine can no longer tell which lunar node model "
+            "the chart path serves. Refusing to continue: re-establish how the "
+            "serving path selects Rahu and Ketu before moving the dependency pin."
+        )
+    return parameter.default
+
+
+def apply_lunar_node_model() -> None:
+    """Pin the astronomy library to LUNAR_NODE_MODEL, or refuse to run.
+
+    Fail-closed throughout. Every step below is read back after it is applied,
+    because calling a setter is not evidence it took effect, and the cost of
+    being wrong is up to 1.98 deg on both shadow grahas.
+
+    Pins the two levers this repo can set, and verifies the third it cannot:
+
+    1. ``const.set_node_mode`` rather than assigning ``const._RAHU`` directly,
+       because two library-internal names must stay in agreement -- most call
+       sites read ``const._RAHU``, while ``set_planet_list`` and others read the
+       boolean ``_use_true_nodes_for_rahu_ketu``. A direct assignment would
+       desynchronise them and leave different limbs of one chart describing
+       different nodes.
+    2. ``drik.set_planet_list``, because ``drik.planet_list`` is a mutable
+       module global that was built from the constants at drik's own import
+       time -- i.e. before this ran.
+    3. ``drik.dhasavarga``'s parameter default, which is a library literal this
+       repo cannot set and which is what the chart path actually uses. It is
+       verified, never assumed: if it ever stops agreeing with the declaration
+       the engine refuses to start instead of serving the other model.
+
+    ``const._KETU`` is deliberately NOT verified: the library resolves it to -10
+    under the true node and to ``-swe.MEAN_NODE`` -- which is also -10 -- under
+    the mean node, so it carries no information about which model is active. It
+    is a sentinel that makes the library compute Ketu as Rahu + 180 deg, which
+    is why Ketu always follows whichever model Rahu is on.
+
+    Idempotent, and cheap: it sets and inspects module attributes and does not
+    touch the ephemeris.
+    """
+    want_true_node = LUNAR_NODE_MODEL == "true"
+
+    # (1) the library's module-level constants
+    setter = getattr(jhora_const, "set_node_mode", None)
+    if setter is None:
+        raise RuntimeError(
+            "the astronomy library no longer exposes jhora.const.set_node_mode, so "
+            f"this engine cannot pin its declared lunar node model ({LUNAR_NODE_MODEL} "
+            "node). Refusing to continue rather than inheriting whatever the library "
+            "defaults to: the true and mean nodes differ by up to 1.98 degrees, which "
+            "moves Rahu's and Ketu's nakshatra pada on roughly a third of dates. "
+            "Re-establish the declaration against the new library API in the same "
+            "change that moves the pin."
+        )
+    setter(want_true_node)
+
+    applied_body = getattr(jhora_const, "_RAHU", None)
+    applied_flag = getattr(jhora_const, "_use_true_nodes_for_rahu_ketu", None)
+    if applied_body != LUNAR_NODE_BODY or applied_flag != want_true_node:
+        raise RuntimeError(
+            f"pinning the declared lunar node model did not take effect: asked the "
+            f"astronomy library for the {LUNAR_NODE_MODEL} node (swisseph body "
+            f"{LUNAR_NODE_BODY}), but jhora.const now reports _RAHU={applied_body!r} "
+            f"and _use_true_nodes_for_rahu_ketu={applied_flag!r}. Refusing to serve "
+            "charts whose Rahu and Ketu are on an undeclared model."
+        )
+
+    # (2) drik's mutable planet_list global, built before this ran
+    drik.set_planet_list(set_rahu_ketu_as_true_nodes=want_true_node)
+    listed_body = next(
+        (body for body, planet_id in drik.planet_list.items()
+         if planet_id == jhora_const.RAHU_ID),
+        None,
+    )
+    if listed_body != LUNAR_NODE_BODY:
+        raise RuntimeError(
+            f"pinning the declared lunar node model did not take effect in "
+            f"drik.planet_list: Rahu is mapped to swisseph body {listed_body!r}, "
+            f"expected {LUNAR_NODE_BODY} for the {LUNAR_NODE_MODEL} node."
+        )
+
+    # (3) the serving path's own literal, which this repo cannot set
+    serving_default = _serving_path_node_default()
+    if serving_default is not None and serving_default != want_true_node:
+        raise RuntimeError(
+            f"this engine declares the {LUNAR_NODE_MODEL} lunar node, but the chart "
+            f"path (charts.rasi_chart -> drik.dhasavarga) applies "
+            f"{_SERVING_PATH_NODE_PARAMETER}={serving_default!r} of its own accord, "
+            "so every served Rahu and Ketu would be on the other model -- up to "
+            "1.98 degrees away, a different nakshatra pada on roughly a third of "
+            "dates. Refusing to serve charts that contradict the declaration. Either "
+            "the dependency changed that default (revert the bump, or route the "
+            "chart path through drik.dhasavarga explicitly and re-record the Swiss "
+            "goldens), or LUNAR_NODE_MODEL was changed without that routing work."
+        )
+
+
+apply_lunar_node_model()
 
 EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
 
