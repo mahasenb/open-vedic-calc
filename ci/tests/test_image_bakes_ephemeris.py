@@ -471,6 +471,31 @@ def test_final_stage_does_not_merely_mkdir_the_ephemeris_directory() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _load_fetcher():
+    """Import ci/fetch_swiss_ephemeris.py BY PATH, not via ``import ci``.
+
+    ``ci/`` deliberately has no ``__init__.py`` — it is a directory of CI
+    scripts, not a package — so ``from ci import ...`` only resolves when the
+    repo root happens to be on ``sys.path``. That is true under
+    ``python -m pytest`` (which prepends CWD) and false under a bare ``pytest``
+    (which does not). CI runs the bare form: `run: pytest ci/tests/ -q`.
+
+    Measured: an earlier version of this test used ``from ci import ...``, passed
+    locally under ``python -m pytest``, and failed BOTH CI jobs with
+    ``ModuleNotFoundError: No module named 'ci'``. Loading by path removes the
+    dependency on how pytest was invoked entirely, so this test cannot pass or
+    fail for a reason that has nothing to do with what it is testing.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    path = _REPO_ROOT / "ci" / "fetch_swiss_ephemeris.py"
+    spec = importlib.util.spec_from_file_location("_fetch_swiss_ephemeris_under_test", path)
+    assert spec and spec.loader, f"could not load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_downloaded_files_are_readable_by_other_users(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -497,7 +522,7 @@ def test_downloaded_files_are_readable_by_other_users(
     import io
     import urllib.request
 
-    from ci import fetch_swiss_ephemeris as fetcher  # noqa: PLC0415
+    fetcher = _load_fetcher()
 
     payload = b"pretend ephemeris bytes"
     monkeypatch.setattr(
