@@ -21,7 +21,19 @@ CALC_SERVICE_TOKEN=<any secret>
 PUBLIC_SOURCE_URL=<URL of this public repo>
 ```
 
-Download Swiss Ephemeris files into `data/ephe/` — see `EPHEMERIS_LICENSE.md`.
+Swiss Ephemeris data files: **nothing to do if you run the Docker images.**
+`Dockerfile` and `Dockerfile.test` fetch and checksum-verify them during the
+build and bake them into `/app/data/ephe`. Do not mount a volume over that
+path — it shadows the baked files, and swisseph responds by silently computing
+on its built-in Moshier fallback rather than raising.
+
+Running from a source checkout instead (`uvicorn app.main:app`)? Fetch them once:
+
+```
+python ci/fetch_swiss_ephemeris.py
+```
+
+See `EPHEMERIS_LICENSE.md`.
 
 ## API
 

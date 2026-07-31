@@ -20,7 +20,8 @@ import os
 # Set auth environment before any app imports so the module-level auth guard
 # (which fires on import of app.auth) sees a valid insecure-env value and token.
 # All tests that verify auth behaviour do so via the pure helper functions
-# (_environment(), _token_required()) which read os.environ at call time.
+# (app.deployment.environment(), app.deployment.is_real_deployment()) which
+# read os.environ at call time.
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
@@ -520,25 +521,30 @@ class TestEnvironmentDefaultProduction:
     """
 
     def test_default_environment_is_production(self, monkeypatch):
-        """_environment() must return 'production' when ENVIRONMENT is unset.
+        """environment() must return 'production' when ENVIRONMENT is unset.
 
         The function reads os.environ at call time, so monkeypatching the env
         variable and calling the function directly is sufficient.
+
+        Lives in app/deployment.py rather than app/auth.py: BOTH fail-closed
+        boot guards read this one policy (auth's CALC_SERVICE_TOKEN check and
+        app/ephemeris_guard.py's Swiss-vs-Moshier check), and a second copy of
+        the environment list would let them disagree.
         """
-        import app.auth as auth_mod
+        import app.deployment as deployment_mod
         monkeypatch.delenv("ENVIRONMENT", raising=False)
-        # _environment() reads os.environ.get("ENVIRONMENT", "production") at call time
-        result = auth_mod._environment()
+        # environment() reads os.environ.get("ENVIRONMENT", "production") at call time
+        result = deployment_mod.environment()
         assert result == "production", (
             f"Default ENVIRONMENT must be 'production', not {result!r}"
         )
 
     def test_default_token_required_when_env_unset(self, monkeypatch):
-        """_token_required() must be True when ENVIRONMENT is unset (defaults to production)."""
-        import app.auth as auth_mod
+        """is_real_deployment() must be True when ENVIRONMENT is unset (production default)."""
+        import app.deployment as deployment_mod
         monkeypatch.delenv("ENVIRONMENT", raising=False)
-        # _token_required() calls _environment() at call time
-        result = auth_mod._token_required()
+        # is_real_deployment() calls environment() at call time
+        result = deployment_mod.is_real_deployment()
         assert result is True, (
             "When ENVIRONMENT is not set, token must be required (production default)"
         )

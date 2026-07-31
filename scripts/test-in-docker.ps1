@@ -2,8 +2,9 @@
 .SYNOPSIS
     Run the calc-service test suite inside Docker.
 .DESCRIPTION
-    Builds the test image (compiles pyswisseph from source), mounts the
-    local ephemeris data, and runs pytest.  Works on any OS with Docker.
+    Builds the test image (compiles pyswisseph from source and fetches the
+    checksum-verified Swiss ephemeris data into it), and runs pytest.  Works
+    on any OS with Docker, with nothing downloaded by hand beforehand.
 .EXAMPLE
     .\scripts\test-in-docker.ps1
 #>
@@ -13,12 +14,13 @@ param()
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 
-# Verify ephemeris data exists
-$ephePath = "$root\data\ephe"
-if (-not (Test-Path (Join-Path $ephePath 'sepl_18.se1'))) {
-    Write-Error "Ephemeris data not found at $ephePath - download Swiss Ephemeris files first."
-    exit 1
-}
+# No ephemeris precondition. The image build fetches and checksum-verifies the
+# Swiss data itself (the `ephemeris` stage in Dockerfile.test), so this no
+# longer depends on a human having downloaded ~2 MB of licensed binaries by
+# hand first. The old check said "download Swiss Ephemeris files first" and
+# named no source; skipping it ran the suite green on the Moshier fallback,
+# because the accuracy tests SKIP rather than fail without the data. The build
+# now fails closed on a download failure or a checksum mismatch instead.
 
 Write-Host '=== Building test image (first run compiles pyswisseph, ~60s) ===' -ForegroundColor Cyan
 docker compose -f (Join-Path $root 'docker-compose.test.yml') run --rm --build test

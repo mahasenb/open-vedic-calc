@@ -1,5 +1,24 @@
 # Test-only image: installs dev deps and runs pytest.
 # Production image uses the regular Dockerfile.
+
+# The Swiss ephemeris data, fetched and checksum-verified exactly as the
+# production Dockerfile does. This image exists to run the suite against REAL
+# Swiss data, and it used to get that data from a host bind-mount — so running
+# it required a human to have downloaded ~2 MB of licensed binaries out of band
+# first (scripts/test-in-docker.* even failed with "Download Swiss Ephemeris
+# files first", pointing nowhere). That is the same "supplied out of band, or
+# silently not at all" shape as the production defect, one layer down: a
+# developer without the files got a green run on the Moshier fallback, because
+# the accuracy tests SKIP rather than fail when REQUIRE_SWISS_EPHEMERIS is
+# unset. Baking it makes the local Docker loop self-sufficient.
+FROM python:3.10-slim AS ephemeris
+WORKDIR /fetch
+COPY ci/fetch_swiss_ephemeris.py ci/fetch_swiss_ephemeris.py
+COPY ci/swiss_ephemeris.json ci/swiss_ephemeris.json
+RUN python ci/fetch_swiss_ephemeris.py --self-test \
+ && python ci/fetch_swiss_ephemeris.py \
+ && python ci/fetch_swiss_ephemeris.py --verify-only
+
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -33,7 +52,16 @@ COPY tests ./tests
 # is present -- still frozen against the same committed lockfile.
 RUN uv sync --frozen --extra dev
 
-# data/ephe is volume-mounted at runtime (see docker-compose.test.yml)
-RUN mkdir -p data/ephe
+# The verified data files, from the stage above. No runtime mount: the image
+# carries its own data, so `docker compose -f docker-compose.test.yml run test`
+# exercises real Swiss values on a machine that has never downloaded anything.
+COPY --from=ephemeris /fetch/data/ephe ./data/ephe
+
+# REQUIRE_SWISS_EPHEMERIS=1 turns "the Swiss data is not active" from a SKIP
+# into a hard failure in tests/test_swiss_ephemeris.py. Set here rather than
+# left to the caller because it is now always true of this image: the data is
+# baked in, so a skip could only ever mean the bake broke — precisely the
+# regression this image should catch, and precisely what a silent skip hides.
+ENV REQUIRE_SWISS_EPHEMERIS=1
 
 CMD ["pytest", "tests/", "-v", "--tb=short"]
