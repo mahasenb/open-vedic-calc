@@ -86,7 +86,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.23.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.0" },
     { name = "pydantic", specifier = ">=2.6.0" },
-    { name = "pyjhora", specifier = ">=4.8.0" },
+    { name = "pyjhora", specifier = "==4.8.6" },
     { name = "pyswisseph", specifier = "==2.10.3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },

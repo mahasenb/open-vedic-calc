@@ -35,6 +35,32 @@ python ci/fetch_swiss_ephemeris.py
 
 See `EPHEMERIS_LICENSE.md`.
 
+## Astronomical conventions
+
+Two engines can both be defensible and still disagree, because Vedic astrology has
+genuine methodological choices. This service makes them explicitly, so a number
+that differs from another tool can be explained rather than guessed at:
+
+| Choice | This service | Where it is set |
+|---|---|---|
+| Ayanamsa | **Lahiri** (Chitrapaksha) | `bphs_core/utils.py` |
+| Lunar nodes (Rahu / Ketu) | **True (osculating) node**; Ketu = Rahu + 180° | `bphs_core/utils.py`, `LUNAR_NODE_MODEL` |
+| Primary house frame | **Whole-sign**, counted from the lagna sign | `bphs_core/chart.py` |
+| Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
+| Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
+| Ephemeris | Swiss Ephemeris data files (AD 1800–2400) | baked into the images |
+
+The node model is the choice most likely to explain a visible discrepancy.
+Measured over 1800–2400 at one-day steps against the real Swiss data files, the
+true and mean nodes differ by up to **1.98°**, and place Rahu in a different
+nakshatra pada on **28.85%** of days, a different nakshatra on 7.19%, and a
+different rasi on 3.20%. So if your Rahu is a degree or two from what this
+service returns, a mean-node engine is the first thing to check.
+
+That model is pinned deliberately rather than inherited from a dependency
+default, and the service refuses to start if its dependency stops honouring it —
+see `bphs_core/utils.py` and `tests/test_lunar_node_model.py`.
+
 ## API
 
 The API contract is defined in `app/schemas.py` (request/response models) and the
