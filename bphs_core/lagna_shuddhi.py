@@ -32,12 +32,13 @@ _WEEKDAY_LORDS = {
     "Monday": "Moon", "Tuesday": "Mars", "Wednesday": "Mercury",
     "Thursday": "Jupiter", "Friday": "Venus", "Saturday": "Saturn", "Sunday": "Sun",
 }
-# pyjhora planet IDs (matches utils.PLANETS order)
-_PLANET_IDS = {p: i for i, p in enumerate(utils.PLANETS)}
-_MALEFIC_IDS = [
-    _PLANET_IDS["Sun"], _PLANET_IDS["Mars"], _PLANET_IDS["Saturn"],
-    _PLANET_IDS["Rahu"], _PLANET_IDS["Ketu"],
-]
+# The classical natural malefics, by NAME. Grahas are resolved to swisseph
+# bodies only inside utils.graha_sidereal_longitude — the sanctioned
+# name -> body boundary. Never rebuild an integer id table from
+# enumerate(utils.PLANETS): those indices are pyjhora's planet numbering,
+# which swisseph does not follow (index 2 is Mars in one space and Mercury
+# in the other — see the boundary rationale in bphs_core/utils.py).
+_MALEFIC_GRAHAS = ("Sun", "Mars", "Saturn", "Rahu", "Ketu")
 _FAVORABLE_CHOGADIYA = {
     "Chara (Auspicious)", "Labh (Auspicious)",
     "Amrit (Highly Auspicious)", "Shubh (Auspicious)",
@@ -446,29 +447,28 @@ def _score_instant(
         day_data["date"], _mins_to_hhmm(time_mins), day_data["sunrise"]
     )
 
-    # Lagna lord transit position at this exact instant
+    # Lagna lord transit position at this exact instant. No exception guard
+    # here, deliberately: a graha position that cannot be computed for a
+    # valid graha at a valid JD means the ephemeris layer itself is broken,
+    # and the failure must SURFACE — a swallowed error here once scored
+    # instants as if the lord limb were fine (house 0, dignity "neutral",
+    # no signal that anything failed), which is wrong astrology reported as
+    # fine. tests/test_graha_body_ids.py pins the propagation.
     lagna_sign_idx = utils.SIGNS.index(lagna_sign)
-    lord_id = _PLANET_IDS.get(lagna_lord, -1)
     lord_house = 0
     lord_dignity = "neutral"
-    if lord_id >= 0:
-        try:
-            lord_lon = drik.sidereal_longitude(jd, lord_id)
-            lord_sign_idx = int(lord_lon // 30) % 12
-            lord_house = (lord_sign_idx - lagna_sign_idx) % 12 + 1
-            lord_dignity = utils.get_planet_dignity(lagna_lord, utils.SIGNS[lord_sign_idx])
-        except Exception:
-            pass
+    if lagna_lord in utils.PLANETS:
+        lord_lon = utils.graha_sidereal_longitude(jd, lagna_lord)
+        lord_sign_idx = int(lord_lon // 30) % 12
+        lord_house = (lord_sign_idx - lagna_sign_idx) % 12 + 1
+        lord_dignity = utils.get_planet_dignity(lagna_lord, utils.SIGNS[lord_sign_idx])
 
-    # Malefics in lagna sign at this instant
+    # Malefics in lagna sign at this instant — same no-swallow rule as above.
     malefics_in_lagna = 0
-    for pid in _MALEFIC_IDS:
-        try:
-            m_lon = drik.sidereal_longitude(jd, pid)
-            if int(m_lon // 30) % 12 == lagna_sign_idx:
-                malefics_in_lagna += 1
-        except Exception:
-            pass
+    for graha in _MALEFIC_GRAHAS:
+        m_lon = utils.graha_sidereal_longitude(jd, graha)
+        if int(m_lon // 30) % 12 == lagna_sign_idx:
+            malefics_in_lagna += 1
 
     detail.update({
         "in_auspicious_muhurta": in_auspicious,
@@ -1083,7 +1083,7 @@ def compute_balam_at_jd(
 
     # --- Tara Bala ---
     try:
-        transit_moon_lon = drik.sidereal_longitude(jd, 1)  # Moon ID = 1
+        transit_moon_lon = utils.graha_sidereal_longitude(jd, "Moon")
         transit_star = int(transit_moon_lon // (360 / 27)) % 27 + 1  # 1-27
         birth_star_idx = utils.NAKSHATRAS.index(birth_nakshatra) + 1
         tb_div = (((transit_star - birth_star_idx + 27) % 27) + 1) % 9
@@ -1093,7 +1093,7 @@ def compute_balam_at_jd(
 
     # --- Chandra Bala ---
     try:
-        transit_moon_lon = drik.sidereal_longitude(jd, 1)
+        transit_moon_lon = utils.graha_sidereal_longitude(jd, "Moon")
         transit_moon_sign_idx = int(transit_moon_lon // 30) % 12
         birth_moon_sign_idx = utils.SIGNS.index(birth_moon_sign)
         diff = (transit_moon_sign_idx - birth_moon_sign_idx) % 12 + 1

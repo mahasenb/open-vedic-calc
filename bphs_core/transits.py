@@ -1,14 +1,15 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import swisseph as swe
-from jhora.panchanga import drik
 from .chart import ChartSnapshot
 from . import utils
 
-_PYJHORA_TRANSIT_PLANETS = {
-    "Sun": 0, "Moon": 1, "Mars": 2, "Mercury": 3,
-    "Jupiter": 4, "Venus": 5, "Saturn": 6, "Rahu": 7,
-}
+# Grahas are referred to by NAME throughout this module and resolved to a
+# swisseph body only inside utils.graha_sidereal_longitude — the sanctioned
+# name -> body boundary. No integer body id (of either id space: pyjhora's
+# planet indices or swisseph's body ids) may appear here; the two spaces
+# agree on Sun/Moon/Saturn and silently disagree on every other graha (see
+# the boundary rationale in bphs_core/utils.py).
 
 # The seven grahas that participate in classical gochara. Rahu and Ketu have no
 # classical gochara-vedha positions and no bhinnashtakavarga column, so they are
@@ -56,7 +57,7 @@ class SadeSatiInfo:
 
 
 @utils.serialized_ephemeris
-def _transit_longitude(jd: float, planet_id: int) -> float:
+def _transit_longitude(jd: float, graha: str) -> float:
     # The @serialized_ephemeris decorator above already calls
     # _ensure_thread_ephemeris_state() before this body runs, so the calling
     # thread's ephemeris path + Lahiri ayanamsa mode are current here. That
@@ -72,8 +73,11 @@ def _transit_longitude(jd: float, planet_id: int) -> float:
     # profile.sade_sati_lifetime's quarterly sweep, OUTSIDE the decorated
     # get_current_transits/get_sade_sati_info entry points (nested
     # acquisition there is fine — the lock is an RLock; its own decorator
-    # covers that path too).
-    return drik.sidereal_longitude(jd, planet_id)
+    # covers that path too, as does graha_sidereal_longitude's own).
+    #
+    # *graha* is a NAME ("Sun".."Ketu"), resolved to a swisseph body only
+    # inside the boundary function — never an integer id of either space.
+    return utils.graha_sidereal_longitude(jd, graha)
 
 
 @utils.serialized_ephemeris
@@ -87,10 +91,11 @@ def _jd_from_date(dt: datetime) -> float:
 def _jd_utc_from_local(dt: datetime, timezone_offset_hours: float) -> float:
     """Build a UTC Julian Day from a local datetime and its timezone offset.
 
-    drik.sidereal_longitude() requires a UTC Julian Day (jd_utc); calling it
-    with a local datetime produces a tz-offset error in every planet longitude
-    (~0.55°/hr for the Moon, ~3° for IST). The caller supplies the local
-    datetime as received from the request, and this helper converts to UTC.
+    utils.graha_sidereal_longitude() requires a UTC Julian Day (jd_utc);
+    calling it with a local datetime produces a tz-offset error in every
+    planet longitude (~0.55°/hr for the Moon, ~3° for IST). The caller
+    supplies the local datetime as received from the request, and this
+    helper converts to UTC.
     """
     local_hour = dt.hour + dt.minute / 60 + dt.second / 3600
     utc_hour = local_hour - timezone_offset_hours
@@ -104,27 +109,21 @@ def get_current_transits(snapshot: ChartSnapshot, at: datetime,
 
     *timezone_offset_hours* is the local timezone offset in hours (positive east
     of UTC, e.g. 5.5 for IST). It is used to build a true UTC Julian Day before
-    calling drik.sidereal_longitude(), which requires UTC JD. Passing the local
+    calling utils.graha_sidereal_longitude(), which requires UTC JD. Passing the local
     datetime without timezone correction produces a ~tz × 0.55°/hr error in
     planetary longitudes (≈3° for IST), enough to shift the Moon's nakshatra.
     """
     jd = _jd_utc_from_local(at, timezone_offset_hours)
     result: dict[str, TransitPlacement] = {}
-    for name, pid in _PYJHORA_TRANSIT_PLANETS.items():
-        lon = _transit_longitude(jd, pid)
+    # All nine grahas by name, in the canonical PLANETS order. Ketu is served
+    # by the boundary as exactly Rahu + 180 deg on the declared node model.
+    for name in utils.PLANETS:
+        lon = _transit_longitude(jd, name)
         sign, deg = utils.longitude_to_sign_and_degree(lon)
         nakshatra = utils.longitude_to_nakshatra(lon)
         result[name] = TransitPlacement(
             planet=name, sign=sign, degrees=round(deg, 4), nakshatra=nakshatra,
         )
-    # Ketu is always exactly 180° from Rahu
-    rahu_lon = _transit_longitude(jd, 7)
-    ketu_lon = (rahu_lon + 180) % 360
-    ketu_sign, ketu_deg = utils.longitude_to_sign_and_degree(ketu_lon)
-    result["Ketu"] = TransitPlacement(
-        planet="Ketu", sign=ketu_sign, degrees=round(ketu_deg, 4),
-        nakshatra=utils.longitude_to_nakshatra(ketu_lon),
-    )
     return result
 
 
@@ -136,7 +135,7 @@ def get_sade_sati_info(snapshot: ChartSnapshot, at: datetime) -> SadeSatiInfo:
 
     moon_sign_idx = utils.SIGNS.index(moon.sign)
     jd = _jd_from_date(at)
-    saturn_lon = _transit_longitude(jd, 6)  # Saturn ID is 6 in pyjhora
+    saturn_lon = _transit_longitude(jd, "Saturn")
     saturn_sign_idx = int(saturn_lon // 30) % 12
 
     diff = (saturn_sign_idx - moon_sign_idx) % 12
@@ -171,7 +170,7 @@ def get_sade_sati_info(snapshot: ChartSnapshot, at: datetime) -> SadeSatiInfo:
 
     def saturn_in_sign(dt: datetime) -> bool:
         j = _jd_from_date(dt)
-        lon = _transit_longitude(j, 6)
+        lon = _transit_longitude(j, "Saturn")
         return int(lon // 30) % 12 == target_sign_idx
 
     # Precondition: lo must be OUTSIDE the target sign, otherwise the binary

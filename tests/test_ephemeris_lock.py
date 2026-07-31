@@ -92,6 +92,10 @@ def test_every_c_library_entry_point_is_serialized():
         # sweep (the sync /v1/profile route) — must hold the lock per call.
         transits._transit_longitude,
         transits._jd_from_date,
+        # The graha-name -> swisseph-body boundary: every per-body position
+        # in the electional/transit paths now routes through this single
+        # entry point (see the id-space rationale in bphs_core/utils.py).
+        utils.graha_sidereal_longitude,
         # /healthz's Swiss/Moshier probe (CALC-1) -- called directly by the
         # route handler, not nested inside another decorated entry point.
         utils.probe_ephemeris_source,

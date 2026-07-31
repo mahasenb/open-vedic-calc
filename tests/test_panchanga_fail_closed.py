@@ -8,8 +8,10 @@ is that a missing limb means 'not recommendable / visibly degraded', never
 'fine'.
 
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` (for muhurat) or
-``bphs_core.lagna_shuddhi.drik`` (for the scorer) — the names each module looks
-up at call time.
+``bphs_core.lagna_shuddhi.drik`` (for the scorer). Both attributes name the ONE
+shared ``jhora.panchanga.drik`` module object, so a patch placed on it is also
+seen by ``utils.graha_sidereal_longitude`` — the name -> body boundary the
+per-graha longitude calls now route through.
 """
 import logging
 from datetime import date
@@ -216,8 +218,25 @@ class TestScoreInstantFailClosed:
 
     def test_unknown_tara_penalised_and_caps_band(self, monkeypatch):
         """A failed Tara/Chandra compute (birth data present) penalises the score
-        and the resulting sample caps at Fair via derive_band."""
-        monkeypatch.setattr(ls.drik, "sidereal_longitude", _raise)
+        and the resulting sample caps at Fair via derive_band.
+
+        Only the MOON's computation is made to fail. The lagna-lord and
+        malefic limbs no longer swallow a compute failure — they PROPAGATE
+        (tests/test_graha_body_ids.py pins that), so a raise-on-every-body
+        patch would abort _score_instant before the balam limb this test is
+        about could run. The balam limbs keep their catch-into-'Unknown'
+        because 'Unknown' is a *visible* degradation (penalty + band cap),
+        not a silent one.
+        """
+        import swisseph as swe
+        real = ls.drik.sidereal_longitude
+
+        def _moon_raises(jd, body, *a, **k):
+            if body == swe.MOON:
+                raise RuntimeError("ephemeris unavailable")
+            return real(jd, body, *a, **k)
+
+        monkeypatch.setattr(ls.drik, "sidereal_longitude", _moon_raises)
         dd = _base_day_data(is_eclipse_day=False, is_adhik_maasa=False)
         score, detail = _score(
             dd, birth_nakshatra="Rohini", birth_moon_sign="Taurus",

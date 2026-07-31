@@ -364,6 +364,84 @@ SIGNS = [
 
 PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn", "Rahu", "Ketu"]
 
+# ---------------------------------------------------------------------------
+# The graha-name -> swisseph-body BOUNDARY.
+#
+# Two integer id spaces coexist around this engine and they are NOT
+# interchangeable:
+#
+#   * pyjhora's planet indices — the order of PLANETS above (Sun 0, Moon 1,
+#     Mars 2, Mercury 3, Jupiter 4, Venus 5, Saturn 6, Rahu 7, Ketu 8). This
+#     is the space pyjhora's chart OUTPUTS use (``charts.rasi_chart``,
+#     ``drik.dhasavarga``, ``drik.planets_in_retrograde`` return these).
+#   * swisseph body ids — what ``swe.calc_ut`` and ``drik.sidereal_longitude``
+#     CONSUME (Sun 0, Moon 1, Mercury 2, Venus 3, Mars 4, Jupiter 5, Saturn 6,
+#     Uranus 7, Neptune 8, the lunar node 10/11). pyjhora's own docstring on
+#     ``sidereal_longitude`` is explicit: "The sequence number of 0 to 8 for
+#     planets is not followed by swiss ephemeris".
+#
+# Sun, Moon and Saturn share the same value in both spaces, which is what
+# makes the conflation survivable: a spot check of those three looks right
+# while every other graha silently becomes a DIFFERENT CELESTIAL BODY —
+# index 2 ("Mars") computes Mercury, 3 ("Mercury") computes Venus, 4
+# ("Jupiter") computes Mars, 5 ("Venus") computes Jupiter, 7 ("Rahu")
+# computes Uranus and 8 ("Ketu") computes Neptune. Measured with the pinned
+# dependency set at 2026-07-31 00:00 UT: index 7 returned 40.7495 deg
+# (Uranus) where the true node stood at 305.5916 deg.
+#
+# The rule this boundary enforces: raw integer body ids never cross a module
+# edge. ``graha_sidereal_longitude`` below is the ONLY sanctioned route from
+# a graha to ``drik.sidereal_longitude``, and it is keyed by graha NAME — a
+# key that exists in neither integer space, so neither kind of int can be
+# passed to it at all (either raises KeyError immediately). The table is
+# written out longhand from explicit ``swe.*`` constants; never rebuild it
+# from ``enumerate(PLANETS)``. tests/test_graha_body_ids.py enforces both
+# halves: the served longitudes are asserted per-graha against independent
+# computations, and an AST scan fails any new ``sidereal_longitude`` /
+# ``calc_ut`` call site outside this module.
+# ---------------------------------------------------------------------------
+_GRAHA_SWE_BODY: dict[str, int] = {
+    "Sun": swe.SUN,
+    "Moon": swe.MOON,
+    "Mars": swe.MARS,
+    "Mercury": swe.MERCURY,
+    "Jupiter": swe.JUPITER,
+    "Venus": swe.VENUS,
+    "Saturn": swe.SATURN,
+    # The declared lunar node model (see LUNAR_NODE_MODEL above), never a
+    # hardcoded 10/11 — the node body is a model DECISION, not a constant.
+    "Rahu": LUNAR_NODE_BODY,
+}
+
+
+@serialized_ephemeris
+def graha_sidereal_longitude(jd_utc: float, graha: str) -> float:
+    """Sidereal (Lahiri) longitude of *graha* at a UTC Julian Day, in [0, 360).
+
+    The single sanctioned boundary between graha names and swisseph body ids
+    (rationale above). *jd_utc* must be a true UTC Julian Day —
+    ``drik.sidereal_longitude`` requires UTC, unlike pyjhora's place-aware
+    functions which take a local-clock JD and subtract the timezone
+    themselves (see the Julian Day discipline in CLAUDE.md).
+
+    Ketu is served as exactly Rahu + 180 deg on the declared lunar node
+    model. Raises KeyError for anything that is not one of the nine graha
+    names — deliberately including every integer, from either id space.
+    """
+    if graha == "Ketu":
+        return (graha_sidereal_longitude(jd_utc, "Rahu") + 180.0) % 360.0
+    body = _GRAHA_SWE_BODY.get(graha)
+    if body is None:
+        raise KeyError(
+            f"unknown graha {graha!r}: expected one of "
+            f"{[*_GRAHA_SWE_BODY, 'Ketu']}. Integer ids are deliberately "
+            "rejected — utils.PLANETS indices and swisseph body ids are "
+            "different id spaces (index 2 is Mars in one and Mercury in the "
+            "other), and a raw int cannot say which space it belongs to."
+        )
+    return drik.sidereal_longitude(jd_utc, body)
+
+
 NAKSHATRAS = [
     "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira", "Ardra",
     "Punarvasu", "Pushya", "Ashlesha", "Magha", "Purva Phalguni", "Uttara Phalguni",

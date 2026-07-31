@@ -286,7 +286,7 @@ def sade_sati_lifetime(snapshot: ChartSnapshot, birth_date: date) -> list[dict]:
     while scan_date <= end_date:
         try:
             jd = _jd_from_date(scan_date)
-            sat_lon = _transit_longitude(jd, 6)  # Saturn
+            sat_lon = _transit_longitude(jd, "Saturn")
             sat_idx = int(sat_lon // 30) % 12
         except Exception:
             # A systematic ephemeris/compute failure here would otherwise be
