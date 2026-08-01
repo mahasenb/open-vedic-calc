@@ -45,6 +45,7 @@ that differs from another tool can be explained rather than guessed at:
 |---|---|---|
 | Ayanamsa | **Lahiri** (Chitrapaksha) | `bphs_core/utils.py` |
 | Lunar nodes (Rahu / Ketu) | **True (osculating) node**; Ketu = Rahu + 180° | `bphs_core/utils.py`, `LUNAR_NODE_MODEL` |
+| Planetary position frame | **Geometric** (`FLG_TRUEPOS`), sidereal, geocentric — flag word `66386` | `bphs_core/utils.py`, `POSITION_FLAGS` |
 | Primary house frame | **Whole-sign**, counted from the lagna sign | `bphs_core/chart.py` |
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
@@ -60,6 +61,17 @@ service returns, a mean-node engine is the first thing to check.
 That model is pinned deliberately rather than inherited from a dependency
 default, and the service refuses to start if its dependency stops honouring it —
 see `bphs_core/utils.py` and `tests/test_lunar_node_model.py`.
+
+The **position-flag word** is pinned the same way. Every longitude here is a
+*geometric* position (`FLG_TRUEPOS`): the graha's true place on the ecliptic,
+without the light-time and aberration corrections that give an *apparent*
+position. Measured over 1800–2400 at one-day steps against the real Swiss data
+files, the two frames differ by up to **60.54″** (Mercury) — small next to the
+node model, but enough to move a placement across a pada boundary. If your chart
+sits within a minute of arc of this service's, an apparent-position engine is the
+thing to check. The word is declared as `POSITION_FLAGS` in `bphs_core/utils.py`
+and the service refuses to start if the dependency ever builds a different one;
+`tests/test_position_flags.py` is the contract.
 
 ## API
 

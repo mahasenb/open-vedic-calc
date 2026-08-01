@@ -5,6 +5,7 @@ import threading
 
 import swisseph as swe
 from jhora import const as jhora_const
+from jhora import utils as jhora_utils
 from jhora.panchanga import drik
 
 # ---------------------------------------------------------------------------
@@ -195,6 +196,235 @@ def apply_lunar_node_model() -> None:
 
 
 apply_lunar_node_model()
+
+# ---------------------------------------------------------------------------
+# The swisseph POSITION-FLAG WORD is DECLARED here. It is never inherited.
+#
+# Every planetary longitude this engine serves is the result of
+# ``swe.calc_ut(jd, body, flags)``. That third argument decides the REFERENCE
+# FRAME the number is expressed in -- geometric or apparent, with or without
+# gravitational deflection, with or without nutation, sidereal or tropical. It is
+# part of what the answer means, not a tuning knob.
+#
+# It used to be inherited from ``drik.PLANET_FLAGS``, which the astronomy library
+# builds at ITS import time from ``jhora.const.PLANET_POSITIONS_*`` module
+# globals. Measured 2026-07-31, this same repository on two dependency resolves:
+#
+#     frozen resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2)  PLANET_FLAGS = 66386
+#     one patch release later (pyjhora 4.8.7)              PLANET_FLAGS = 65810
+#
+# a difference of 576 = FLG_NOGDEFL (512) | FLG_NONUT (64), because 4.8.7 flipped
+# ``PLANET_POSITIONS_USE_DEFLECTION`` and ``PLANET_POSITIONS_USE_NUTATION`` from
+# False to True. No file here changed, and nothing in this repository went red.
+#
+# WHAT THE GOVERNING FLAGS ARE WORTH. Measured with the frozen resolve against
+# the real Swiss ephemeris data files, scanning 1800-01-01..2400-12-31 (the
+# supported birth-date span, app/schemas.py) at one-day steps -- 219511 days x 9
+# grahas:
+#
+#   FLG_TRUEPOS (geometric vs apparent)
+#       max 0.016817256 deg = 60.5421 arcsec, Mercury at 2353-06-16 00:00 UT.
+#       Per graha: Mercury 60.5421", Venus 44.7711", Mars 38.9693",
+#       Jupiter 30.0595", Saturn 27.2519", Sun 20.8489", Moon 0.7632",
+#       Rahu/Ketu 0.0146".
+#
+#   FLG_NOGDEFL + FLG_NONUT (the 576 that moved between the two resolves)
+#       max 0.000000000 deg = 0.000000 arcsec, every graha, all 219511 days.
+#
+# The second number is why this block exists. Under FLG_TRUEPOS swisseph ignores
+# deflection and aberration outright, and for a sidereal request it applies
+# FLG_NONUT of its own accord (a request of FLG_SWIEPH|FLG_SIDEREAL comes back
+# with retflag 65602, carrying an FLG_NONUT nobody asked for). So the library's
+# flag word moved and NO golden in this repository could have caught it -- the
+# served numbers were bit-identical. The 576 is inert, but inert CONDITIONALLY,
+# masked by another flag inherited from the same undeclared source: clear
+# FLG_TRUEPOS and FLG_NOGDEFL is worth 0.0711 arcsec and FLG_NOABERR 20.8557
+# arcsec (measured at century steps over the same span). Three coupled defaults,
+# one of which decides whether the other two matter, is not a frame anyone chose.
+#
+# WHY THIS FRAME. It is the frame the engine already served, so declaring it
+# moves no number any caller has been given -- deliberately, exactly as with the
+# lunar node model above. FLG_TRUEPOS (geometric, i.e. light-time and aberration
+# not applied) is the classical Vedic convention: BPHS positions are the graha's
+# true place on the ecliptic, and the ~60 arcsec of light-time and aberration
+# that separate it from the apparent place are an observational correction with
+# no BPHS meaning. Every limb of a chart -- nakshatra, pada, varga, dasha balance
+# -- is then derived from one consistent frame. FLG_SIDEREAL with the Lahiri
+# ayanamsa follows from the engine being sidereal at all; FLG_SPEED is required
+# because ``drik.planets_in_retrograde`` reads the sign of the returned daily
+# motion; FLG_NOGDEFL and FLG_NONUT are inert under FLG_TRUEPOS today and are
+# declared so that they cannot become live silently. FLG_TOPOCTR is deliberately
+# NOT taken: this service receives no observer altitude, and a topocentric frame
+# would make every position depend on one.
+#
+# THREE LEVERS, measured rather than read from documentation:
+#
+#   1. ``jhora.const.PLANET_POSITIONS_*`` -- five module globals, read by
+#      ``jhora.utils.set_flags_for_planet_positions()`` on every call. This is
+#      the INHERITED DEFAULT, and it is what moved between 4.8.6 and 4.8.7.
+#   2. ``drik.PLANET_FLAGS`` -- a MUTABLE module global built from (1) at drik's
+#      import time, i.e. before anything in this package has run. This is the
+#      word that actually SERVES: ``drik.sidereal_longitude``, ``drik.dhasavarga``
+#      (hence ``charts.rasi_chart``) and ``drik.planets_in_retrograde`` all read
+#      it at call time.
+#   3. ``jhora.const._TROPICAL_MODE`` -- when true, ``drik.sidereal_longitude``
+#      ignores ``PLANET_FLAGS`` entirely and computes with
+#      ``FLG_SWIEPH + FLG_SPEED``, i.e. tropical, ~24 deg away. A pinned word
+#      that is bypassed is not a pin.
+#
+# ``apply_position_flags`` below compares (1) against this declaration and
+# refuses to start on any disagreement, PINS (2) and reads it back, and verifies
+# (3). The comparison against (1) is the dependency-bump tripwire: pinning alone
+# would silently absorb a library that changed its mind, which is the failure
+# this block exists to end.
+#
+# SCOPE, stated rather than left to be discovered. This is the PLANETARY POSITION
+# word only. The ascendant and Bhava-Chalit cusps come from
+# ``swe.houses(jd_utc, lat, lon, b"P")`` in chart.py, which takes no flag word at
+# all; sunrise/sunset use pyjhora's separate ``drik.RISE_FLAGS`` /
+# ``drik.SET_FLAGS`` (measured 897 / 898, identical in 4.8.6 and 4.8.7, so they
+# have not moved -- but they are equally undeclared).
+#
+# Contract: tests/test_position_flags.py. Extend it, never weaken it. The
+# dependency that supplies all three levers is pinned to an exact version in
+# pyproject.toml for the same reason the lunar node model needs it to be.
+# ---------------------------------------------------------------------------
+POSITION_FLAGS = 66386
+
+# The same word, longhand. Kept alongside the literal rather than deriving one
+# from the other on purpose: the literal is the number a measurement can be
+# compared against without running anything, and the names are what make the
+# frame readable. ``apply_position_flags`` asserts they agree, which is what
+# would catch a swisseph release that renumbered a constant -- every name in
+# this file would still read correctly while the word they compose changed.
+POSITION_FLAG_COMPONENTS: dict[str, int] = {
+    "FLG_SWIEPH": swe.FLG_SWIEPH,        #     2  Swiss ephemeris data files
+    "FLG_SIDEREAL": swe.FLG_SIDEREAL,    # 65536  sidereal zodiac (Lahiri, set per thread)
+    "FLG_TRUEPOS": swe.FLG_TRUEPOS,      #    16  geometric, not apparent, position
+    "FLG_NONUT": swe.FLG_NONUT,          #    64  no nutation
+    "FLG_NOGDEFL": swe.FLG_NOGDEFL,      #   512  no gravitational deflection
+    "FLG_SPEED": swe.FLG_SPEED,          #   256  daily motion (retrogression needs it)
+}
+
+# Every distinct swisseph position flag, for rendering a word by name in an error
+# message. Aliases are excluded deliberately: FLG_DEFAULTEPH is FLG_SWIEPH and
+# FLG_ORBEL_AA is FLG_TOPOCTR, so including them would print one bit twice, and
+# composites (FLG_ASTROMETRIC = FLG_NOABERR|FLG_NOGDEFL) would print a bit that
+# is not a bit. Resolved with getattr so a swisseph that drops a name degrades to
+# reporting it as an unnamed bit rather than failing to import.
+_SWISSEPH_FLAG_NAMES = (
+    "FLG_JPLEPH", "FLG_SWIEPH", "FLG_MOSEPH", "FLG_HELCTR", "FLG_TRUEPOS",
+    "FLG_J2000", "FLG_NONUT", "FLG_SPEED3", "FLG_SPEED", "FLG_NOGDEFL",
+    "FLG_NOABERR", "FLG_EQUATORIAL", "FLG_XYZ", "FLG_RADIANS", "FLG_BARYCTR",
+    "FLG_TOPOCTR", "FLG_SIDEREAL", "FLG_ICRS", "FLG_JPLHOR", "FLG_JPLHOR_APPROX",
+    "FLG_CENTER_BODY",
+)
+
+
+def describe_position_flags(word: int) -> str:
+    """Render a swisseph flag word as ``<int> = NAME|NAME|...``.
+
+    Error messages about this word are read by someone deciding whether a
+    dependency bump is safe. "expected 66386, got 65810" sends them off to
+    decompose a bit field by hand; "dropped FLG_NOGDEFL|FLG_NONUT" tells them
+    what moved. Bits swisseph does not name are reported as hex rather than
+    dropped -- an unnamed bit is precisely the case where a silent renderer
+    would make a real difference invisible.
+    """
+    named = [
+        name
+        for name in _SWISSEPH_FLAG_NAMES
+        if (bit := getattr(swe, name, 0)) and word & bit == bit
+    ]
+    covered = 0
+    for name in named:
+        covered |= getattr(swe, name)
+    leftover = word & ~covered
+    rendered = "|".join(named) if named else "<no named flags>"
+    if leftover:
+        rendered += f"|<unnamed bits {hex(leftover)}>"
+    return f"{word} = {rendered}"
+
+
+def apply_position_flags() -> None:
+    """Pin the astronomy library to POSITION_FLAGS, or refuse to run.
+
+    Fail-closed throughout, and every step is read back after it is applied:
+    calling a setter is not evidence it took effect, and the cost of being wrong
+    is a reference frame nobody chose.
+
+    Idempotent, and cheap: it reads and writes module attributes and does not
+    touch the ephemeris.
+    """
+    # (0) the declaration must equal its own decomposition
+    composed = 0
+    for bit in POSITION_FLAG_COMPONENTS.values():
+        composed |= bit
+    if composed != POSITION_FLAGS:
+        raise RuntimeError(
+            f"the declared position-flag word {POSITION_FLAGS} does not equal the "
+            f"word its own named components compose ({composed}: "
+            f"{describe_position_flags(composed)}). Either the declaration and its "
+            "decomposition were edited apart, or a swisseph release renumbered one "
+            "of these constants -- in which case every name in bphs_core/utils.py "
+            "still reads correctly while the reference frame moved underneath it. "
+            "Refusing to serve positions in a frame this engine cannot name."
+        )
+
+    # (1) the library's own inherited word -- the dependency-bump tripwire
+    builder = getattr(jhora_utils, "set_flags_for_planet_positions", None)
+    if builder is None:
+        raise RuntimeError(
+            "the astronomy library no longer exposes "
+            "jhora.utils.set_flags_for_planet_positions, so this engine can no "
+            "longer tell which position-flag word the library would apply of its "
+            "own accord. Refusing to continue rather than inheriting it unseen: "
+            "that word decides whether every served longitude is geometric or "
+            "apparent (up to 60.54 arcsec) and sidereal or tropical (~24 deg). "
+            "Re-establish the declaration against the new library API in the same "
+            "change that moves the dependency pin."
+        )
+    inherited = builder()
+    if inherited != POSITION_FLAGS:
+        difference = inherited ^ POSITION_FLAGS
+        raise RuntimeError(
+            "the astronomy library's own position-flag word no longer matches this "
+            f"engine's declaration.\n"
+            f"    declared by this engine: {describe_position_flags(POSITION_FLAGS)}\n"
+            f"    built by the library:    {describe_position_flags(inherited)}\n"
+            f"    they differ by:          {describe_position_flags(difference)}\n"
+            "This is what a dependency bump looks like when it moves the reference "
+            "frame: pyjhora 4.8.6 built 66386 and 4.8.7 built 65810, with no change "
+            "in this repository and no golden able to see it. Refusing to start. "
+            "Either revert the bump, or -- if the new frame is wanted -- change "
+            "POSITION_FLAGS deliberately and re-record the Swiss goldens in the "
+            "same reviewed change."
+        )
+
+    # (2) drik's mutable serving global, built before this ran
+    drik.PLANET_FLAGS = POSITION_FLAGS
+    if drik.PLANET_FLAGS != POSITION_FLAGS:
+        raise RuntimeError(
+            "pinning the declared position-flag word did not take effect: asked for "
+            f"{describe_position_flags(POSITION_FLAGS)} but drik.PLANET_FLAGS now "
+            f"reports {describe_position_flags(drik.PLANET_FLAGS)}. That global is "
+            "what drik.sidereal_longitude, drik.dhasavarga and "
+            "drik.planets_in_retrograde read at call time, so every served position "
+            "would be in an undeclared frame."
+        )
+
+    # (3) the bypass lever this repo cannot set, only verify
+    if getattr(jhora_const, "_TROPICAL_MODE", False):
+        raise RuntimeError(
+            "jhora.const._TROPICAL_MODE is set, so drik.sidereal_longitude ignores "
+            "the pinned position-flag word entirely and computes with "
+            f"{describe_position_flags(swe.FLG_SWIEPH | swe.FLG_SPEED)} -- tropical "
+            "longitudes, roughly 24 degrees from the sidereal ones this engine "
+            "declares. Refusing to serve charts in a zodiac it does not declare."
+        )
+
+
+apply_position_flags()
 
 EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
 
