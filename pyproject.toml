@@ -19,7 +19,7 @@ dependencies = [
     # change in this repository. See bphs_core/utils.py (LUNAR_NODE_MODEL) and
     # tests/test_lunar_node_model.py; a bump belongs in its own reviewed change
     # that re-runs the Swiss goldens.
-    "pyjhora==4.8.6",
+    "pyjhora==4.8.7",
     "numpy>=1.23.0",
     # pyjhora undeclared runtime deps -- imported by jhora/utils.py at module
     # load; do not remove while pyjhora is a dependency.
