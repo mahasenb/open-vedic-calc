@@ -41,6 +41,13 @@ dev = [
     "pytest-cov>=5.0.0",
     "pyyaml>=6.0.0",
     "pip-audit>=2.7.0",
+    # ci/tests/test_environment_convergence.py parses uv.lock to compare the
+    # RESOLVED set against what is installed. stdlib tomllib arrives in 3.11
+    # and this project pins 3.10 (.python-version), so the parser has to be
+    # declared. It was already present transitively via pip-audit; relying on
+    # that would make this guard fail to collect the day that transitive
+    # changes, which is not a dependency relationship worth having implicit.
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 
 [tool.setuptools.packages.find]
