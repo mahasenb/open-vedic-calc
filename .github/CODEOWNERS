@@ -1,0 +1,42 @@
+# CODEOWNERS — the identity half of this repo's PR review gate.
+#
+# Branch protection on `main` requires one approving review AND
+# `require_code_owner_reviews = true`. That second flag is what makes the
+# approval have to come from the account named below, rather than from any
+# account with write access — including the account that authors changes here.
+#
+# Without this file, `require_code_owner_reviews = true` is a SILENT NO-OP, not
+# an error: no path has an owner, so the code-owner requirement is vacuously
+# satisfied on every PR and the gate reads "enforced" while enforcing exactly
+# nothing.
+#
+# ONE rule, ONE owner, deliberately — and "one owner" is the load-bearing half.
+# GitHub satisfies `require_code_owner_reviews` with an approval from ANY ONE
+# listed owner, so a second owner is not "the reviewer plus a spare": under it
+# that other account alone can approve and merge. A second owner does not add a
+# reviewer; it removes the requirement. The same goes for an owner written as an
+# e-mail address, which GitHub accepts as a principal just like an @handle.
+#
+# CODEOWNERS is also LAST-MATCH-WINS, so a later, narrower rule naming anyone
+# else would re-open the gate for exactly those paths while the line below still
+# reads correct.
+#
+# KEEP THE RULE LINE PURE ASCII. Invisible Unicode whitespace (U+00A0, U+0085,
+# U+2003, U+3000, ...) is erased by the trim functions the automated checks over
+# this file use, so a rule carrying it reads as clean to them — while GitHub,
+# whose parser may instead treat it as part of the path pattern or the owner
+# token, would see no global rule at all and leave every path unowned. This
+# comment block may contain anything, em dashes included, because comments are
+# stripped before that check runs.
+#
+# The account below holds `write` here, which is GitHub's prerequisite for a
+# code owner: a CODEOWNERS entry naming an account without write access is
+# ignored, which is the same silent no-op in a different costume.
+#
+# FAIL-CLOSED BY DESIGN: if that account cannot review, nothing merges here.
+# That is the intended posture, not an oversight. It also means the account must
+# never AUTHOR a PR in this repo — GitHub does not let anyone approve their own
+# PR, so a PR authored by the sole code owner could never satisfy its own
+# code-owner requirement.
+
+*       @mahasenb-reviewer
