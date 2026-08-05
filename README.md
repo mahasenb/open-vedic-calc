@@ -16,12 +16,21 @@ uv run --frozen uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 `--frozen` is not incidental, and neither is the interpreter. `uv.lock` forks at
 Python 3.11 — `numpy` resolves to 2.2.6 below it and 2.4.6 at or above,
-`timezonefinder` to 8.2.0 and 8.2.5 — and `numpy` is inside the served Shadbala
-and Ashtakavarga arithmetic. The Python you install on is therefore part of the
-answer this service gives, which is why `.python-version` exists and why the
-images, CI and the command above all read it. A floating `pip install -e .`
-resolves whatever is newest today instead, and is not the set these values were
-recorded against.
+`timezonefinder` to 8.2.0 and 8.2.5 — so "the locked set" does not name a single
+set of versions until the interpreter is fixed, and a base-image tag edit changes
+what installs while `pyproject.toml` and `uv.lock` stay byte-identical. That is
+why `.python-version` exists, and why the images, CI and the command above all
+read it instead of each naming a version of their own.
+
+Neither forking package is reached by the compute path as the code stands, which
+was measured rather than assumed — with the instrument proven live first, then
+counted across all eleven `/v1/*` endpoints and the full test suite: numpy is
+called exactly twice, both times at import, building one constant lookup table
+inside a dependency, and that table is byte-identical on both sides of the fork.
+So the pin is here to install the set these values were recorded against, not to
+guard numpy arithmetic. A floating `pip install -e .` resolves whatever is newest
+today instead — measured, that differed from the shipped image on 13 packages
+that actually ship.
 
 Developing on it? Add the test extras and run the suite the way CI runs it:
 

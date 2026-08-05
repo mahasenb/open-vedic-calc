@@ -45,9 +45,10 @@ jobs:
         with:
           # One declaration of the interpreter, shared with test.yml and both
           # Dockerfiles. uv.lock forks at python_full_version 3.11 (numpy
-          # 2.2.6/2.4.6, timezonefinder 8.2.0/8.2.5), and numpy is inside the
-          # served Shadbala/Ashtakavarga compute path — so which interpreter
-          # this job runs decides which numbers it certifies.
+          # 2.2.6/2.4.6, timezonefinder 8.2.0/8.2.5), so which interpreter this
+          # job runs decides which dependency SET it certifies — and this job
+          # is the one enforcing the coverage gate that authorises the image
+          # build below, so it above all must certify the set that image ships.
           python-version-file: .python-version
       # Install the FROZEN set, not a floating `pip install -e ".[dev]"`. This
       # job enforces the coverage gate that authorises the image build below,
