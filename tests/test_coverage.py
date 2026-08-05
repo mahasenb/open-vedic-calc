@@ -515,6 +515,13 @@ class TestMuhuratEndpoint:
         assert day["degraded"] is False
         # The 30 named, time-boxed muhurtas -- not merely a non-empty list,
         # which a single garbage entry would satisfy.
+        #
+        # The label assertion below is a WIRE-FIDELITY check only: it proves the
+        # labels survive serialization intact. It says nothing about whether the
+        # labels are on the right windows, because they are compared against the
+        # very constant they were assigned from. That positional identity -- our
+        # label i vs the library's own name for slot i -- is pinned in
+        # tests/test_muhurat_deep.py (_MUHURTA_POSITIONAL_SIGNATURE).
         assert len(day["all_muhurtas"]) == 30
         assert [w["label"] for w in day["all_muhurtas"]] == muhurat_mod._MUHURTA_NAMES
         for w in day["all_muhurtas"]:
