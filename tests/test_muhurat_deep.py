@@ -26,6 +26,7 @@ load-bearing because the served label is assigned by index
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` — the name the
 module actually looks up at call time.
 """
+import itertools
 import re
 from datetime import date
 
@@ -71,15 +72,24 @@ _HHMM = re.compile(r"[0-2]\d:[0-5]\d")
 #
 # The library's own NAMES carry that identity, and the flags cannot carry it
 # alone. Names are dict keys, so they are unique and EVERY transposition moves
-# the sequence: 29/29 adjacent, 435/435 overall. The flag column catches only
-# 11 of those 29 adjacent transpositions (37.9%) and 189 of the 435 (43.4%),
-# because 21 of the 30 flags are 1, ten of them consecutively at the tail — a
-# swap of two same-flag neighbours is invisible to it. Transposing index 1 and 2
-# happens to be caught (flags 0 and 1 differ), but transposing index 0 and 1 —
-# ``rudra``/``aahi``, both flag 0 — is not, and it mislabels two windows just as
-# thoroughly. The flag is kept as a SECOND, transliteration-independent
-# signature: it is the one column that moves when a key holds its position while
-# its auspiciousness value changes, which the name column cannot see.
+# the sequence: 29/29 adjacent, 435/435 overall. The flag column takes only two
+# values across the 30 positions, so most neighbouring pairs share one — and a
+# transposition of two SAME-FLAG neighbours is invisible to it. That is the
+# whole failure mode, and it costs the flag column most of its discrimination:
+# 11 of the 29 adjacent transpositions (37.9%), 189 of the 435 (43.4%).
+# Transposing index 1 and 2 happens to be caught (flags 0 and 1 differ), but
+# transposing index 0 and 1 — ``rudra``/``aahi``, both flag 0 — is not, and it
+# mislabels two windows just as thoroughly. The flag is kept as a SECOND,
+# transliteration-independent signature: it is the one column that moves when a
+# key holds its position while its auspiciousness value changes, which the name
+# column cannot see.
+#
+# Every count in the paragraph above is COMPUTED from this table by
+# ``TestSignatureColumnDiscrimination`` below and asserted there — cite what
+# that test computes, and never re-count the table by hand into prose. A
+# hand-counted run length stood in this very sentence, wrong, and was copied
+# into CLAUDE.md and the change description before anyone re-derived it; three
+# readers passed over it because re-reading a tally is not re-deriving it.
 #
 # Re-record only on a deliberate, reviewed dependency bump (pyjhora is pinned
 # ``==4.8.6``), and re-derive the label correspondence when you do — a blind
@@ -476,6 +486,77 @@ class TestMuhurthaLibraryShape:
             (library_name, flag)
             for _label, library_name, flag in _MUHURTA_POSITIONAL_SIGNATURE
         ]
+
+
+# A transposition of positions i and j moves a signature column if and only if
+# that column's values at i and j differ. So "how much does this column
+# discriminate" is exactly a count over index pairs — a computation, not a
+# tally to be read off the table by eye.
+_LIBRARY_NAMES = tuple(row[1] for row in _MUHURTA_POSITIONAL_SIGNATURE)
+_LIBRARY_FLAGS = tuple(row[2] for row in _MUHURTA_POSITIONAL_SIGNATURE)
+_ALL_PAIRS = tuple(itertools.combinations(range(len(_MUHURTA_POSITIONAL_SIGNATURE)), 2))
+_ADJACENT_PAIRS = tuple(
+    (i, i + 1) for i in range(len(_MUHURTA_POSITIONAL_SIGNATURE) - 1)
+)
+
+
+def _transpositions_detected_by(column, pairs):
+    """Those of ``pairs`` whose transposition would change ``column``."""
+    return tuple((i, j) for i, j in pairs if column[i] != column[j])
+
+
+class TestSignatureColumnDiscrimination:
+    """Why the NAMES carry positional identity and the FLAGS cannot alone.
+
+    Which column to pin is a measurable property of
+    ``_MUHURTA_POSITIONAL_SIGNATURE``, so it is measured here. Every
+    discrimination figure quoted in prose — this module's header comment and the
+    Determinism section of this repo's CLAUDE.md — is one of the numbers
+    asserted below, and prose should cite what this computes rather than count
+    the table again. It exists because a hand-counted statistic in exactly that
+    sentence was wrong, survived two review rounds, and had been copied into
+    three places by the time it was caught.
+    """
+
+    def test_the_pair_universe_is_what_the_percentages_divide_by(self):
+        assert len(_MUHURTA_POSITIONAL_SIGNATURE) == 30
+        assert len(_ADJACENT_PAIRS) == 29
+        assert len(_ALL_PAIRS) == 435
+
+    def test_names_are_unique_so_every_transposition_moves_them(self):
+        assert len(set(_LIBRARY_NAMES)) == len(_LIBRARY_NAMES)
+        assert len(_transpositions_detected_by(_LIBRARY_NAMES, _ADJACENT_PAIRS)) == 29
+        assert len(_transpositions_detected_by(_LIBRARY_NAMES, _ALL_PAIRS)) == 435
+
+    def test_flags_take_two_values_so_most_neighbours_share_one(self):
+        """The failure mode is same-flag neighbours; it is the majority case."""
+        assert set(_LIBRARY_FLAGS) == {0, 1}
+        detected = _transpositions_detected_by(_LIBRARY_FLAGS, _ADJACENT_PAIRS)
+        blind = len(_ADJACENT_PAIRS) - len(detected)
+        # "most neighbouring pairs share a flag" — the property the prose states.
+        assert blind > len(_ADJACENT_PAIRS) / 2
+        assert blind == 18
+        assert len(detected) == 11  # 37.9% of 29
+        assert len(_transpositions_detected_by(_LIBRARY_FLAGS, _ALL_PAIRS)) == 189  # 43.4%
+
+    def test_the_worked_examples_in_the_prose_are_the_measured_ones(self):
+        """``rudra``/``aahi`` is invisible to the flags; ``aahi``/``mithra`` is not.
+
+        One sampled pair is why a flags-only pin looks sufficient: the pair that
+        first came up happens to straddle a flag change. Its left-hand neighbour
+        does not, and mislabels two windows just as thoroughly.
+        """
+        flag_blind = set(_ADJACENT_PAIRS) - set(
+            _transpositions_detected_by(_LIBRARY_FLAGS, _ADJACENT_PAIRS)
+        )
+        assert _LIBRARY_NAMES[0:2] == ("rudra", "aahi")
+        assert _LIBRARY_FLAGS[0] == _LIBRARY_FLAGS[1]
+        assert (0, 1) in flag_blind
+        assert (0, 1) in _transpositions_detected_by(_LIBRARY_NAMES, _ADJACENT_PAIRS)
+
+        assert _LIBRARY_NAMES[1:3] == ("aahi", "mithra")
+        assert _LIBRARY_FLAGS[1] != _LIBRARY_FLAGS[2]
+        assert (1, 2) not in flag_blind
 
 
 class TestAllMuhurtas:
