@@ -64,6 +64,41 @@ _MUHURTA_NAMES = [
 ]
 
 
+# The contracted shape of one ``drik.muhurthas`` entry. Element 1 is the
+# library's own auspicious flag (0 = inauspicious, 1 = auspicious); it is
+# validated but not currently served — ``TimeWindow`` (app/schemas.py) carries
+# no such field, and adding one is a wire-contract change, not a parse fix.
+_MUHURTHA_ENTRY_SHAPE = "(name, auspicious_flag, (start_hours, end_hours))"
+
+
+def _muhurtha_bounds(entry: object) -> tuple[float, float]:
+    """The ``(start_hours, end_hours)`` pair of one ``drik.muhurthas`` entry.
+
+    Boundaries are float hours from midnight of the local date and legitimately
+    exceed 24 for the night muhurtas that fall after it; the caller renders them
+    through :func:`float_hours_to_hhmm`, which wraps to wall clock as it does for
+    every other window in this module.
+
+    Raises TypeError on anything that does not match the contracted shape. This
+    is deliberate: a muhurta table that cannot be read must not be served as an
+    empty one, because an empty list is indistinguishable from a real result.
+    """
+    if (
+        not isinstance(entry, tuple)
+        or len(entry) != 3
+        or not isinstance(entry[0], str)
+        or not isinstance(entry[1], int)
+        or not isinstance(entry[2], tuple)
+        or len(entry[2]) != 2
+        or not all(isinstance(b, float) for b in entry[2])
+    ):
+        raise TypeError(
+            f"muhurtha entry does not match the contracted shape "
+            f"{_MUHURTHA_ENTRY_SHAPE}: {entry!r}"
+        )
+    return entry[2]
+
+
 def float_hours_to_hhmm(fh: float) -> str:
     fh = fh % 24
     h = int(fh)
@@ -473,18 +508,45 @@ def compute_muhurat_for_day(
             "chandra_bala": chandra_str
         }
 
-    # 10. All 30 muhurtas
+    # 10. All 30 muhurtas.
+    #
+    # The guard covers ONLY the library call, which has a legitimate
+    # environmental failure mode: the division is derived from sunrise/sunset,
+    # and those genuinely fail at extreme latitudes. That failure drops the limb
+    # and marks the day degraded — an empty list a consumer cannot tell apart
+    # from "this day has no muhurtas" is not an acceptable answer on its own.
+    #
+    # Parsing sits in the `else` block, OUTSIDE the guard, and is strict: an
+    # entry that does not match the contracted shape, or a count other than the
+    # 30-fold classical division, is a library-contract break rather than
+    # weather, and must surface. The predecessor sniffed
+    # `isinstance(entry, tuple) and len(entry) >= 2` and read `entry[0]` as a
+    # float hour; the real entry is a 3-tuple whose element 0 is the name, so
+    # every iteration raised TypeError inside float_hours_to_hhmm, the bare
+    # `except Exception` logged it, and the endpoint served `[]` behind HTTP 200
+    # with `degraded` still False.
     all_muhur = []
     try:
         m30 = drik.muhurthas(jd, place)
-        # m30 returns list of 30 tuples: (name, start_h, end_h) or float hours
-        for idx, m_time in enumerate(m30):
-            # sometimes m30 is list of tuples or float values
-            name = _MUHURTA_NAMES[idx % 30]
-            if isinstance(m_time, tuple) and len(m_time) >= 2:
-                all_muhur.append({"start": float_hours_to_hhmm(m_time[0]), "end": float_hours_to_hhmm(m_time[1]), "label": name})
     except Exception:
         logger.warning("muhurat_muhurthas_failed", exc_info=True)
+        degraded = True
+    else:
+        if len(m30) != len(_MUHURTA_NAMES):
+            raise ValueError(
+                f"muhurthas returned {len(m30)} entries, expected "
+                f"{len(_MUHURTA_NAMES)} (the 15 day + 15 night division)"
+            )
+        # Labels are positional: the library's own key order is the classical
+        # sequence, so entry i IS _MUHURTA_NAMES[i] (its transliteration differs,
+        # e.g. 'aahi' for 'Ahi', which is why the repo's spelling is kept).
+        for name, entry in zip(_MUHURTA_NAMES, m30):
+            start_h, end_h = _muhurtha_bounds(entry)
+            all_muhur.append({
+                "start": float_hours_to_hhmm(start_h),
+                "end": float_hours_to_hhmm(end_h),
+                "label": name,
+            })
 
     return {
         "date": target_date.strftime("%Y-%m-%d"),

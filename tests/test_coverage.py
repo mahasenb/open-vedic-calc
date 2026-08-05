@@ -74,6 +74,7 @@ main.py – /v1/compat
   ✓ 401 on bad token (covered by test_endpoints)
 """
 import os
+import re
 import sys
 import importlib
 import pytest
@@ -84,6 +85,7 @@ os.environ["CALC_SERVICE_TOKEN"] = "test"
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
 from app.main import app  # noqa: E402
+from bphs_core import muhurat as muhurat_mod  # noqa: E402
 from tests.conftest import SAMPLE_A, SAMPLE_B  # noqa: E402
 
 AUTH_HDR = {"X-Calc-Service-Token": "test"}
@@ -497,6 +499,30 @@ class TestMuhuratEndpoint:
         body = r.json()
         assert len(body["days"]) == 1
         assert body["days"][0]["date"] == "2026-06-01"
+
+    def test_muhurat_day_body_is_populated_not_merely_200(self):
+        """200 is not evidence that the day was computed.
+
+        Every other assertion on this endpoint stops at the status code and the
+        ``days`` count — both shared observables that hold just as well when a
+        limb silently serves nothing behind a 200. This asserts the STRUCTURED
+        result as it reaches the wire: the 30-fold muhurta division is actually
+        present, and the day is not flagged degraded.
+        """
+        r = client.post("/v1/muhurat", json=self._req())
+        assert r.status_code == 200
+        day = r.json()["days"][0]
+        assert day["degraded"] is False
+        # The 30 named, time-boxed muhurtas -- not merely a non-empty list,
+        # which a single garbage entry would satisfy.
+        assert len(day["all_muhurtas"]) == 30
+        assert [w["label"] for w in day["all_muhurtas"]] == muhurat_mod._MUHURTA_NAMES
+        for w in day["all_muhurtas"]:
+            assert re.fullmatch(r"[0-2]\d:[0-5]\d", w["start"]), w
+            assert re.fullmatch(r"[0-2]\d:[0-5]\d", w["end"]), w
+        # Contiguous cover: each window ends exactly where the next one opens.
+        for i in range(29):
+            assert day["all_muhurtas"][i]["end"] == day["all_muhurtas"][i + 1]["start"]
 
 
 # ===========================================================================
