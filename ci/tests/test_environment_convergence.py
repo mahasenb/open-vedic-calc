@@ -436,10 +436,17 @@ def test_every_workflow_job_that_runs_the_suite_installs_from_the_frozen_lock() 
                 "the frozen lock (`uv sync --frozen` / `uv run --frozen`)"
             )
 
+        # `--editable` is pip's long form of `-e` and was NOT matched by the
+        # original `(-e\s+)?`: measured, a step running
+        # `pip install --editable .` alongside a frozen install left this
+        # assertion green. Defence in depth — the installs_frozen arm above and
+        # the live lock-conformance test in this file both cover that case in
+        # more depth — but a floating install should be named by the check that
+        # exists to name floating installs.
         floating = [
             command
             for command in commands
-            if re.search(r"pip\s+install\s+(-e\s+)?[\"']?\.", command)
+            if re.search(r"pip\s+install\s+(?:(?:-e|--editable)\s+)?[\"']?\.", command)
         ]
         if floating:
             failures.append(
@@ -462,6 +469,24 @@ def test_every_workflow_job_that_runs_the_suite_installs_from_the_frozen_lock() 
                     f"{_PYTHON_VERSION_FILE.name}. A second declaration of the "
                     "interpreter is a second chance to straddle uv.lock's 3.11 "
                     "fork."
+                )
+                continue
+            # Presence is not the property that matters — the VALUE is.
+            # Measured: pointing this key at any other filename left the check
+            # green while the job resolved its interpreter from a file this
+            # repository does not maintain, which is the same divergence under
+            # a different name.
+            declared = str(options["python-version-file"]).strip().replace("\\", "/")
+            if declared.startswith("./"):
+                declared = declared[2:]
+            if declared != _PYTHON_VERSION_FILE.name:
+                failures.append(
+                    f"{workflow}:{job_name} reads its interpreter from "
+                    f"{options['python-version-file']!r}, not "
+                    f"{_PYTHON_VERSION_FILE.name}. There is exactly one file "
+                    "that declares the interpreter here; a job reading a "
+                    "different one is a second declaration wearing the right "
+                    "key's name."
                 )
 
     assert not failures, "\n  ".join(["", *failures])
