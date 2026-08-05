@@ -540,6 +540,26 @@ def compute_muhurat_for_day(
         # Labels are positional: the library's own key order is the classical
         # sequence, so entry i IS _MUHURTA_NAMES[i] (its transliteration differs,
         # e.g. 'aahi' for 'Ahi', which is why the repo's spelling is kept).
+        #
+        # entry[0] -- the library's own name for this window -- is therefore
+        # DISCARDED here rather than compared, and that is a decision, not an
+        # oversight. Comparing it in the served path would need a pinned table of
+        # the library's transliterations, and a benign upstream RESPELLING
+        # ('kanda' -> 'chanda') would then 500 every request even though a
+        # respelling cannot move a single window. What DOES move windows is a
+        # REORDER, and the served path cannot tell the two apart without exactly
+        # that table. So the order is held where a break is cheap and legible
+        # instead: tests/test_muhurat_deep.py pins the library's (name, flag)
+        # sequence index by index against _MUHURTA_POSITIONAL_SIGNATURE, together
+        # with the label each slot must serve under. That gate is sufficient
+        # because the dependency is an exact pin (pyjhora==4.8.6, installed
+        # --frozen), so a reorder can only ever arrive through a deliberate,
+        # reviewed bump -- and the pin turns that bump red before it ships.
+        #
+        # Measured 2026-08-05, with nothing pinning the order: transposing two
+        # adjacent keys upstream served two windows under each other's names with
+        # degraded=False, every entry still matching the contracted shape and the
+        # count still 30. Neither check above can see a reorder.
         for name, entry in zip(_MUHURTA_NAMES, m30):
             start_h, end_h = _muhurtha_bounds(entry)
             all_muhur.append({

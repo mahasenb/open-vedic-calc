@@ -18,7 +18,10 @@ the endpoint-level tests in ``test_coverage.py`` never reach:
 Monkeypatching ``drik`` is used to simulate FAILURE, never to invent a success
 shape: a fabricated return validates the parser against a fiction. Where a test
 needs real library output it calls the library, and ``TestMuhurthaLibraryShape``
-pins that shape so a dependency bump that moves it fails loudly here.
+pins that output positionally — both the per-entry shape and the ORDER of the 30
+entries — so a dependency bump that moves either fails loudly here. The order is
+load-bearing because the served label is assigned by index
+(``_MUHURTA_NAMES[i]``) and the library's own name for slot ``i`` is discarded.
 
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` — the name the
 module actually looks up at call time.
@@ -43,6 +46,76 @@ TARGET = date(2026, 5, 26)
 _JD_LOCAL_NOON = swe.julday(TARGET.year, TARGET.month, TARGET.day, 12.0)
 
 _HHMM = re.compile(r"[0-2]\d:[0-5]\d")
+
+
+# The POSITIONAL signature of the 30-fold division, index by index:
+#
+#     (label this repo serves, the library's own key, the library's flag)
+#
+# Why this table exists. ``drik.muhurthas`` builds its list, in effect, as
+# ``[(key, flag[key], slot[i]) for i, key in enumerate(const.muhurthas_of_the_day)]``
+# — the time slots are derived from the index, the names come from the dict's
+# insertion order. ``bphs_core.muhurat`` then discards ``entry[0]`` and labels
+# slot *i* with ``_MUHURTA_NAMES[i]``. So the served label is only correct while
+# the library's key order is exactly this one, and NOTHING in the served output
+# reveals a drift: comparing the served labels to ``_MUHURTA_NAMES`` is
+# tautological, because that is where they were copied from. Measured
+# 2026-08-05: transposing the keys at index 1 and 2 of
+# ``const.muhurthas_of_the_day`` served window 1 as "Ahi" where the library
+# called it ``mithra`` and window 2 as "Mitra" where the library called it
+# ``aahi``, with ``degraded: False`` — and the 82 tests then covering this limb
+# (this file plus test_panchanga_fail_closed.py) all stayed green.
+#
+# This is the same defect class as the two planet-id spaces (repo CLAUDE.md,
+# Engine conventions): positional identity carried across a library boundary.
+#
+# The library's own NAMES carry that identity, and the flags cannot carry it
+# alone. Names are dict keys, so they are unique and EVERY transposition moves
+# the sequence: 29/29 adjacent, 435/435 overall. The flag column catches only
+# 11 of those 29 adjacent transpositions (37.9%) and 189 of the 435 (43.4%),
+# because 21 of the 30 flags are 1, ten of them consecutively at the tail — a
+# swap of two same-flag neighbours is invisible to it. Transposing index 1 and 2
+# happens to be caught (flags 0 and 1 differ), but transposing index 0 and 1 —
+# ``rudra``/``aahi``, both flag 0 — is not, and it mislabels two windows just as
+# thoroughly. The flag is kept as a SECOND, transliteration-independent
+# signature: it is the one column that moves when a key holds its position while
+# its auspiciousness value changes, which the name column cannot see.
+#
+# Re-record only on a deliberate, reviewed dependency bump (pyjhora is pinned
+# ``==4.8.6``), and re-derive the label correspondence when you do — a blind
+# re-record would launder exactly the reorder this pins.
+_MUHURTA_POSITIONAL_SIGNATURE = (
+    ("Rudra",       "rudra",           0),
+    ("Ahi",         "aahi",            0),
+    ("Mitra",       "mithra",          1),
+    ("Pitri",       "pithra",          0),
+    ("Vasu",        "vasu",            1),
+    ("Vara",        "varaaha",         1),
+    ("Vishwadeva",  "vishvedeva",      1),
+    ("Vidhi",       "vidhi",           1),
+    ("Sathamukhi",  "sathamukhi",      1),
+    ("Puruhuta",    "puruhootha",      0),
+    ("Vahni",       "vaahini",         0),
+    ("Naktanchara", "nakthanakaara",   0),
+    ("Varuna",      "varuna",          1),
+    ("Aryaman",     "aaryaman",        1),
+    ("Bhaga",       "bhaga",           0),
+    ("Girish",      "girisha",         1),
+    ("Ajapad",      "ajapaadha",       0),
+    ("Ahirbudhnya", "aahirbhudhnya",   1),
+    ("Pusa",        "pushya",          1),
+    ("Ashwini",     "ashvini",         1),
+    ("Yama",        "yama",            0),
+    ("Agni",        "agni",            1),
+    ("Vidhatri",    "vidharth",        1),
+    ("Chanda",      "kanda",           1),
+    ("Aditi",       "adhithi",         1),
+    ("Jiva",        "jeeva",           1),
+    ("Visnu",       "vishnu",          1),
+    ("Dyumani",     "dhyumadadhyuthi", 1),
+    ("Brahma",      "brahma",          1),
+    ("Samudra",     "samudhra",        1),
+)
 
 
 # Reading the C library from a test is a compute path like any other: it must
@@ -348,13 +421,21 @@ class TestPersonalBalamFallbacks:
 
 
 class TestMuhurthaLibraryShape:
-    """Pin the REAL ``drik.muhurthas`` wire shape.
+    """Pin the REAL ``drik.muhurthas`` output — per-entry shape AND entry order.
 
     These assertions run against the library itself — no monkeypatch — because
-    the served field is only as correct as this shape. The predecessor of this
+    the served field is only as correct as this output. The predecessor of this
     class fabricated ``(6.0, 6.8)`` 2-tuples that the library has never
     returned, so the parser was validated against a fiction and the real shape
     was never exercised at all.
+
+    "Shape" alone is not the contract. ``bphs_core.muhurat`` labels slot *i*
+    with ``_MUHURTA_NAMES[i]`` and discards the library's own name, so the
+    entry ORDER is load-bearing and a reorder mislabels windows silently — it
+    breaks no shape check, raises nothing, and leaves ``degraded`` False. The
+    order is therefore pinned explicitly, against
+    ``_MUHURTA_POSITIONAL_SIGNATURE``; per-entry shape checks and this sequence
+    pin are separate tests so a failure says which one moved.
     """
 
     def test_entry_shape_is_name_flag_bounds(self):
@@ -382,6 +463,20 @@ class TestMuhurthaLibraryShape:
         # The 30 windows span one whole day.
         assert bounds[-1][1] - bounds[0][0] == pytest.approx(24.0, abs=0.01)
 
+    def test_entry_sequence_is_pinned_position_by_position(self):
+        """The library's own ``(name, flag)`` sequence, pinned index by index.
+
+        This is what makes positional labelling sound. A reorder upstream
+        changes nothing a shape check can see: every entry still matches the
+        contracted 3-tuple, the count is still 30, the windows still tile the
+        day contiguously — only the names have moved across fixed time slots.
+        """
+        entries = _library_muhurthas()
+        assert [(e[0], e[1]) for e in entries] == [
+            (library_name, flag)
+            for _label, library_name, flag in _MUHURTA_POSITIONAL_SIGNATURE
+        ]
+
 
 class TestAllMuhurtas:
     """The SERVED ``all_muhurtas`` field, driven by the real library."""
@@ -393,6 +488,25 @@ class TestAllMuhurtas:
         assert len(served) == 30
         assert [w["label"] for w in served] == m._MUHURTA_NAMES
         assert out["degraded"] is False
+
+    def test_each_served_label_names_the_library_slot_it_is_attached_to(self):
+        """The end-to-end statement the tautological assertions cannot make.
+
+        ``[w["label"] for w in served] == m._MUHURTA_NAMES`` is true by
+        construction — the labels are copied from that list — so it holds just
+        as well when every window is serving under a neighbour's name. What
+        must actually hold is that served label *i* is this repo's
+        transliteration of the muhurta the LIBRARY put in slot *i*; that pairing
+        is fixed by ``_MUHURTA_POSITIONAL_SIGNATURE`` and asserted here against
+        the unpatched library.
+        """
+        served = m.compute_muhurat_for_day(PLACE, TARGET)["all_muhurtas"]
+        entries = _library_muhurthas()
+        assert len(served) == len(entries) == len(_MUHURTA_POSITIONAL_SIGNATURE)
+        assert [(w["label"], e[0]) for w, e in zip(served, entries)] == [
+            (label, library_name)
+            for label, library_name, _flag in _MUHURTA_POSITIONAL_SIGNATURE
+        ]
 
     def test_served_windows_carry_wall_clock_boundaries(self):
         """Every boundary is HH:MM, and the windows chain end -> next start."""
