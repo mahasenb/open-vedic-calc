@@ -43,8 +43,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
-      - run: pip install -e ".[dev]"
+          # One declaration of the interpreter, shared with test.yml and both
+          # Dockerfiles. uv.lock forks at python_full_version 3.11 (numpy
+          # 2.2.6/2.4.6, timezonefinder 8.2.0/8.2.5), and numpy is inside the
+          # served Shadbala/Ashtakavarga compute path — so which interpreter
+          # this job runs decides which numbers it certifies.
+          python-version-file: .python-version
+      # Install the FROZEN set, not a floating `pip install -e ".[dev]"`. This
+      # job enforces the coverage gate that authorises the image build below,
+      # so it of all jobs must be running the dependency set that image ships.
+      - run: |
+          python -m pip install --upgrade uv
+          uv sync --frozen --extra dev
       # This job runs with the Moshier fallback (no Swiss ephemeris data files here);
       # line coverage is identical to a Swiss run — only numeric values differ, and
       # tests/test_swiss_ephemeris.py skips. It is NOT the accuracy gate: real Swiss
@@ -52,13 +62,15 @@ jobs:
       # the checksum-pinned data files and re-runs this same suite with
       # REQUIRE_SWISS_EPHEMERIS=1 so those tests hard-fail instead of skipping.
       # --cov enforces fail_under from pyproject [tool.coverage.report] (92).
-      - run: pytest tests/ --cov --cov-report=term-missing
+      # `uv run --frozen pytest` keeps the console-script form the bare
+      # `pytest` invocation had (no CWD on sys.path), which ci/tests/ relies on.
+      - run: uv run --frozen pytest tests/ --cov --cov-report=term-missing
       # ci/tests/ lives outside the tests/ tree by design (it tests the CI
       # gate script itself, not the calc engine) — pytest tests/ never
       # collects it. Without this step, a future edit that weakens
       # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green
       # right up through the image build/publish path.
-      - run: pytest ci/tests/ -q
+      - run: uv run --frozen pytest ci/tests/ -q
 
   publish:
     needs: test

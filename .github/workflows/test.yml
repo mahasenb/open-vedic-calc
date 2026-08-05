@@ -54,31 +54,48 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
-      - name: Install
+          # Read from .python-version, never inline. uv.lock FORKS at
+          # python_full_version 3.11 (numpy 2.2.6/2.4.6, timezonefinder
+          # 8.2.0/8.2.5), so the interpreter is what collapses the lock to a
+          # single resolve — a second declaration of it is a second chance to
+          # test one side of that fork while shipping the other.
+          python-version-file: .python-version
+      - name: Install the FROZEN dependency set
+        # `uv sync --frozen`, not `pip install -e ".[dev]"`. The old floating
+        # install ignored uv.lock entirely and resolved whatever was newest at
+        # run time: measured 2026-08-05 it differed from the shipped image on
+        # 13 packages that actually ship (fastapi 0.141.1 vs 0.136.3, uvicorn
+        # 0.52.1 vs 0.48.0, anyio, certifi, cffi, charset-normalizer, click,
+        # idna, pytz, typing-extensions, websockets, annotated-types,
+        # annotated-doc). The suite that gates every merge was certifying a
+        # dependency set no deployment ever ran.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install --upgrade uv
+          uv sync --frozen --extra dev
       - name: Run tests
         # Scheduled (weekly CVE-only) runs skip pytest — nothing about the code
         # changed, only the vulnerability database might have.
+        #
+        # `uv run --frozen pytest …` keeps the console-script form: the bare
+        # `pytest` entry point does NOT put the CWD on sys.path, which is what
+        # makes `from ci import …` fail in ci/tests/ and why those tests load
+        # repo files by path. `python -m pytest` would quietly change that.
         if: github.event_name != 'schedule'
-        run: pytest tests/ -q
+        run: uv run --frozen pytest tests/ -q
       - name: Run CI gate regression suite
         # ci/tests/ lives outside the tests/ tree by design (it tests the CI
         # gate script itself, not the calc engine) — pytest tests/ never
         # collects it. Without this step, a future edit that weakens
         # _FORBIDDEN in ci/check_no_proprietary_refs.py would pass CI green.
         if: github.event_name != 'schedule'
-        run: pytest ci/tests/ -q
+        run: uv run --frozen pytest ci/tests/ -q
       - name: Dependency vulnerability scan (pip-audit against the frozen lock)
         # Audits the EXACT production dependency set that ships in the image
-        # (uv sync --frozen from uv.lock), not the floating pip-resolved dev env
-        # installed above — so the scan matches what actually runs in production.
+        # (uv sync --frozen from uv.lock) — which, since the install step above
+        # is itself frozen, is now also the set this job just tested.
         run: |
-          python -m pip install --upgrade uv
           uv export --frozen --no-dev --no-emit-project -o requirements.frozen.txt
-          pip-audit --requirement requirements.frozen.txt
+          uv run --frozen pip-audit --requirement requirements.frozen.txt
 
   swiss-ephemeris:
     name: Accuracy against real Swiss ephemeris data
@@ -106,7 +123,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          # Same single declaration as the `test` job above — the committed
+          # golden values are only reproducible on one side of uv.lock's 3.11
+          # fork, so the accuracy job must not be free to pick the other.
+          python-version-file: .python-version
 
       # Cache keyed on the manifest, so changing a pinned checksum (or adding a
       # file) invalidates it — a stale cache can never satisfy a new pin. The

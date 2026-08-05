@@ -10,8 +10,25 @@ dasha periods, yogas, transits, and special points from birth data.
 ## Self-hosting
 
 ```bash
-pip install -e .
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv sync --frozen        # the exact set in uv.lock, on the interpreter in .python-version
+uv run --frozen uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+`--frozen` is not incidental, and neither is the interpreter. `uv.lock` forks at
+Python 3.11 — `numpy` resolves to 2.2.6 below it and 2.4.6 at or above,
+`timezonefinder` to 8.2.0 and 8.2.5 — and `numpy` is inside the served Shadbala
+and Ashtakavarga arithmetic. The Python you install on is therefore part of the
+answer this service gives, which is why `.python-version` exists and why the
+images, CI and the command above all read it. A floating `pip install -e .`
+resolves whatever is newest today instead, and is not the set these values were
+recorded against.
+
+Developing on it? Add the test extras and run the suite the way CI runs it:
+
+```bash
+uv sync --frozen --extra dev
+uv run --frozen pytest tests/ -q
+uv run --frozen pytest ci/tests/ -q
 ```
 
 Set the following environment variables:
