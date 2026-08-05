@@ -11,14 +11,23 @@ the endpoint-level tests in ``test_coverage.py`` never reach:
     Moon supplied" skip and the two failure fallbacks;
   * the ``get_karana_name`` fixed-karana table, the ``get_tithi_name`` Krishna
     branch, and the ``float_hours_to_hhmm`` minute-rounding carry;
-  * the ``muhurthas`` list iteration with mixed tuple / non-tuple entries.
+  * the 30-muhurta limb, against the REAL ``drik.muhurthas`` — its wire shape,
+    the served windows, and the two failure modes (environmental → visibly
+    degraded; contract break → raises).
+
+Monkeypatching ``drik`` is used to simulate FAILURE, never to invent a success
+shape: a fabricated return validates the parser against a fiction. Where a test
+needs real library output it calls the library, and ``TestMuhurthaLibraryShape``
+pins that shape so a dependency bump that moves it fails loudly here.
 
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` — the name the
 module actually looks up at call time.
 """
+import re
 from datetime import date
 
 import pytest
+import swisseph as swe
 
 from bphs_core import muhurat as m
 from bphs_core import utils
@@ -26,6 +35,31 @@ from bphs_core import utils
 
 PLACE = utils.make_place("Sample City", 7.0, 80.0, 5.5)
 TARGET = date(2026, 5, 26)
+
+# The LOCAL-noon JD compute_muhurat_for_day builds for its pyjhora event calls
+# (muhurat.py step 1). Tests that read the library directly must use the same
+# transport, never a tz-pre-subtracted one — see the Julian Day discipline note
+# in bphs_core/chart.py.
+_JD_LOCAL_NOON = swe.julday(TARGET.year, TARGET.month, TARGET.day, 12.0)
+
+_HHMM = re.compile(r"[0-2]\d:[0-5]\d")
+
+
+# Reading the C library from a test is a compute path like any other: it must
+# hold the ephemeris lock and carry the per-thread path/ayanamsa state, or it
+# can answer from the Moshier fallback while the code under test answers from
+# Swiss — and the two disagree by more than the assertions' tolerance.
+@utils.serialized_ephemeris
+def _library_muhurthas():
+    return m.drik.muhurthas(_JD_LOCAL_NOON, PLACE)
+
+
+@utils.serialized_ephemeris
+def _library_sunrise_sunset_hours():
+    return (
+        m.drik.sunrise(_JD_LOCAL_NOON, PLACE)[0],
+        m.drik.sunset(_JD_LOCAL_NOON, PLACE)[0],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,35 +347,124 @@ class TestPersonalBalamFallbacks:
         assert out["personal_balam"]["chandra_bala"] == expected
 
 
+class TestMuhurthaLibraryShape:
+    """Pin the REAL ``drik.muhurthas`` wire shape.
+
+    These assertions run against the library itself — no monkeypatch — because
+    the served field is only as correct as this shape. The predecessor of this
+    class fabricated ``(6.0, 6.8)`` 2-tuples that the library has never
+    returned, so the parser was validated against a fiction and the real shape
+    was never exercised at all.
+    """
+
+    def test_entry_shape_is_name_flag_bounds(self):
+        entries = _library_muhurthas()
+        assert len(entries) == 30
+        for entry in entries:
+            assert isinstance(entry, tuple), entry
+            assert len(entry) == 3, entry
+            name, flag, bounds = entry
+            assert isinstance(name, str) and name, entry
+            assert flag in (0, 1), entry
+            assert isinstance(bounds, tuple) and len(bounds) == 2, entry
+            assert all(isinstance(b, float) for b in bounds), entry
+
+    def test_thirty_windows_partition_a_whole_day_from_sunrise(self):
+        """15 day + 15 night muhurtas tile sunrise..next sunrise contiguously."""
+        bounds = [e[2] for e in _library_muhurthas()]
+        sunrise_h, sunset_h = _library_sunrise_sunset_hours()
+        # Entry 0 opens at sunrise; entry 15 opens at sunset.
+        assert bounds[0][0] == pytest.approx(sunrise_h, abs=1e-9)
+        assert bounds[15][0] == pytest.approx(sunset_h, abs=1e-9)
+        # Contiguous: each window ends exactly where the next begins.
+        for i in range(29):
+            assert bounds[i][1] == pytest.approx(bounds[i + 1][0], abs=1e-9)
+        # The 30 windows span one whole day.
+        assert bounds[-1][1] - bounds[0][0] == pytest.approx(24.0, abs=0.01)
+
+
 class TestAllMuhurtas:
-    def test_muhurthas_failure(self, monkeypatch):
+    """The SERVED ``all_muhurtas`` field, driven by the real library."""
+
+    def test_all_thirty_muhurtas_are_served(self):
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        served = out["all_muhurtas"]
+        # Not merely non-empty: exactly the 30 named muhurtas, in order.
+        assert len(served) == 30
+        assert [w["label"] for w in served] == m._MUHURTA_NAMES
+        assert out["degraded"] is False
+
+    def test_served_windows_carry_wall_clock_boundaries(self):
+        """Every boundary is HH:MM, and the windows chain end -> next start."""
+        served = m.compute_muhurat_for_day(PLACE, TARGET)["all_muhurtas"]
+        for w in served:
+            assert _HHMM.fullmatch(w["start"]), w
+            assert _HHMM.fullmatch(w["end"]), w
+        for i in range(29):
+            assert served[i]["end"] == served[i + 1]["start"]
+
+    def test_first_muhurta_opens_at_sunrise_and_sixteenth_at_sunset(self):
+        """The served boundaries are the library's own sunrise/sunset division.
+
+        Anchors the served strings to independently computed values rather than
+        to constants, so the assertion holds under both ephemeris runtimes.
+        """
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        served = out["all_muhurtas"]
+        sunrise_h, sunset_h = _library_sunrise_sunset_hours()
+        assert served[0]["start"] == m.float_hours_to_hhmm(sunrise_h)
+        assert served[0]["label"] == "Rudra"
+        assert served[15]["start"] == m.float_hours_to_hhmm(sunset_h)
+        assert served[15]["label"] == "Girish"
+
+    def test_post_midnight_night_muhurtas_wrap_to_wall_clock(self):
+        """Night boundaries legitimately exceed 24h; they render as wall clock.
+
+        The final muhurta closes at the next sunrise, so its rendered end must
+        equal the rendering of that > 24h float — not a truncated 23:59.
+        """
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        last_end_h = _library_muhurthas()[-1][2][1]
+        assert last_end_h > 24.0, "fixture assumes the day wraps past midnight"
+        assert out["all_muhurtas"][-1]["end"] == m.float_hours_to_hhmm(last_end_h)
+
+    def test_library_failure_serves_empty_but_degrades_visibly(self, monkeypatch):
+        """An unavailable ephemeris is an ENVIRONMENTAL failure: the limb is
+        dropped, but the day is flagged so an empty list is never mistaken for
+        'this day genuinely has no muhurtas'."""
         monkeypatch.setattr(m.drik, "muhurthas", _raise)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["all_muhurtas"] == []
+        assert out["degraded"] is True
 
-    def test_muhurthas_mixed_tuple_and_scalar(self, monkeypatch):
-        """Branch 293->290: scalar entries are skipped, tuples are emitted."""
-        def fake(*_a, **_k):
-            # mix of valid 2-tuples and scalar/short entries
-            return [
-                (6.0, 6.8),     # emitted -> Rudra
-                7.5,            # scalar -> skipped (continue)
-                (8.0,),         # short tuple -> skipped
-                (9.0, 9.8),     # emitted -> Pitri (index 3)
-            ]
-        monkeypatch.setattr(m.drik, "muhurthas", fake)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        labels = [x["label"] for x in out["all_muhurtas"]]
-        assert labels == ["Rudra", "Pitri"]
-        assert out["all_muhurtas"][0] == {
-            "start": "06:00", "end": "06:48", "label": "Rudra"
-        }
+    @pytest.mark.parametrize("bad,why", [
+        ([(6.0, 6.8)] * 30, "2-tuples of floats (the shape the old fixture invented)"),
+        ([("rudra", 0, 6.0)] * 30, "bounds not a pair"),
+        ([("rudra", 0, (6.0,))] * 30, "bounds pair of the wrong length"),
+        ([("rudra", 0, ("6.0", "6.8"))] * 30, "bounds not floats"),
+        ([7.5] * 30, "scalars, not tuples"),
+    ])
+    def test_wrong_entry_shape_raises_rather_than_serving_silence(
+        self, monkeypatch, bad, why
+    ):
+        """A library-contract break must SURFACE.
 
-    def test_muhurthas_empty_list(self, monkeypatch):
-        """Branch 290->298: an empty list exits the loop with no entries."""
-        monkeypatch.setattr(m.drik, "muhurthas", lambda *_a, **_k: [])
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["all_muhurtas"] == []
+        Serving 200 + an empty field is indistinguishable from a real result and
+        is exactly how this stayed invisible; a raised error is visible and
+        recoverable.
+        """
+        monkeypatch.setattr(m.drik, "muhurthas", lambda *_a, **_k: bad)
+        with pytest.raises((TypeError, ValueError)):
+            m.compute_muhurat_for_day(PLACE, TARGET)
+
+    @pytest.mark.parametrize("count", [0, 29, 31])
+    def test_wrong_entry_count_raises(self, monkeypatch, count):
+        """The 30-fold division is contractual — a different count would silently
+        mislabel windows against ``_MUHURTA_NAMES``."""
+        entry = ("rudra", 0, (6.0, 6.8))
+        monkeypatch.setattr(m.drik, "muhurthas", lambda *_a, **_k: [entry] * count)
+        with pytest.raises(ValueError):
+            m.compute_muhurat_for_day(PLACE, TARGET)
 
 
 # ---------------------------------------------------------------------------

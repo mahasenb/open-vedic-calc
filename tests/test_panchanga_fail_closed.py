@@ -109,6 +109,49 @@ class TestHardGateFailClosed:
 
 
 # ---------------------------------------------------------------------------
+# The 30-muhurta limb: an empty list must never be servable as a clean result
+#
+# This limb served ``all_muhurtas: []`` behind HTTP 200 on EVERY request while
+# reporting ``degraded: False``. The parser indexed the library's entry name as
+# a float hour, and a bare ``except Exception`` turned the resulting TypeError
+# into a log line. Two properties close it: an environmental failure degrades
+# the day VISIBLY, and a shape the contract does not allow SURFACES instead of
+# being served as silence.
+# ---------------------------------------------------------------------------
+
+class TestMuhurthasFailClosed:
+    def test_library_failure_degrades_the_day(self, monkeypatch, caplog):
+        monkeypatch.setattr(m.drik, "muhurthas", _raise)
+        with caplog.at_level(logging.WARNING, logger="bphs_core.muhurat"):
+            out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert out["all_muhurtas"] == []
+        # The empty list alone is indistinguishable from a real result — the
+        # degraded flag is what makes it readable as a failure.
+        assert out["degraded"] is True
+        assert any("muhurat_muhurthas_failed" in r.message for r in caplog.records)
+
+    def test_happy_path_serves_all_thirty_and_is_not_degraded(self):
+        """The positive half of the contract: the real library yields 30 named
+        windows and does NOT degrade the day."""
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert len(out["all_muhurtas"]) == 30
+        assert [w["label"] for w in out["all_muhurtas"]] == m._MUHURTA_NAMES
+        assert out["degraded"] is False
+
+    def test_contract_break_propagates_rather_than_serving_empty(self, monkeypatch):
+        """A shape the library contract does not allow is a defect, not weather.
+
+        Degrading it to an empty list is exactly what kept this invisible, so it
+        raises instead.
+        """
+        monkeypatch.setattr(
+            m.drik, "muhurthas", lambda *_a, **_k: [(6.0, 6.8)] * 30
+        )
+        with pytest.raises((TypeError, ValueError)):
+            m.compute_muhurat_for_day(PLACE, TARGET)
+
+
+# ---------------------------------------------------------------------------
 # Eclipse / Adhika Maasa fail closed to None
 # ---------------------------------------------------------------------------
 
