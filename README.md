@@ -24,9 +24,9 @@ read it instead of each naming a version of their own.
 
 Neither forking package is reached by the compute path as the code stands, which
 was measured rather than assumed — with the instrument proven live first, then
-counted across all eleven `/v1/*` endpoints and the full test suite: numpy is
+counted across every route this service serves and the full test suite: numpy is
 called exactly twice, both times at import, building one constant lookup table
-inside a dependency, and that table is byte-identical on both sides of the fork.
+inside a dependency — a table measured identical on both sides of the fork.
 So the pin is here to install the set these values were recorded against, not to
 guard numpy arithmetic. A floating `pip install -e .` resolves whatever is newest
 today instead — measured, that differed from the shipped image on 13 packages

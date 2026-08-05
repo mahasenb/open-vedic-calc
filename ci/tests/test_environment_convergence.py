@@ -60,7 +60,10 @@ calls moved every counter, and a direct call into the dependency's own
 ``get_ashtaka_varga`` moved ``asarray`` 0 -> 1, so a zero below is absence and
 not a dead probe:
 
-    all 11 /v1/* endpoints, every one HTTP 200 ...  every counter 0
+    every route: the 15 /v1/* plus /healthz     ..  every counter 0
+      and /source, 17 of 17 answering 200/202,
+      both async scan jobs polled to terminal
+      status so worker-thread compute counted
     the full 697-test suite, whole run ...........  2 numpy calls, both
                                                     at import, 0 during
                                                     test execution
