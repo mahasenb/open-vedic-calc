@@ -123,9 +123,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          # Same single declaration as the `test` job above — the committed
-          # golden values are only reproducible on one side of uv.lock's 3.11
-          # fork, so the accuracy job must not be free to pick the other.
+          # Same single declaration as the `test` job above. The goldens were
+          # recorded on the pinned interpreter against the pinned pyswisseph,
+          # so letting the accuracy gate pick its own interpreter would have it
+          # certify a resolve nothing ships. (Measured from uv.lock: pyswisseph
+          # 2.10.3.2 publishes wheels for cp310/cp311 only, so anything newer
+          # additionally falls back to an sdist build here.)
           python-version-file: .python-version
 
       # Cache keyed on the manifest, so changing a pinned checksum (or adding a

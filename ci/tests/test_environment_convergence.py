@@ -21,8 +21,8 @@ charset-normalizer, click, idna, pytz, typing-extensions, websockets,
 annotated-types, annotated-doc). So the suite that gates every merge was
 certifying a dependency set no deployment ever ran.
 
-WHY IT IS AN ACCURACY GUARD, NOT HOUSEKEEPING
----------------------------------------------
+THE LOCK FORKS ON THE INTERPRETER
+--------------------------------
 ``uv.lock`` is not one resolve — it FORKS. Measured: of 73 locked package
 names, exactly two resolve to more than one version, both split on the same
 boundary, ``python_full_version`` 3.11:
@@ -30,28 +30,69 @@ boundary, ``python_full_version`` 3.11:
     numpy            2.2.6  (< 3.11)   /  2.4.6  (>= 3.11)
     timezonefinder   8.2.0  (< 3.11)   /  8.2.5  (>= 3.11)
 
-``numpy`` is not incidental here. It is imported inside the served compute
-path — ``jhora/horoscope/chart/strength.py`` rounds and sums Shadbala and
-Bhavabala through ``np.floor``/``np.rint``/``np.around``, and
-``jhora/horoscope/chart/ashtakavarga.py`` sums the varga tables through
-``np.asarray(...).sum(axis=0)`` and ``np.multiply``. A change of numpy is
-therefore capable of moving a number this service exists to produce.
+So "the locked set" does not name a single set of versions until the
+interpreter is fixed, and a base-image tag edit changes what installs while
+``pyproject.toml`` and ``uv.lock`` stay byte-identical.
+``.github/dependabot.yml`` watches the ``docker`` ecosystem weekly precisely
+so the pinned base image gets CVE-driven bumps, so that edit arrives on its
+own schedule.
 
-The consequence is the part worth internalising: **changing the interpreter is
-not a version change, it is a numerics change**, and it arrives with no diff
-that looks like one. ``.github/dependabot.yml`` watches the ``docker``
-ecosystem weekly precisely so the pinned base image gets CVE-driven bumps — so
-a routine, well-intentioned ``python:3.10-slim`` -> ``python:3.11-slim`` bump
-would cross that fork and swap the numpy under every Shadbala value, with
-``pyproject.toml`` and ``uv.lock`` both untouched.
+WHAT THE FORK DOES *NOT* ESTABLISH — READ BEFORE RE-ARGUING IT
+--------------------------------------------------------------
+An earlier revision of this file claimed the consequence was numeric: that
+``numpy`` sits in the served compute path via
+``jhora/horoscope/chart/strength.py`` (Shadbala/Bhavabala rounded and summed
+through ``np.floor``/``np.rint``/``np.around``) and
+``jhora/horoscope/chart/ashtakavarga.py`` (varga tables summed through
+``np.asarray(...).sum(axis=0)`` and ``np.multiply``).
+
+**That claim is false, and it is recorded here so it is not reintroduced.**
+This project computes Shadbala, Bhavabala and Ashtakavarga *itself*, in
+``bphs_core/strength.py``, which contains no numpy at all. ``bphs_core``
+imports only ``drik``, ``charts``, ``const`` and ``utils``; ``charts.py`` in
+turn imports only ``math``/``drik``/``const``/``utils``/``house``. Both cited
+modules ship inside the dependency and are never imported.
+
+Measured 2026-08-05 by wrapping ``np.floor``/``np.rint``/``np.around``/
+``np.sum``/``np.asarray``/``np.multiply``/``np.array``/``np.where`` with
+counters, with the instrument PROVEN LIVE BEFORE ANY ZERO WAS READ — direct
+calls moved every counter, and a direct call into the dependency's own
+``get_ashtaka_varga`` moved ``asarray`` 0 -> 1, so a zero below is absence and
+not a dead probe:
+
+    all 11 /v1/* endpoints, every one HTTP 200 ...  every counter 0
+    the full 697-test suite, whole run ...........  2 numpy calls, both
+                                                    at import, 0 during
+                                                    test execution
+    jhora.horoscope.chart.strength ...............  never in sys.modules
+    jhora.horoscope.chart.ashtakavarga ...........  never in sys.modules
+
+Those two calls are one expression — ``jhora/const.py:497``, an integer index
+extraction building a constant lookup table. Whether crossing the fork
+perturbs it was measured rather than assumed in either direction: the same
+expression on the same table yields ``[2, 5, 3, 1, 0, 3, 5, 2, 4, 6, 6, 4]``
+under numpy 2.2.6 on python 3.10 and under numpy 2.4.6 on python 3.11, same
+values and same element types.
+
+WHAT THIS GUARD ACTUALLY RESTS ON
+---------------------------------
+What the gating suite tests must be what ships — the 13-package divergence
+above. That is the whole of it, and it deliberately does not depend on the
+numpy question resolving either way. Two supporting reasons for declaring the
+interpreter in exactly one place: the fork leaves "the locked set" ambiguous
+while the interpreter floats, and reachability is a property of *today's*
+code, not a guarantee — the day something here calls into the dependency's own
+strength/ashtakavarga modules, or a new dependency puts float arithmetic on
+the served path, the fork stops being inert with nothing in the diff to
+announce it.
 
 WHAT THIS GUARD ASSERTS
 -----------------------
 1. The running interpreter is the pinned one (``.python-version``) — because a
    lock that forks is only one resolve once the interpreter is fixed.
 2. Every installed distribution matches what ``uv.lock`` resolves FOR THAT
-   INTERPRETER, and the comparison provably included the packages that can
-   move a served number.
+   INTERPRETER, and the comparison provably included the pins named in
+   ``_ACCURACY_CRITICAL`` below.
 3. Every CI job that runs the suite installs from the frozen lock and takes
    its interpreter from ``.python-version`` — so the divergence cannot be
    reintroduced in a workflow edit.
@@ -102,10 +143,22 @@ _PYTHON_VERSION_FILE = _REPO_ROOT / ".python-version"
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _DOCKERFILES = (_REPO_ROOT / "Dockerfile", _REPO_ROOT / "Dockerfile.test")
 
-# The four pins that can move a served number: the ephemeris itself, the chart
-# library that owns the lunar-node levers, and the two packages the lock forks
-# on. If the comparison below ever runs without these in it, it is not checking
-# the thing it exists to check — so their presence is asserted, not assumed.
+# The four pins whose drift would matter most. The set is NOT homogeneous, and
+# this comment used to say it was ("the four pins that can move a served
+# number") while the docstring above measured one of them unreachable — so the
+# two reasons are kept apart deliberately:
+#
+#   pyswisseph, pyjhora  — MEASURED to move served numbers. The ephemeris
+#       itself, and the library owning the lunar-node and position-flag levers
+#       (the 576 flag word, the 1.98 deg node — see the project's CLAUDE.md).
+#   numpy, timezonefinder — the two packages uv.lock forks on at python 3.11.
+#       Both are measured NOT to be reached by the served compute path as the
+#       code stands (docstring above). They stay pinned and asserted anyway:
+#       dropping a pin the moment you cannot prove harm is a pin that fails
+#       open, and reachability can change with nothing in the diff to show it.
+#
+# If the comparison below ever runs without these in it, it is not checking the
+# thing it exists to check — so their presence is asserted, not assumed.
 _ACCURACY_CRITICAL = frozenset(
     {"pyswisseph", "pyjhora", "numpy", "timezonefinder"}
 )
@@ -159,7 +212,7 @@ def _pinned_python() -> tuple[int, int]:
         "actions/setup-python reads it via python-version-file, and the "
         "Dockerfile base images are checked against it. Without it, uv.lock's "
         "3.11 fork (numpy 2.2.6/2.4.6, timezonefinder 8.2.0/8.2.5) is "
-        "unresolved and 'the locked set' names two different sets of numbers."
+        "unresolved and 'the locked set' names two different sets of versions."
     )
     raw = _PYTHON_VERSION_FILE.read_text(encoding="utf-8").strip()
     match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?", raw)
@@ -257,8 +310,9 @@ def _suite_jobs() -> list[tuple[str, str, dict]]:
 # ---------------------------------------------------------------------------
 def test_running_interpreter_matches_the_pinned_python_version() -> None:
     """The lock forks at 3.11. Fixing the interpreter is what collapses it to a
-    single resolve — so an environment on any other minor version is resolving
-    a different set of numbers, however green it looks."""
+    single resolve — so an environment on any other minor version has installed
+    a different set of versions from the one that ships, however green it
+    looks."""
     expected = _pinned_python()
     actual = (sys.version_info.major, sys.version_info.minor)
     assert actual == expected, (
@@ -266,10 +320,9 @@ def test_running_interpreter_matches_the_pinned_python_version() -> None:
         f"{_PYTHON_VERSION_FILE.name} pins {expected[0]}.{expected[1]}. "
         "uv.lock forks at python_full_version 3.11 — numpy resolves to 2.2.6 "
         "below it and 2.4.6 at or above, timezonefinder to 8.2.0 and 8.2.5 — "
-        "and numpy is inside the served Shadbala/Ashtakavarga compute path. "
-        "Testing on the other side of that fork validates numbers no "
-        "deployment produces. Recreate the environment with "
-        "`uv sync --frozen --extra dev` (uv reads .python-version)."
+        "so this environment has installed a resolve no deployment runs, and "
+        "whatever it certifies is not what ships. Recreate the environment "
+        "with `uv sync --frozen --extra dev` (uv reads .python-version)."
     )
 
 
@@ -315,10 +368,12 @@ def test_installed_distributions_match_the_lock_for_this_interpreter() -> None:
     missing_critical = sorted(_ACCURACY_CRITICAL - set(compared))
     assert not missing_critical, (
         f"the accuracy-critical pins {missing_critical} were not compared. "
-        "These are the packages that can move a served number — the ephemeris, "
-        "the chart library that owns the lunar-node levers, and the two "
-        "packages uv.lock forks on at python 3.11. A convergence check that "
-        "silently omits them is not a convergence check."
+        "These are the ephemeris itself, the chart library that owns the "
+        "lunar-node and position-flag levers, and the two packages uv.lock "
+        "forks on at python 3.11 — see _ACCURACY_CRITICAL above, where the "
+        "two groups are listed under deliberately different reasons. A "
+        "convergence check that silently omits them is not a convergence "
+        "check."
     )
 
     mismatched = [
@@ -419,9 +474,9 @@ def test_every_workflow_job_that_runs_the_suite_installs_from_the_frozen_lock() 
 def test_dockerfile_base_images_are_the_pinned_python_version(
     dockerfile: pathlib.Path,
 ) -> None:
-    """A base-image bump is a numerics change here, so it must not be able to
-    cross uv.lock's fork without also changing the pin every environment
-    reads."""
+    """A base-image bump changes the resolved dependency set with no diff in
+    pyproject.toml or uv.lock, so it must not be able to cross uv.lock's fork
+    without also changing the pin every environment reads."""
     major, minor = _pinned_python()
     instructions = parse_dockerfile(dockerfile.read_text(encoding="utf-8"))
 
@@ -447,9 +502,9 @@ def test_dockerfile_base_images_are_the_pinned_python_version(
         f"{_PYTHON_VERSION_FILE.name} pins {major}.{minor}. uv.lock forks at "
         "python_full_version 3.11: crossing it swaps numpy (2.2.6 <-> 2.4.6) "
         "and timezonefinder (8.2.0 <-> 8.2.5) with no change to pyproject.toml "
-        "or uv.lock, and numpy is inside the served Shadbala/Ashtakavarga "
-        "compute path. dependabot watches the docker ecosystem weekly, so this "
-        "is a bump that arrives on its own. Moving the interpreter is a "
-        "deliberate, separately-reviewed change that re-records the goldens — "
-        "not a base-image tag edit."
+        "or uv.lock, so the image would ship a resolve nothing tested. "
+        "dependabot watches the docker ecosystem weekly, so this is a bump "
+        "that arrives on its own. Moving the interpreter is a deliberate, "
+        "separately-reviewed change that re-runs the Swiss goldens — not a "
+        "base-image tag edit."
     )
