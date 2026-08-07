@@ -1,4 +1,38 @@
-# Normalize line endings: Python sources are always LF in the repo and on
-# checkout, so cross-platform contributions can never introduce wholesale
-# CRLF churn that destroys diffs and git blame.
-*.py text eol=lf
+# Line-ending policy for this repository.
+#
+# Previously this file pinned only `*.py`. Everything else -- the workflows,
+# the Dockerfiles, the compose file, the JSON goldens and fixtures, uv.lock,
+# the shell and PowerShell scripts under scripts/ -- was left to whatever each
+# contributor's `core.autocrlf` happened to be (Git for Windows defaults that
+# to `true`, which checks out CRLF and commits CRLF back). Pinning the Python
+# sources and nothing else protects the sources and leaves every other file
+# free to flip.
+#
+# The failure mode is not hypothetical and not limited to source files. A tool
+# that regenerates a file wholesale -- a lockfile updater, a schema dumper,
+# anything writing through a Windows text-mode file handle -- rewrites every
+# line ending in the file. The result is a whole-file diff for a few changed
+# values, which buries the real change, destroys `git blame`, and can leave the
+# file's byte length unchanged so that a size check does not notice.
+#
+# `text=auto eol=lf` stores LF in the index and checks out LF in the working
+# tree on every platform, regardless of local configuration, so that class of
+# churn becomes unrepresentable.
+#
+# LF specifically, for every extension including the PowerShell under scripts/:
+# the test and publish workflows run on Linux runners and the service is built
+# and run in a Linux container, where a stray CR breaks a shebang or a heredoc.
+# `scripts/test-in-docker.ps1` is already LF and PowerShell reads LF fine on
+# both Windows and Linux, so it is pinned to what it already is rather than
+# churned to CRLF. The whole index is already LF, so this renormalises nothing.
+#
+# Binary files are detected by `text=auto` and copied byte-for-byte. No binary
+# file is tracked here today (`git ls-files --eol` reports no `-text` blob);
+# the Swiss ephemeris data files are fetched at CI time into the ignored
+# `data/ephe/`, never committed. Declare `binary` explicitly alongside any
+# binary asset a future change does track, rather than relying on the
+# first-8000-bytes NUL heuristic.
+#
+# tests/test_line_endings.py is the guard: it fails if any tracked path stops
+# being covered by this rule, or if any blob is ever stored CRLF.
+* text=auto eol=lf
