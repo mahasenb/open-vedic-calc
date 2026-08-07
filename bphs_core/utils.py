@@ -595,6 +595,96 @@ SIGNS = [
 PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn", "Rahu", "Ketu"]
 
 # ---------------------------------------------------------------------------
+# Retrogression of the shadow grahas: DECLARED, never inherited.
+#
+# BPHS reads Rahu and Ketu as permanently retrograde (vakri) -- they are the
+# lunar nodes, and their motion is always contrary to the grahas. This engine
+# serves them that way as a stated astrological decision.
+#
+# What was actually being served before this declaration existed, measured
+# 2026-08-07 on the frozen resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2):
+# retrogression reaches a chart through ``drik.planets_in_retrograde``, and
+# that function excludes BOTH nodes from its loop unconditionally --
+#
+#     _planet_list = {p: p_id for p, p_id in planet_list.items()
+#                     if p not in [const._RAHU, const._KETU]}
+#
+# -- so it can never name them, and chart.py's ``pid in retro_planets`` was
+# False for Rahu and Ketu on every date. Over 1461 charts (2000-01-01 ..
+# 2019-12-27, 5-day steps) both shadow grahas came back retrograde on 0, while
+# the same sweep saw Saturn retrograde on 35.93% and Mercury on 19.16% -- the
+# sweep could observe retrogression and simply never saw it here. The engine
+# was reporting both shadow grahas as permanently DIRECT: the exact inverse of
+# the classical reading, on every chart it had ever served.
+#
+# That zero is structural, not a sampling artefact and not an
+# ephemeris-runtime artefact: it reproduces identically against the real Swiss
+# data files and against the built-in Moshier fallback.
+#
+# Why this is DECLARED rather than derived from the ephemeris, which is the
+# obvious-looking alternative: under the declared TRUE (osculating) node the
+# astronomical speed sign is not constant. Measured against the real Swiss
+# data over 350400 hourly samples (1990-01-01 .. +40y), the true node's
+# longitude speed is positive -- direct -- on 25.82% of them, peaking at
+# +0.128202129 deg/day at 2029-06-21 00:00 UT, while the mean node is
+# retrograde on 100% of the same span. Deriving served retrogression from the
+# speed would therefore report Rahu direct on roughly a quarter of charts;
+# the classical reading is a deliberate override of that signal, not a
+# restatement of it. Second reason not to derive it: near the turning points
+# the sign is ephemeris-source-dependent -- that same 2029-06-21 instant reads
+# -0.001408427 deg/day under Moshier -- so a derived flag would not even be
+# stable across the two runtimes this repo supports.
+#
+# Changing this set is an astrological model decision, not an implementation
+# detail: it moves ``is_retrograde`` on every served chart. Contract:
+# tests/test_shadow_graha_retrogression.py; extend it, never weaken it.
+# ---------------------------------------------------------------------------
+PERPETUALLY_RETROGRADE_GRAHAS = frozenset({"Rahu", "Ketu"})
+
+
+def _verify_perpetually_retrograde_grahas() -> None:
+    """Refuse to run if the declaration names a graha this engine does not serve.
+
+    The declaration is matched by NAME against ``PLANETS`` at chart-construction
+    time. A graha renamed or dropped upstream would make its entry here match
+    nothing, silently restoring the library's value with no error anywhere -- a
+    control switching itself off when its input goes missing, which is precisely
+    the failure this engine refuses. Fail closed at import instead.
+    """
+    unknown = sorted(PERPETUALLY_RETROGRADE_GRAHAS - set(PLANETS))
+    if unknown:
+        raise RuntimeError(
+            f"PERPETUALLY_RETROGRADE_GRAHAS names {unknown}, which this engine does "
+            f"not serve as a graha (PLANETS = {PLANETS}). The declaration is applied "
+            "by name, so an unknown name matches nothing and would silently hand "
+            "those grahas back to the astronomy library -- which reports both lunar "
+            "nodes as never retrograde. Refusing to start rather than serving the "
+            "inverse of the declared reading."
+        )
+
+
+_verify_perpetually_retrograde_grahas()
+
+
+def graha_is_retrograde(graha: str, *, computed: bool) -> bool:
+    """Resolve one graha's served retrogression, by NAME.
+
+    ``computed`` is what the astronomy library reported for this graha.
+    Members of ``PERPETUALLY_RETROGRADE_GRAHAS`` override it unconditionally --
+    including when the library agrees -- so the served value never depends on
+    whether a dependency happens to include the nodes in its own calculation.
+    Every other graha is passed through untouched.
+
+    Taken by graha NAME, never by an integer id: the two id spaces around this
+    engine are not interchangeable (see the boundary below), and Rahu's pyjhora
+    planet id is another id space's Uranus.
+    """
+    if graha in PERPETUALLY_RETROGRADE_GRAHAS:
+        return True
+    return computed
+
+
+# ---------------------------------------------------------------------------
 # The graha-name -> swisseph-body BOUNDARY.
 #
 # Two integer id spaces coexist around this engine and they are NOT

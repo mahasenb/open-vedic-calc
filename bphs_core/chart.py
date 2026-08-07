@@ -155,7 +155,12 @@ def _build_varga_chart(varga_positions, retro_planets) -> dict[str, PlanetData]:
         sign = utils.SIGNS[sign_idx]
         nakshatra = utils.longitude_to_nakshatra(sign_idx * 30 + deg)
         dignity = utils.get_planet_dignity(name, sign)
-        is_retro = pid in retro_planets
+        # Never `pid in retro_planets` directly: that is the library's answer,
+        # and the library omits both lunar nodes from planets_in_retrograde
+        # entirely, so it reports the perpetually-retrograde shadow grahas as
+        # direct. utils applies the declared reading (see
+        # PERPETUALLY_RETROGRADE_GRAHAS) on top of it, by graha name.
+        is_retro = utils.graha_is_retrograde(name, computed=pid in retro_planets)
         house = (sign_idx - varga_lagna_sign_idx) % 12 + 1
 
         chart[name] = PlanetData(
@@ -227,7 +232,12 @@ class Chart:
             sign = utils.SIGNS[sign_idx]
             nakshatra = utils.longitude_to_nakshatra(sign_idx * 30 + deg)
             dignity = utils.get_planet_dignity(name, sign)
-            is_retro = pid in retro_planets
+            # Never `pid in retro_planets` directly: that is the library's answer,
+            # and the library omits both lunar nodes from planets_in_retrograde
+            # entirely, so it reports the perpetually-retrograde shadow grahas as
+            # direct. utils applies the declared reading (see
+            # PERPETUALLY_RETROGRADE_GRAHAS) on top of it, by graha name.
+            is_retro = utils.graha_is_retrograde(name, computed=pid in retro_planets)
             final_lon = sign_idx * 30.0 + deg
             house = (sign_idx - lagna_sign_index) % 12 + 1
             chalit_house = _compute_house(final_lon, chalit_cusps)
