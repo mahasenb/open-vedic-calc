@@ -1,6 +1,6 @@
 # CLAUDE.md — open-vedic-calc
 
-This repo is a generic, standalone Vedic (BPHS) astronomical calculation service, licensed AGPL-3.0-only. It is reached only over HTTP by a bearer-token-holding caller. Rules below supplement the workspace CLAUDE.md; they do not replace it.
+This repo is a generic, standalone Vedic (BPHS) astronomical calculation service, licensed AGPL-3.0-only. It is reached only over HTTP by a bearer-token-holding caller. Rules below supplement the workspace CLAUDE.md; they do not replace it. That parent file is inherited here automatically, but **the skills it names are not** — only `CLAUDE.md` traverses upward. When a skill the parent names is absent from your session's skill list, the parent states where to Read it; an unresolved skill is a file to open, never a rule to skip.
 
 ## Product neutrality — absolute
 
@@ -110,7 +110,7 @@ The service runs single-threaded under Python's GIL. A wide date-range electiona
 
 ## PR review & merge gate
 
-Every PR here is reviewed **and** merged by a separate, independent review session on the strongest available model (currently Claude Fable 5), never the session that authored the change and never a human. Its independent `--approve` authorizes the merge (`gh pr merge <n> --rebase --delete-branch`); the authoring session opens the PR and stops. Fail closed: no independent approval, no merge. The reviewer is bound by the product-neutrality rule above — its PR review text, like every artifact here, names no downstream consumer. Full hand-off mechanism and reviewer instructions live in the workspace-root `CLAUDE.md` → "PR review — separate independent review session".
+Every PR here is reviewed **and** merged by a separate, independent review session, never the session that authored the change and never a human. Which model runs a review is the parent workspace's own policy, recorded there and deliberately not restated here — a copy in this file would drift silently against it. Its independent `--approve` authorizes the merge (`gh pr merge <n> --rebase --delete-branch`); the authoring session opens the PR and stops. Fail closed: no independent approval, no merge. The reviewer is bound by the product-neutrality rule above — its PR review text, like every artifact here, names no downstream consumer. Full hand-off mechanism and reviewer instructions live in the workspace-root `CLAUDE.md` → "PR review — separate independent review session".
 
 ## Active remediation
 
