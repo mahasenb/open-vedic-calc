@@ -35,6 +35,7 @@ import swisseph as swe
 
 from bphs_core import muhurat as m
 from bphs_core import utils
+from jhora import utils as jutils  # the library formatter the served clock must agree with
 
 
 PLACE = utils.make_place("Sample City", 7.0, 80.0, 5.5)
@@ -180,10 +181,15 @@ class TestPureHelpers:
         assert m.float_hours_to_hhmm(0.0) == "00:00"
 
     def test_float_hours_to_hhmm_minute_carry(self):
-        """Rounding that pushes minutes to 60 carries into the hour."""
-        # 5.9999h -> 5h 59.994m -> rounds to 60 -> carries to 06:00
+        """A residual second that rounds to 60 carries the minute (and the hour).
+
+        The minute is truncated, but the residual second is rounded to whole
+        seconds first (matching pyjhora's ``to_dms``); when that rounds to 60 the
+        minute rolls over, and a 60th minute rolls the hour over in turn.
+        """
+        # 5.9999h -> 5h 59m, residual 59.94s -> rounds to 60 -> carries to 06:00
         assert m.float_hours_to_hhmm(5.9999) == "06:00"
-        # 23.9999h wraps the hour back to 00:00
+        # 23.9999h carries all the way and wraps the hour back to 00:00
         assert m.float_hours_to_hhmm(23.9999) == "00:00"
 
     def test_float_hours_to_hhmm_wraps_past_24(self):
@@ -238,21 +244,25 @@ def _raise(*_a, **_k):
 
 class _BadStringElement:
     """Wraps a real ``drik.sunrise``/``sunset`` result tuple, delegating every
-    index access to the real value EXCEPT element [1] (the ``"HH:MM:SS"`` string
-    that muhurat slices as ``[1][:5]``), which raises.
+    index access to the real value EXCEPT element [0] (the float local-time
+    hours that muhurat now renders as ``float_hours_to_hhmm(...[0])``), which
+    raises — simulating the extreme-latitude failure the sunrise/sunset
+    ``except`` fallbacks exist for.
 
-    ``drik.tithi``/``nakshatra`` call sunrise internally and read the JD at [0]
-    (and sometimes [2]); those must keep returning the genuine ephemeris values
-    or the downstream sidereal-longitude calls compute a nonsense Julian Day.
-    Only muhurat's own ``[1][:5]`` extraction is sabotaged, so just the sunrise/
-    sunset ``except`` fallbacks fire."""
+    [0] is also what ``drik.muhurthas``/``chogadiya``/``trikalam``/``abhijit``
+    read internally, so every limb derived from the failed event degrades too —
+    which is the realistic shape of a genuine sunrise/sunset failure (the day
+    cannot be divided without it). Each of those drik calls is individually
+    guarded in ``compute_muhurat_for_day``, so the response stays well formed and
+    the sunrise/sunset ``except`` fallbacks fire; element [2] (the JD, read by
+    ``drik.tithi`` only under ``force_tithi_at_sunrise``) is left intact."""
 
     def __init__(self, real):
         self._real = real
 
     def __getitem__(self, key):
-        if key == 1:
-            raise RuntimeError("no HH:MM string available")
+        if key == 0:
+            raise RuntimeError("no event-time hours available")
         return self._real[key]
 
 
@@ -264,10 +274,10 @@ def _wrap_bad_string(real_fn):
 
 class TestSunMoonRiseFallbacks:
     def test_sunrise_sunset_fallbacks(self, monkeypatch):
-        # sunrise/sunset are also called *inside* drik.tithi/nakshatra, so they
-        # cannot raise outright. Wrap the real result so the JD elements ([0]/[2])
-        # still work for those internals but muhurat's [1][:5] HH:MM extraction
-        # fails, exercising the sunrise/sunset `except` fallbacks (lines 103-108).
+        # muhurat renders sunrise/sunset from the float hours (drik.*()[0]).
+        # Sabotage exactly that element so muhurat's float_hours_to_hhmm(...[0])
+        # extraction raises, exercising the sunrise/sunset `except` fallbacks;
+        # the JD at [2] is preserved (see _BadStringElement).
         monkeypatch.setattr(m.drik, "sunrise", _wrap_bad_string(m.drik.sunrise))
         monkeypatch.setattr(m.drik, "sunset", _wrap_bad_string(m.drik.sunset))
         out = m.compute_muhurat_for_day(PLACE, TARGET)
@@ -557,6 +567,96 @@ class TestSignatureColumnDiscrimination:
         assert _LIBRARY_NAMES[1:3] == ("aahi", "mithra")
         assert _LIBRARY_FLAGS[1] != _LIBRARY_FLAGS[2]
         assert (1, 2) not in flag_blind
+
+
+class TestSingleClockConvention:
+    """Register #176 — a period boundary must render as the event it is derived
+    from, on ONE clock.
+
+    The 30-muhurta night division opens at sunset: ``drik.muhurthas`` builds it
+    as ``sunset_hours + j*night_muhurtha``, so entry 15 opens at exactly
+    ``sunset_hours`` — the identical float the served ``sunset`` field renders.
+    They must read the same HH:MM.
+
+    Root cause: ``float_hours_to_hhmm`` ROUNDED to the nearest minute, while
+    every time pyjhora renders itself (sunrise/sunset/moonrise/moonset,
+    chogadiya, rahu-kala, yamagandam, gulika, abhijit, durmuhurtam — all via
+    ``utils.to_dms`` sliced ``[:5]``) TRUNCATES to the minute the instant falls
+    in. So an instant at 18:17:58 served as ``sunset`` "18:17" but opened its
+    night muhurta at "18:18". The fix renders the helper on the library's own
+    truncate-the-minute convention, so a float-hour boundary and a drik-string
+    event can never disagree.
+    """
+
+    # -- the convention itself, independent of the ephemeris --------------------
+
+    @pytest.mark.parametrize("x", [
+        0.0, 6.5, 12.0, 18.0, 23.5,
+        # half-minute-second boundaries, where truncate and round DIVERGE:
+        18 + (17 * 60 + 29) / 3600,   # 18:17:29
+        18 + (17 * 60 + 30) / 3600,   # 18:17:30  round -> 18:18, truncate -> 18:17
+        18 + (17 * 60 + 31) / 3600,   # 18:17:31
+        18 + (17 * 60 + 45) / 3600,   # 18:17:45
+        18 + (17 * 60 + 59) / 3600,   # 18:17:59
+        5 + (59 * 60 + 45) / 3600,    # 05:59:45  (minute-carry region)
+        23 + (59 * 60 + 59) / 3600,   # 23:59:59  (hour + day wrap)
+        25 + (30 * 60 + 40) / 3600,   # 25:30:40  (>24h night muhurta -> 01:30)
+    ])
+    def test_formatter_is_the_library_string_convention(self, x):
+        """``float_hours_to_hhmm`` renders exactly as pyjhora's own ``to_dms``
+        string sliced to HH:MM — the convention the served sunrise/sunset/
+        chogadiya/rahu-kala strings already use. Locking this equivalence is what
+        guarantees a float-hour boundary and a drik-string event never diverge,
+        including for the ``[:5]`` sites this helper does not itself format.
+        """
+        assert m.float_hours_to_hhmm(x) == jutils.to_dms(x % 24)[:5]
+
+    def test_half_minute_second_stays_in_its_own_minute(self):
+        """The divergent case, pinned as literals: an instant at :30-:59 seconds
+        renders in the minute it FALLS IN, not the next one (round would carry)."""
+        base = 18 + 17 / 60          # 18:17:00
+        assert m.float_hours_to_hhmm(base + 29 / 3600) == "18:17"
+        assert m.float_hours_to_hhmm(base + 30 / 3600) == "18:17"
+        assert m.float_hours_to_hhmm(base + 45 / 3600) == "18:17"
+        assert m.float_hours_to_hhmm(base + 59 / 3600) == "18:17"
+
+    # -- the served invariant, against the real library -------------------------
+
+    def test_served_sunset_field_equals_the_night_muhurta_it_opens(self):
+        """Register #176 exactly: the served ``sunset`` and the night muhurta it
+        opens are one instant, so one HH:MM. Also the day muhurta it closes."""
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert out["all_muhurtas"][15]["start"] == out["sunset"]
+        assert out["all_muhurtas"][15]["label"] == "Girish"
+        assert out["all_muhurtas"][14]["end"] == out["sunset"]
+
+    def test_served_sunrise_field_equals_the_first_muhurta_it_opens(self):
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert out["all_muhurtas"][0]["start"] == out["sunrise"]
+        assert out["all_muhurtas"][0]["label"] == "Rudra"
+
+    def test_served_sunset_value_stays_the_library_native_rendering(self):
+        """The fix moves the WINDOW to match the EVENT, never the reverse: the
+        served sunset is still pyjhora's own truncate-the-minute rendering, so no
+        downstream consumer of the sunrise/sunset strings shifts."""
+        jd = swe.julday(TARGET.year, TARGET.month, TARGET.day, 12.0)
+        ss_f = m.drik.sunset(jd, PLACE)[0]
+        sr_f = m.drik.sunrise(jd, PLACE)[0]
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert out["sunset"] == jutils.to_dms(ss_f)[:5]
+        assert out["sunrise"] == jutils.to_dms(sr_f)[:5]
+
+    @pytest.mark.parametrize("day", [24, 25, 26])
+    def test_boundary_matches_event_across_a_spread_of_dates(self, day):
+        """A spread whose sunsets fall at :33 / :45 / :58 seconds — the band
+        where the OLD rounding rendered the night window a minute PAST the sunset
+        it opens at (18:17:58 -> sunset '18:17' vs window '18:18'). Divergent
+        under both ephemeris runtimes; the invariant holds regardless."""
+        target = date(2026, 5, day)
+        out = m.compute_muhurat_for_day(PLACE, target)
+        assert out["all_muhurtas"][15]["start"] == out["sunset"]
+        assert out["all_muhurtas"][14]["end"] == out["sunset"]
+        assert out["all_muhurtas"][0]["start"] == out["sunrise"]
 
 
 class TestAllMuhurtas:
