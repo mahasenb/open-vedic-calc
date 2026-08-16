@@ -654,8 +654,16 @@ def test_the_dependency_updater_watches_the_dockerfile_directory() -> None:
         "line in any Dockerfile is watched for CVE-driven bumps"
     )
 
-    # Every tracked Dockerfile must fall under some watched directory.
-    watched = {str(entry.get("directory", "/")) for entry in docker_entries}
+    # Every tracked Dockerfile must fall under some watched directory. Both the
+    # singular `directory:` and the plural `directories:` list are valid config,
+    # so reading only the singular one would report a perfectly good config as
+    # broken — a false positive, which costs exactly as much trust as a miss.
+    watched: set[str] = set()
+    for entry in docker_entries:
+        if "directories" in entry:
+            watched.update(str(d) for d in entry["directories"])
+        else:
+            watched.add(str(entry.get("directory", "/")))
     print(f"dependabot docker directories: {sorted(watched)}")
     for path in tracked_dockerfiles():
         relative = path.relative_to(_REPO_ROOT).as_posix()
