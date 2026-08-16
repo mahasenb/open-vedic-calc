@@ -1,4 +1,44 @@
 # ---------------------------------------------------------------------------
+# Stage 0 — the uv build tool, pinned by digest.
+#
+# This used to be `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, with
+# a comment arguing a floating tag was fine because uv is the installer rather
+# than a project dependency. Two things were wrong with that.
+#
+#   * `:latest` is re-resolved on EVERY build, so two builds of this commit can
+#     install two different binaries and nothing here records which one shipped.
+#     Every other input to this image is pinned — the interpreter by
+#     .python-version, the dependency set by uv.lock under `uv sync --frozen`,
+#     the ephemeris data to sha256 by ci/swiss_ephemeris.json. The tool that
+#     performs the frozen install was the one input still resolved at build time.
+#
+#   * `COPY --from=<registry image>` is invisible to the automated dependency
+#     updater. .github/dependabot.yml already watches the `docker` ecosystem for
+#     this directory, but that ecosystem reads FROM instructions; an image named
+#     only in a COPY is never parsed, so it is neither bumped for a disclosed CVE
+#     nor reported as outdated. Pinning a digest on the COPY would have swapped a
+#     mutable reference for a frozen one that nothing was watching.
+#
+# Declaring it as a stage fixes both: the reference is now a FROM the updater can
+# see and version-bump, and it carries an immutable digest between bumps. The
+# `:<version>@sha256:<digest>` form is deliberate — the digest is what makes the
+# build reproducible, the tag is what the updater compares to decide a newer
+# release exists and what makes a bump legible in a diff.
+#
+# Digest resolved 2026-08-16 and cross-checked against three sources, which all
+# returned the same index digest:
+#   docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.12.5
+#   the GHCR registry API's Docker-Content-Digest header for that tag
+#   docker manifest inspect ghcr.io/astral-sh/uv:0.12.5
+# It is the multi-arch INDEX digest, so it resolves on every build platform, and
+# `:latest` resolved to the identical index at that moment — this pin changes no
+# bytes today, it stops them moving unrecorded tomorrow.
+#
+# ci/tests/test_dockerfile_image_pins.py is the guard on this shape.
+# ---------------------------------------------------------------------------
+FROM ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 AS uv
+
+# ---------------------------------------------------------------------------
 # Stage 1 — the Swiss ephemeris data files.
 #
 # These are BAKED INTO the image, not supplied at runtime. They used to be
@@ -52,10 +92,10 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 
 WORKDIR /app
 
-# Install uv itself from its official distroless image (pinned digest-free tag is
-# fine here — uv is the installer, not a project dependency; supply-chain risk for
-# the actual app deps is covered by the frozen lockfile install below).
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Install uv itself from the digest-pinned stage above. Supply-chain risk for the
+# actual app deps is covered by the frozen lockfile install below; this covers the
+# installer that performs it.
+COPY --from=uv /uv /uvx /bin/
 
 # Install from the committed, hash-pinned lockfile only — `--frozen` fails the
 # build if pyproject.toml and uv.lock have drifted, instead of silently
