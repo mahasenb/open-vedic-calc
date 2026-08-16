@@ -1,6 +1,14 @@
 # Test-only image: installs dev deps and runs pytest.
 # Production image uses the regular Dockerfile.
 
+# The uv build tool, digest-pinned — the same reference, in the same shape, as
+# the production Dockerfile's `uv` stage. This image exists to exercise what the
+# production image ships, so it must not install its tooling by a different
+# mechanism. Rationale for the `FROM … AS` form over `COPY --from=<image>`, and
+# the digest's provenance, are recorded once in Dockerfile; the two are bumped
+# together (the dependency updater sees both, because both are FROM lines).
+FROM ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 AS uv
+
 # The Swiss ephemeris data, fetched and checksum-verified exactly as the
 # production Dockerfile does. This image exists to run the suite against REAL
 # Swiss data, and it used to get that data from a host bind-mount — so running
@@ -29,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv itself (matches the production Dockerfile's installer).
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 # CALC-7: install from the committed, hash-pinned lockfile only -- this used
 # to be a floating `pip install -e ".[dev]"`, the exact pattern the

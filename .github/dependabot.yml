@@ -14,6 +14,14 @@ updates:
   # was never revisited for CVE-driven bumps -- the pip ecosystem entry only
   # tracks the Python dependency tree, not the OS-level packages (glibc,
   # openssl, etc.) baked into the image itself.
+  #
+  # Directory "/" covers BOTH Dockerfile and Dockerfile.test, which live at the
+  # repository root. Scope worth stating, because it decides how images must be
+  # written: this ecosystem reads FROM instructions. An image referenced only by
+  # `COPY --from=<registry image>` is never parsed, so it gets no CVE bump and no
+  # outdated report however carefully it is pinned -- which is why the uv build
+  # tool is declared as a `FROM ... AS uv` stage in both files and copied from by
+  # stage name. ci/tests/test_dockerfile_image_pins.py enforces that shape.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
