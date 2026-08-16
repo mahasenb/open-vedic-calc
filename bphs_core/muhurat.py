@@ -100,13 +100,39 @@ def _muhurtha_bounds(entry: object) -> tuple[float, float]:
 
 
 def float_hours_to_hhmm(fh: float) -> str:
+    """Render float hours as ``HH:MM`` on a 24h wall clock — the ONE clock this
+    module serves.
+
+    The minute shown is the minute the instant FALLS IN: the residual is rounded
+    to whole seconds and the minute is then truncated. This is *exactly* what
+    pyjhora's own ``utils.to_dms`` produces (its ``HH:MM:SS`` string sliced to
+    ``[:5]``) for every event/period it renders as a string — sunrise, sunset,
+    moonrise, moonset, chogadiya, rahu-kala, yamagandam, gulika, abhijit,
+    durmuhurtam. Sharing that single convention is what guarantees a period
+    BOUNDARY renders identically to the EVENT it is derived from: the 30-muhurta
+    night division opens at ``sunset_hours`` and the served ``sunset`` field is
+    that same instant, so both must — and now do — read the same HH:MM.
+
+    Register #176: an 18:17:58 sunset used to serve as ``sunset`` "18:17" but
+    open its night muhurta at "18:18", because this helper rounded to the nearest
+    minute while ``to_dms`` truncates. The underlying float — the BPHS-accurate
+    value — is untouched by either convention; only the minute LABEL differs, and
+    it is aligned here to the library-native, engine-wide truncation so two
+    renderings of one instant cannot disagree. The ``to_dms`` equivalence is
+    pinned by tests/test_muhurat_deep.py so the drik-string ``[:5]`` sites and
+    this helper can never drift apart. Values >= 24h (night muhurtas after
+    midnight) wrap to wall clock, as before.
+    """
     fh = fh % 24
     h = int(fh)
-    m = int(round((fh - h) * 60))
-    if m == 60:
-        h = (h + 1) % 24
-        m = 0
-    return f"{h:02d}:{m:02d}"
+    mins = (fh - h) * 60
+    mnt = int(mins)                          # the minute the instant falls in
+    if round((mins - mnt) * 60) == 60:       # ...but a >= 59.5s residual rounds
+        mnt += 1                             #    up a second and carries the
+    if mnt == 60:                            #    minute, matching to_dms exactly
+        h += 1
+        mnt = 0
+    return f"{h % 24:02d}:{mnt:02d}"
 
 
 def get_tithi_name(idx: int) -> str:
@@ -245,29 +271,37 @@ def compute_muhurat_for_day(
     jd_utc = swe.julday(y, m, d, 12.0 - place.timezone) # UTC noon   — for drik.sidereal_longitude
     drik.set_ayanamsa_mode('LAHIRI')
 
-    # 2. Get Sunrise, Sunset, Moonrise, Moonset
-    # degraded=True when sunrise or sunset fails: the "06:00"/"18:00" fallbacks
-    # corrupt downstream day-length calculations (chogadiya widths etc).
+    # 2. Get Sunrise, Sunset, Moonrise, Moonset.
+    #
+    # Render the FLOAT hours (drik.*()[0]) through float_hours_to_hhmm — the SAME
+    # helper the muhurta/panchanga float boundaries use — rather than slicing
+    # drik's own HH:MM:SS string ([1][:5]). Both produce the library's
+    # truncate-the-minute clock (byte-identical, pinned in test_muhurat_deep.py),
+    # so the value served is unchanged; what changes is that the event and the
+    # window derived from it now go through ONE formatter and can never disagree
+    # (register #176). degraded=True when sunrise or sunset fails: the "06:00"/
+    # "18:00" fallbacks corrupt downstream day-length calculations (chogadiya
+    # widths etc).
     degraded = False
     try:
-        sr = drik.sunrise(jd, place)[1][:5]
+        sr = float_hours_to_hhmm(drik.sunrise(jd, place)[0])
     except Exception:
         logger.warning("muhurat_sunrise_failed", exc_info=True)
         sr = "06:00"
         degraded = True
     try:
-        ss = drik.sunset(jd, place)[1][:5]
+        ss = float_hours_to_hhmm(drik.sunset(jd, place)[0])
     except Exception:
         logger.warning("muhurat_sunset_failed", exc_info=True)
         ss = "18:00"
         degraded = True
     try:
-        mr = drik.moonrise(jd, place)[1][:5]
+        mr = float_hours_to_hhmm(drik.moonrise(jd, place)[0])
     except Exception:
         logger.warning("muhurat_moonrise_failed", exc_info=True)
         mr = None
     try:
-        ms = drik.moonset(jd, place)[1][:5]
+        ms = float_hours_to_hhmm(drik.moonset(jd, place)[0])
     except Exception:
         logger.warning("muhurat_moonset_failed", exc_info=True)
         ms = None
