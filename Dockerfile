@@ -69,7 +69,7 @@ FROM ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5
 # --verify-only re-checks afterwards, so what stage 2 copies forward is bytes
 # that were checksummed after they landed.
 # ---------------------------------------------------------------------------
-FROM python:3.10-slim AS ephemeris
+FROM python:3.14-slim AS ephemeris
 WORKDIR /fetch
 COPY ci/fetch_swiss_ephemeris.py ci/fetch_swiss_ephemeris.py
 COPY ci/swiss_ephemeris.json ci/swiss_ephemeris.json
@@ -80,7 +80,7 @@ RUN python ci/fetch_swiss_ephemeris.py --self-test \
 # ---------------------------------------------------------------------------
 # Stage 2 — the shipped service image.
 # ---------------------------------------------------------------------------
-FROM python:3.10-slim
+FROM python:3.14-slim
 
 # Bake the building commit into the image so /source can return the authoritative
 # running-commit (the value a downstream consumer keys its cache on). The CI build
