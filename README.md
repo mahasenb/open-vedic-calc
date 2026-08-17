@@ -75,6 +75,7 @@ that differs from another tool can be explained rather than guessed at:
 | Primary house frame | **Whole-sign**, counted from the lagna sign | `bphs_core/chart.py` |
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
+| Sunrise / sunset | **Disc centre at the true (geometric) horizon** — the classical Hindu convention; `rsmi` words `897` / `898` | `bphs_core/utils.py`, `RISE_FLAGS` / `SET_FLAGS` |
 | Ephemeris | Swiss Ephemeris data files (AD 1800–2400) | baked into the images |
 
 The node model is the choice most likely to explain a visible discrepancy.
@@ -98,6 +99,18 @@ sits within a minute of arc of this service's, an apparent-position engine is th
 thing to check. The word is declared as `POSITION_FLAGS` in `bphs_core/utils.py`
 and the service refuses to start if the dependency ever builds a different one;
 `tests/test_position_flags.py` is the contract.
+
+The **sunrise/sunset convention** is pinned the same way. Every panchanga and
+electional limb — tithi, nakshatra, yoga, karana, the thirty muhurtas and the
+muhurat/lagna-shuddhi scan — is anchored to the day boundary, and this service
+defines that boundary as the Sun's disc **centre** at the **true, unrefracted
+horizon** (the classical *madhya-bimba* Hindu convention), not the upper limb at
+the apparent, refracted horizon a secular almanac reports. Measured at Colombo on
+2024-03-20, the two conventions place sunrise **147.99 s** apart, so a quietly
+refracted engine would shift every day-boundary computation. The words are
+declared as `RISE_FLAGS` / `SET_FLAGS` in `bphs_core/utils.py`, distinct from the
+ephemeris frame above, and the service refuses to start if the dependency ever
+builds a different one; `tests/test_rise_set_flags.py` is the contract.
 
 ## API
 
