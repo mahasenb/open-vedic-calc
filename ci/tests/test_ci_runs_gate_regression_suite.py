@@ -39,8 +39,8 @@ def _all_run_commands() -> list[str]:
 
 def _pyproject_widens_collection_to_ci_tests() -> bool:
     """Cheap textual check for a pytest `testpaths` setting that would sweep
-    ci/tests in — avoids a TOML-parser dependency (this repo's CI runs on
-    Python 3.10, before stdlib `tomllib`)."""
+    ci/tests in — avoids a TOML-parser dependency (a two-line scan needs none,
+    and requires-python still admits 3.10, before stdlib `tomllib`)."""
     pyproject = _REPO_ROOT / "pyproject.toml"
     if not pyproject.exists():
         return False

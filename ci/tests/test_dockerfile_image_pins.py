@@ -102,7 +102,8 @@ def _load_dockerfile_parser():
     # Register before executing: the sibling defines a @dataclass, and
     # dataclasses resolves ``sys.modules[cls.__module__]`` while processing the
     # class. A module executed from a spec without being registered has no
-    # entry there, and the decorator raises on Python 3.10.
+    # entry there, which made the decorator raise on Python 3.10; the pinned
+    # interpreter is now 3.11, where this registration is harmless defence.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
