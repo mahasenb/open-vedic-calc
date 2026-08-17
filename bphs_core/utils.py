@@ -37,6 +37,12 @@ from jhora.panchanga import drik
 # the engine already served, so declaring it moves no number that any caller has
 # already been given.
 #
+# OWNER-RULED (2026-08-17): the true node is not merely an engine-declared choice
+# but an explicit owner ruling of that date. Because the engine already served
+# the true node (see above and tests/test_lunar_node_model.py), the ruling moves
+# no served longitude -- it records the authority behind the existing choice and
+# settles the true-vs-mean question rather than reopening it.
+#
 # WHY IT IS DECLARED AT ALL, given it matches the library's current behaviour:
 # an inherited default is not a choice, it is an accident that happens to be
 # right. A library release that moved it would have moved every Rahu and Ketu by
@@ -462,12 +468,13 @@ apply_position_flags()
 # correction). This is the "madhya-bimba" sunrise of the classical panchanga, and
 # it is what ``drik.sunrise``'s own docstring states ("centre of disc at horizon")
 # and what the drik source comments call "geometric, i.e. true sunrise/set, so
-# refraction is not considered". It is a deliberate choice, NOT the only defensible
-# one: the civil/almanac convention (upper limb at the refracted horizon) is what
-# a secular ephemeris reports, and some panchanga makers use it. This engine takes
-# the geometric disc-centre convention because it is the one the Siddhantic tithi
-# arithmetic assumes; changing it is an astronomical decision that moves every
-# served day boundary, not an implementation detail.
+# refraction is not considered". The civil/almanac convention (upper limb at the
+# refracted horizon) is a real and defensible alternative -- it is what a secular
+# ephemeris reports, and some panchanga makers use it -- but the choice between
+# the two is SETTLED, not open: the geometric disc-centre (Surya-Siddhanta)
+# convention is OWNER-RULED (2026-08-17), on the ground that it is the one the
+# Siddhantic tithi arithmetic assumes. Changing it is an astronomical decision
+# that moves every served day boundary, not an implementation detail.
 #
 # TWO LEVERS, not three -- there is no runtime bypass here analogous to the
 # position word's ``_TROPICAL_MODE``. Measured, not read from documentation:
