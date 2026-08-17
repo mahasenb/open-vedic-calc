@@ -104,10 +104,13 @@ The **sunrise/sunset convention** is pinned the same way. Every panchanga and
 electional limb — tithi, nakshatra, yoga, karana, the thirty muhurtas and the
 muhurat/lagna-shuddhi scan — is anchored to the day boundary, and this service
 defines that boundary as the Sun's disc **centre** at the **true, unrefracted
-horizon** (the classical *madhya-bimba* Hindu convention), not the upper limb at
-the apparent, refracted horizon a secular almanac reports. Measured at Colombo on
-2024-03-20, the two conventions place sunrise **147.99 s** apart, so a quietly
-refracted engine would shift every day-boundary computation. The words are
+horizon** (the classical *madhya-bimba* Surya-Siddhanta convention), not the upper
+limb at the apparent, refracted horizon a secular almanac reports. That choice is
+a settled decision, not an open question: the disc-centre, unrefracted convention
+is the one the Siddhantic tithi arithmetic assumes, while the civil upper-limb
+alternative remains a defensible convention a secular almanac uses. Measured at
+Colombo on 2024-03-20, the two conventions place sunrise **147.99 s** apart, so a
+quietly refracted engine would shift every day-boundary computation. The words are
 declared as `RISE_FLAGS` / `SET_FLAGS` in `bphs_core/utils.py`, distinct from the
 ephemeris frame above, and the service refuses to start if the dependency ever
 builds a different one; `tests/test_rise_set_flags.py` is the contract.
