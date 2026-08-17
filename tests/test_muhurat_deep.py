@@ -3,10 +3,13 @@
 These target the branches of ``compute_muhurat_for_day`` and its helpers that
 the endpoint-level tests in ``test_coverage.py`` never reach:
 
-  * the per-limb ``except Exception: pass`` fallbacks (every ``drik.*`` call is
-    wrapped defensively so a single ephemeris failure never aborts the whole
-    panchanga) — exercised by monkeypatching the relevant ``drik`` function to
-    raise;
+  * the per-limb failure handlers — exercised by monkeypatching the relevant
+    ``drik`` function to raise. Since the failure-mode decision of 2026-08-17
+    these are no longer uniform: a limb that can change WHICH time is
+    recommended raises ``MuhurtaLimbError``, and a supplementary limb degrades
+    behind an explicit per-limb flag. The classification itself is pinned by
+    tests/test_muhurat_limb_failure_modes.py; the tests here exercise the
+    branches around it;
   * the personalised Tara-/Chandra-bala block, including both the "no natal
     Moon supplied" skip and the two failure fallbacks;
   * the ``get_karana_name`` fixed-karana table, the ``get_tithi_name`` Krishna
@@ -273,50 +276,74 @@ def _wrap_bad_string(real_fn):
 
 
 class TestSunMoonRiseFallbacks:
-    def test_sunrise_sunset_fallbacks(self, monkeypatch):
-        # muhurat renders sunrise/sunset from the float hours (drik.*()[0]).
-        # Sabotage exactly that element so muhurat's float_hours_to_hhmm(...[0])
-        # extraction raises, exercising the sunrise/sunset `except` fallbacks;
-        # the JD at [2] is preserved (see _BadStringElement).
+    def test_sunrise_failure_raises(self, monkeypatch):
+        """The day frame has no stand-in.
+
+        muhurat renders sunrise/sunset from the float hours (drik.*()[0]);
+        sabotaging exactly that element makes the extraction raise (the JD at
+        [2] is preserved — see _BadStringElement). The "06:00" / "18:00"
+        defaults this used to assert are gone: they did not degrade the answer,
+        they fabricated a day frame that the chogadiya and muhurta divisions are
+        cut from and that the scan derives every hora lord from.
+        """
         monkeypatch.setattr(m.drik, "sunrise", _wrap_bad_string(m.drik.sunrise))
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "sunrise"
+
+    def test_sunset_failure_raises(self, monkeypatch):
         monkeypatch.setattr(m.drik, "sunset", _wrap_bad_string(m.drik.sunset))
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["sunrise"] == "06:00"
-        assert out["sunset"] == "18:00"
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "sunset"
 
     def test_moonrise_moonset_fallbacks(self, monkeypatch):
+        """The moon events are display-only, so they still degrade — but they
+        now name themselves rather than degrading anonymously."""
         monkeypatch.setattr(m.drik, "moonrise", _raise)
         monkeypatch.setattr(m.drik, "moonset", _raise)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["moonrise"] is None
         assert out["moonset"] is None
+        assert {"moonrise", "moonset"} <= set(out["degraded_limbs"])
 
 
 class TestAuspiciousFallbacks:
+    """An omitted auspicious window is not a smaller answer, it is a different one.
+
+    The scan builds its entire candidate-minute set from these windows plus the
+    favourable chogadiya (lagna_shuddhi._candidate_minutes), so dropping one
+    deletes candidate minutes and moves the recommended instant; dropping all
+    five used to serve an empty list behind HTTP 200 — a day with no candidates
+    at all and nothing on the wire saying why.
+    """
+
     @pytest.mark.parametrize("fn", [
         "abhijit_muhurta", "brahma_muhurtha", "vijaya_muhurtha",
         "godhuli_muhurtha", "nishita_muhurtha",
     ])
-    def test_single_auspicious_failure_does_not_abort(self, monkeypatch, fn):
+    def test_single_auspicious_failure_raises(self, monkeypatch, fn):
         monkeypatch.setattr(m.drik, fn, _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        # response is still well formed; the failed window is just omitted
-        labels = {a["label"] for a in out["auspicious_muhurtas"]}
-        assert "Abhijit Muhurta" not in labels or fn != "abhijit_muhurta"
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == fn
 
-    def test_all_auspicious_failures(self, monkeypatch):
+    def test_all_auspicious_failures_raise(self, monkeypatch):
         for fn in ("abhijit_muhurta", "brahma_muhurtha", "vijaya_muhurtha",
                    "godhuli_muhurtha", "nishita_muhurtha"):
             monkeypatch.setattr(m.drik, fn, _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["auspicious_muhurtas"] == []
+        with pytest.raises(m.MuhurtaLimbError):
+            m.compute_muhurat_for_day(PLACE, TARGET)
 
 
 class TestChogadiyaFallback:
-    def test_chogadiya_failure(self, monkeypatch):
+    def test_chogadiya_failure_raises(self, monkeypatch):
+        """The favourable chogadiya windows are the other half of the candidate
+        set, so an empty division is not a servable answer."""
         monkeypatch.setattr(m.drik, "gauri_choghadiya", _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["chogadiya"] == []
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "chogadiya"
 
     def test_chogadiya_unknown_type_label(self, monkeypatch):
         """An out-of-range chogadiya type code maps to the 'Unknown' label."""
@@ -330,14 +357,21 @@ class TestChogadiyaFallback:
 
 
 class TestInauspiciousFallbacks:
-    @pytest.mark.parametrize("fn", [
-        "raahu_kaalam", "yamaganda_kaalam", "gulikai_kaalam",
-        "durmuhurtam", "varjyam",
+    @pytest.mark.parametrize("fn,limb", [
+        ("raahu_kaalam", "rahu_kaalam"),
+        ("yamaganda_kaalam", "yamaganda_kaalam"),
+        ("gulikai_kaalam", "gulikai_kaalam"),
+        ("durmuhurtam", "durmuhurtam"),
+        ("varjyam", "varjyam"),
     ])
-    def test_single_inauspicious_failure(self, monkeypatch, fn):
+    def test_single_inauspicious_failure_raises(self, monkeypatch, fn, limb):
+        """All five reach the scorer as a WINDOW it matches labels against, so a
+        dropped window is a veto that silently does not fire — the three kaalams
+        absolutely, Durmuhurtam/Varjyam per activity."""
         monkeypatch.setattr(m.drik, fn, _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert isinstance(out["inauspicious_periods"], list)
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == limb
 
     def test_durmuhurtam_short_list_skips_both_periods(self, monkeypatch):
         """Branch 217->219: a <2-element durmuhurtam list yields no entries."""
@@ -370,18 +404,28 @@ class TestInauspiciousFallbacks:
 
 class TestAmritaFallback:
     def test_amrita_failure(self, monkeypatch):
+        """Display-only (zero reads in the scan pipeline), so it degrades — and
+        says so."""
         monkeypatch.setattr(m.drik, "amrita_gadiya", _raise)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["amrita_periods"] == []
+        assert "amrita_periods" in out["degraded_limbs"]
 
 
 class TestPanchakaFallback:
-    def test_panchaka_failure_returns_none(self, monkeypatch):
-        """A failed panchaka computation fails closed: panchaka_free is None
-        ('could not be computed'), never a falsely-clean default of True."""
+    def test_panchaka_failure_raises(self, monkeypatch):
+        """A failed panchaka computation fails closed by RAISING.
+
+        It used to serve ``panchaka_free: None`` and rely on the consumer to
+        read that null as a veto — but a veto flag that asks its reader to guess
+        is the same silent-drop shape as an omitted window, and nothing in this
+        service could tell whether the reader guessed right. Never a
+        falsely-clean default of True, then or now.
+        """
         monkeypatch.setattr(m.drik, "panchaka_rahitha", _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchaka_free"] is None
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "panchaka"
 
     def test_panchaka_dosha_spanning_noon_marks_not_free(self, monkeypatch):
         """A non-zero dosha window spanning local noon clears panchaka_free."""
@@ -411,6 +455,7 @@ class TestPersonalBalamFallbacks:
             birth_nakshatra="NotANakshatra", birth_moon_sign="Taurus",
         )
         assert out["personal_balam"]["tara_bala"] == "Unknown"
+        assert "personal_balam.tara_bala" in out["degraded_limbs"]
 
     def test_chandra_bala_fallback_on_bad_sign(self):
         """An unknown birth Moon sign makes SIGNS.index raise -> 'Unknown'."""
@@ -419,6 +464,7 @@ class TestPersonalBalamFallbacks:
             birth_nakshatra="Rohini", birth_moon_sign="NotASign",
         )
         assert out["personal_balam"]["chandra_bala"] == "Unknown"
+        assert "personal_balam.chandra_bala" in out["degraded_limbs"]
 
     # The transit Moon on 2026-05-26 (noon, Lahiri) sits in Virgo (sign idx 5).
     # Picking the birth Moon sign therefore selects each chandra-bala category
@@ -772,31 +818,34 @@ class TestDegradedFlag:
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["degraded"] is False
 
-    def test_sunrise_failure_sets_degraded(self, monkeypatch, caplog):
-        """sunrise raising -> degraded=True and warning logged."""
+    def test_happy_path_names_no_degraded_limbs(self):
+        out = m.compute_muhurat_for_day(PLACE, TARGET)
+        assert out["degraded_limbs"] == []
+
+    def test_sunrise_failure_raises_and_logs(self, monkeypatch, caplog):
+        """The day frame raises, and still emits its observability event."""
         import logging
         monkeypatch.setattr(m.drik, "sunrise", _wrap_bad_string(m.drik.sunrise))
         with caplog.at_level(logging.WARNING, logger="bphs_core.muhurat"):
-            out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["degraded"] is True
-        assert out["sunrise"] == "06:00"
+            with pytest.raises(m.MuhurtaLimbError):
+                m.compute_muhurat_for_day(PLACE, TARGET)
         assert any("muhurat_sunrise_failed" in r.message for r in caplog.records)
 
-    def test_sunset_failure_sets_degraded(self, monkeypatch, caplog):
-        """sunset raising -> degraded=True and warning logged."""
+    def test_sunset_failure_raises_and_logs(self, monkeypatch, caplog):
         import logging
         monkeypatch.setattr(m.drik, "sunset", _wrap_bad_string(m.drik.sunset))
         with caplog.at_level(logging.WARNING, logger="bphs_core.muhurat"):
-            out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["degraded"] is True
-        assert out["sunset"] == "18:00"
+            with pytest.raises(m.MuhurtaLimbError):
+                m.compute_muhurat_for_day(PLACE, TARGET)
         assert any("muhurat_sunset_failed" in r.message for r in caplog.records)
 
-    def test_moonrise_failure_does_not_set_degraded(self, monkeypatch):
-        """moonrise failing does NOT set degraded (no fallback value corruption)."""
+    def test_moonrise_failure_sets_degraded_and_names_the_limb(self, monkeypatch):
+        """moonrise failing degrades. It used to leave ``degraded`` False, so a
+        lost display field was served as a clean day."""
         monkeypatch.setattr(m.drik, "moonrise", _raise)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["degraded"] is False
+        assert out["degraded"] is True
+        assert out["degraded_limbs"] == ["moonrise"]
         assert out["moonrise"] is None
 
 
