@@ -426,6 +426,232 @@ def apply_position_flags() -> None:
 
 apply_position_flags()
 
+
+# ---------------------------------------------------------------------------
+# The sunrise/sunset CONVENTION word is DECLARED here. It is never inherited.
+#
+# Every electional and panchanga limb this engine serves is anchored to the day
+# boundary: ``drik.sunrise``/``drik.sunset``/``drik.moonrise``/``drik.moonset``,
+# and through them the tithi, nakshatra, yoga, karana, the thirty muhurtas, the
+# raahu/yamaganda/gulika windows and the whole muhurat/lagna-shuddhi scan. Each
+# of those rise/set calls passes a second bit word to swisseph's
+# ``swe.rise_trans`` -- the ``rsmi`` argument, DISTINCT from the ephemeris flag
+# word POSITION_FLAGS pins. The ``rsmi`` word decides WHAT COUNTS AS SUNRISE:
+# whether the Sun's disc centre or its lower limb touches the horizon, whether
+# that horizon is the true (geometric) one or the apparent (refracted) one, and
+# whether the rise or the set instant is wanted. It is not a tuning knob; it is
+# part of what "sunrise" means, and a day whose start moves drags every limb
+# measured from it.
+#
+# Until this block existed the engine stated that word nowhere. It inherited
+# ``drik.RISE_FLAGS`` / ``drik.SET_FLAGS``, which the astronomy library builds at
+# ITS import time from ``jhora.utils.set_flags_for_rise_set()``, which in turn
+# reads three ``jhora.const.RISE_SET_*`` module globals. Measured with the frozen
+# resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2): RISE_FLAGS = 897, SET_FLAGS = 898,
+# identical in 4.8.6 and 4.8.7 -- so unlike the position-flag word (which moved
+# 66386 -> 65810 on that same bump) this one has not moved. But "has not moved"
+# is not "declared": the same three ``const`` globals that build it are exactly
+# the shape of default that pyjhora 4.8.7 flipped for the position word, and a
+# release that flips ``RISE_SET_USE_REFRACTION`` or
+# ``RISE_SET_USE_DISC_CENTER_FOR_RISING`` would move every served sunrise with no
+# change in this repository and nothing here to notice it.
+#
+# THE CONVENTION THIS ENGINE DECLARES: swisseph's BIT_HINDU_RISING (896), which
+# is the composite the Vedic (BPHS / Surya-Siddhanta) tradition wants -- the Sun's
+# disc CENTRE at the TRUE, unrefracted horizon (geocentric, no ecliptic-latitude
+# correction). This is the "madhya-bimba" sunrise of the classical panchanga, and
+# it is what ``drik.sunrise``'s own docstring states ("centre of disc at horizon")
+# and what the drik source comments call "geometric, i.e. true sunrise/set, so
+# refraction is not considered". It is a deliberate choice, NOT the only defensible
+# one: the civil/almanac convention (upper limb at the refracted horizon) is what
+# a secular ephemeris reports, and some panchanga makers use it. This engine takes
+# the geometric disc-centre convention because it is the one the Siddhantic tithi
+# arithmetic assumes; changing it is an astronomical decision that moves every
+# served day boundary, not an implementation detail.
+#
+# TWO LEVERS, not three -- there is no runtime bypass here analogous to the
+# position word's ``_TROPICAL_MODE``. Measured, not read from documentation:
+#
+#   1. ``jhora.const.RISE_SET_HINDU_RISING`` / ``_USE_REFRACTION`` /
+#      ``_USE_DISC_CENTER_FOR_RISING`` -- three module globals read by
+#      ``jhora.utils.set_flags_for_rise_set()`` every time it is called. This is
+#      the INHERITED DEFAULT. Measured, flipping each one moves the word to a
+#      distinct value: hindu-rising off -> 769/770, refraction on -> 385/386,
+#      disc-bottom -> 9089/9090.
+#   2. ``drik.RISE_FLAGS`` / ``drik.SET_FLAGS`` -- two MUTABLE module globals,
+#      built from (1) at drik's import time (before anything in this package has
+#      run), read at call time by ``drik.sunrise`` (``rsmi=RISE_FLAGS``),
+#      ``drik.sunset`` (``rsmi=SET_FLAGS``) and the two lunar equivalents.
+#
+# ``apply_rise_set_flags`` below compares (1) against this declaration and refuses
+# to start on any disagreement -- the dependency-bump tripwire, exactly as
+# ``apply_position_flags`` does for the position word -- then pins (2) and reads
+# both back. It is called at import, after the position word, and
+# ``bphs_core/__init__.py`` imports utils first, so the pins land before any
+# sibling module uses drik.
+#
+# SCOPE, stated so it is not discovered later. This is the sunrise/sunset ``rsmi``
+# convention word only. The ephemeris frame the same ``rise_trans`` call uses for
+# the Sun's position (its ``flags`` argument) is ``drik.PLANET_FLAGS``, already
+# pinned by ``apply_position_flags`` above. drik's unrelated module global
+# ``_rise_flags`` (an ephemeris word, ``BIT_HINDU_RISING | FLG_TRUEPOS |
+# FLG_SPEED``) is NOT on the served sunrise/sunset path -- those functions take
+# ``rsmi=RISE_FLAGS``/``SET_FLAGS`` and ``flags=PLANET_FLAGS`` -- and is left out
+# of this declaration deliberately.
+#
+# Contract: tests/test_rise_set_flags.py. Extend it, never weaken it. The
+# dependency is pinned to an exact version in pyproject.toml for the same reason
+# the position word needs it to be.
+# ---------------------------------------------------------------------------
+RISE_FLAGS = 897
+SET_FLAGS = 898
+
+# The shared convention, longhand, composed from named swisseph constants -- the
+# same word RISE_FLAGS and SET_FLAGS share before the rise-vs-set direction bit is
+# added. Kept alongside the literals on purpose (same rationale as
+# POSITION_FLAG_COMPONENTS): the literal is the number a measurement can be
+# compared against without running anything, and the names are what make the
+# convention readable. ``apply_rise_set_flags`` asserts they agree, which is what
+# would catch a swisseph release that renumbered a constant -- every name here
+# would still read correctly while the word they compose changed.
+#
+# BIT_HINDU_RISING (896) already subsumes BIT_DISC_CENTER (256) and
+# BIT_NO_REFRACTION (512) -- it is defined as disc-centre | no-refraction |
+# geocentric-no-ecliptic-latitude (the 128 bit, which this swisseph build does
+# not export a name for, so BIT_HINDU_RISING is the only name that covers it).
+# The two subsets are named anyway, for intent; their OR with BIT_HINDU_RISING is
+# still 896.
+RISE_SET_CONVENTION_COMPONENTS: dict[str, int] = {
+    "BIT_HINDU_RISING": swe.BIT_HINDU_RISING,      #   896  disc-centre, no refraction, geocentric
+    "BIT_DISC_CENTER": swe.BIT_DISC_CENTER,        #   256  Sun's disc centre at the horizon
+    "BIT_NO_REFRACTION": swe.BIT_NO_REFRACTION,    #   512  true (geometric) horizon, not apparent
+}
+
+# The direction bit, the ONLY thing that differs between the rise word and the set
+# word: which crossing of the horizon is wanted.
+RISE_SET_DIRECTION_COMPONENTS: dict[str, int] = {
+    "CALC_RISE": swe.CALC_RISE,                    #     1  the rising instant  -> RISE_FLAGS
+    "CALC_SET": swe.CALC_SET,                      #     2  the setting instant -> SET_FLAGS
+}
+
+# Every distinct swisseph rise/set flag, for rendering a word by name in an error
+# message. Resolved with getattr so a swisseph that drops a name degrades to
+# reporting it as an unnamed bit rather than failing to import. BIT_HINDU_RISING
+# is listed first so its 896 covers the otherwise-unnamed 128 bit.
+_RISE_SET_FLAG_NAMES = (
+    "BIT_HINDU_RISING", "BIT_DISC_CENTER", "BIT_DISC_BOTTOM", "BIT_NO_REFRACTION",
+    "BIT_GEOCTR_NO_ECL_LAT", "BIT_FIXED_DISC_SIZE",
+    "CALC_RISE", "CALC_SET", "CALC_MTRANSIT", "CALC_ITRANSIT",
+)
+
+
+def describe_rise_set_flags(word: int) -> str:
+    """Render a swisseph rise/set (``rsmi``) word as ``<int> = NAME|NAME|...``.
+
+    The sibling of ``describe_position_flags`` for the ``rsmi`` namespace. A
+    reviewer told "expected 897, got 385" has to decompose a bit word by hand
+    under time pressure; told "the library dropped BIT_NO_REFRACTION" they know
+    immediately that the horizon model moved from geometric to refracted. Bits
+    swisseph does not name are reported as hex rather than dropped -- an unnamed
+    bit is precisely the case where a silent renderer would make a real
+    difference invisible.
+    """
+    named = [
+        name
+        for name in _RISE_SET_FLAG_NAMES
+        if (bit := getattr(swe, name, 0)) and word & bit == bit
+    ]
+    covered = 0
+    for name in named:
+        covered |= getattr(swe, name)
+    leftover = word & ~covered
+    rendered = "|".join(named) if named else "<no named flags>"
+    if leftover:
+        rendered += f"|<unnamed bits {hex(leftover)}>"
+    return f"{word} = {rendered}"
+
+
+def apply_rise_set_flags() -> None:
+    """Pin the astronomy library to RISE_FLAGS / SET_FLAGS, or refuse to run.
+
+    Fail-closed throughout, and every step is read back after it is applied:
+    calling a setter is not evidence it took effect, and the cost of being wrong
+    is a day boundary nobody chose, dragging every panchanga limb with it.
+
+    Idempotent, and cheap: it reads and writes module attributes and does not
+    touch the ephemeris.
+    """
+    # (0) each declared word must equal its own decomposition
+    convention = 0
+    for bit in RISE_SET_CONVENTION_COMPONENTS.values():
+        convention |= bit
+    expected_rise = convention | swe.CALC_RISE
+    expected_set = convention | swe.CALC_SET
+    if RISE_FLAGS != expected_rise or SET_FLAGS != expected_set:
+        raise RuntimeError(
+            f"the declared rise/set words ({RISE_FLAGS} / {SET_FLAGS}) do not equal "
+            f"the words their own named components compose "
+            f"({expected_rise} / {expected_set}: "
+            f"{describe_rise_set_flags(expected_rise)} / "
+            f"{describe_rise_set_flags(expected_set)}). Either the declaration and "
+            "its decomposition were edited apart, or a swisseph release renumbered "
+            "one of these constants -- in which case every name in bphs_core/utils.py "
+            "still reads correctly while the sunrise convention moved underneath it. "
+            "Refusing to serve a day boundary this engine cannot name."
+        )
+
+    # (1) the library's own inherited words -- the dependency-bump tripwire
+    builder = getattr(jhora_utils, "set_flags_for_rise_set", None)
+    if builder is None:
+        raise RuntimeError(
+            "the astronomy library no longer exposes "
+            "jhora.utils.set_flags_for_rise_set, so this engine can no longer tell "
+            "which sunrise/sunset convention word the library would apply of its own "
+            "accord. Refusing to continue rather than inheriting it unseen: that word "
+            "decides whether every served sunrise is disc-centre or lower-limb and "
+            "geometric or refracted, and every panchanga limb is measured from it. "
+            "Re-establish the declaration against the new library API in the same "
+            "change that moves the dependency pin."
+        )
+    inherited_rise = builder(flags_for_rise=True)
+    inherited_set = builder(flags_for_rise=False)
+    if inherited_rise != RISE_FLAGS or inherited_set != SET_FLAGS:
+        raise RuntimeError(
+            "the astronomy library's own sunrise/sunset convention word no longer "
+            "matches this engine's declaration.\n"
+            f"    declared by this engine: rise {describe_rise_set_flags(RISE_FLAGS)}"
+            f" / set {describe_rise_set_flags(SET_FLAGS)}\n"
+            f"    built by the library:    rise {describe_rise_set_flags(inherited_rise)}"
+            f" / set {describe_rise_set_flags(inherited_set)}\n"
+            f"    rise differs by:         "
+            f"{describe_rise_set_flags(inherited_rise ^ RISE_FLAGS)}\n"
+            "This is what a dependency bump looks like when it moves the day "
+            "boundary: a release that flips const.RISE_SET_USE_REFRACTION or "
+            "const.RISE_SET_USE_DISC_CENTER_FOR_RISING moves every served sunrise "
+            "with no change in this repository and no golden able to see it. "
+            "Refusing to start. Either revert the bump, or -- if the new convention "
+            "is wanted -- change RISE_FLAGS/SET_FLAGS deliberately and re-record the "
+            "electional goldens in the same reviewed change."
+        )
+
+    # (2) drik's mutable serving globals, built before this ran
+    drik.RISE_FLAGS = RISE_FLAGS
+    drik.SET_FLAGS = SET_FLAGS
+    if drik.RISE_FLAGS != RISE_FLAGS or drik.SET_FLAGS != SET_FLAGS:
+        raise RuntimeError(
+            "pinning the declared rise/set words did not take effect: asked for "
+            f"rise {describe_rise_set_flags(RISE_FLAGS)} / "
+            f"set {describe_rise_set_flags(SET_FLAGS)} but drik now reports "
+            f"rise {describe_rise_set_flags(drik.RISE_FLAGS)} / "
+            f"set {describe_rise_set_flags(drik.SET_FLAGS)}. Those globals are the "
+            "rsmi words drik.sunrise, drik.sunset, drik.moonrise and drik.moonset "
+            "read at call time, so every served day boundary would be in an "
+            "undeclared convention."
+        )
+
+
+apply_rise_set_flags()
+
 EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
 
 # ---------------------------------------------------------------------------

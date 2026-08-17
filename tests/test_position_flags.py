@@ -84,8 +84,8 @@ position* word only:
     repo — see the Julian Day discipline in CLAUDE.md);
   * sunrise/sunset use pyjhora's separate ``drik.RISE_FLAGS`` / ``drik.SET_FLAGS``
     words, measured 897 / 898 and IDENTICAL in 4.8.6 and 4.8.7, so they did not
-    move — but they are equally undeclared, and a separate declaration would be
-    needed to pin them.
+    move — and are now declared in their own right by
+    ``bphs_core.utils.apply_rise_set_flags``, contract ``tests/test_rise_set_flags.py``.
 
 WHAT IS ASSERTED HERE
 ---------------------
