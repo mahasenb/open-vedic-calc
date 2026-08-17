@@ -12,7 +12,7 @@ level. Without this line the declarations would be applied only if
 ``bphs_core.utils`` happened to be the first of them to load, and a correctness
 property resting on import order is not a property at all.
 
-``bphs_core.utils`` applies both declarations at its module level and fails
+``bphs_core.utils`` applies all three declarations at its module level and fails
 closed if the library will not carry them, so importing it first is the whole
 mechanism.
 """
