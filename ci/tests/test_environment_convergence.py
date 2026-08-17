@@ -134,9 +134,9 @@ from packaging.utils import canonicalize_name
 # environment capable of running this file. `tomli` has no such relationship —
 # it arrived only transitively, via pip-audit — which is why that one is
 # declared explicitly in pyproject.toml.
-try:  # Python >= 3.11
+try:  # Python >= 3.11 — the interpreter this repo now pins
     import tomllib
-except ModuleNotFoundError:  # Python 3.10 — the interpreter this repo pins
+except ModuleNotFoundError:  # Python 3.10 — still within the requires-python floor
     import tomli as tomllib
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -194,7 +194,8 @@ def _load_dockerfile_parser():
     # Register before executing: the sibling defines a @dataclass, and
     # dataclasses resolves `sys.modules[cls.__module__]` while processing the
     # class. A module executed from a spec without being registered has no
-    # entry there, and the decorator raises on Python 3.10.
+    # entry there, which made the decorator raise on Python 3.10; the pinned
+    # interpreter is now 3.11, where this registration is harmless defence.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module.parse_dockerfile
