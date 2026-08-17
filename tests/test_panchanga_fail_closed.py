@@ -2,10 +2,27 @@
 
 Covers the direct longitude-based limb computation and every fail-closed path:
 a tithi crash, a hard-gate (Rahu/Yama/Gulika) failure, eclipse/adhika-maasa
-'could not be computed' (None), the Amavasya naming + veto, and the
+'could not be computed', the Amavasya naming + veto, and the
 Unknown-vs-NoBirthData band/penalty split. The mandate for an electional engine
 is that a missing limb means 'not recommendable / visibly degraded', never
 'fine'.
+
+Failure-mode decision, 2026-08-17 — this file is STRENGTHENED by it, not
+weakened. The mandate above is unchanged; what changed is how loudly the
+producer states it. A limb whose failure can change WHICH time is recommended
+now RAISES ``MuhurtaLimbError`` instead of resolving to a degraded value:
+the tithi/karana names, the three absolute vetoes (which used to set
+``hard_gate_failed``), and the eclipse / adhika-maasa / panchaka flags (which
+used to resolve to ``None``). An exception is the most visible form of 'not
+recommendable' available, and it removes the reader's opportunity to
+mis-handle a null. The consumer-side gates that read those values fail closed
+exactly as before — ``_score_instant`` still hard-excludes on
+``hard_gate_failed`` and on ``is_eclipse_day``/``is_adhik_maasa`` being
+``None`` — and those gates are still asserted below, because a day payload
+built by anything other than this producer can still carry them.
+
+The per-limb classification for all of ``compute_muhurat_for_day`` is pinned by
+tests/test_muhurat_limb_failure_modes.py.
 
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` (for muhurat) or
 ``bphs_core.lagna_shuddhi.drik`` (for the scorer). Both attributes name the ONE
@@ -64,24 +81,52 @@ class TestDirectLimbComputation:
 # ---------------------------------------------------------------------------
 
 class TestTithiFailClosed:
-    def test_tithi_zero_division_does_not_propagate(self, monkeypatch, caplog):
+    def test_tithi_zero_division_raises(self, monkeypatch, caplog):
+        """A tithi crash surfaces as a named limb error, still logging its event.
+
+        This used to serve ``tithi: None`` on a degraded day. The scorer reads
+        the tithi NAME (rikta / Amavasya), so a null there scored the day as
+        merely 'not suitable' — a quieter and materially different statement
+        than 'this day could not be computed'.
+        """
         def _zero_div(*_a, **_k):
             raise ZeroDivisionError("division by zero at exact phase boundary")
 
         monkeypatch.setattr(m.drik, "tithi", _zero_div)
         with caplog.at_level(logging.WARNING, logger="bphs_core.muhurat"):
-            out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchanga"]["tithi"] is None
-        assert out["panchanga"]["tithi_end"] is None
-        assert out["degraded"] is True
+            with pytest.raises(m.MuhurtaLimbError) as exc:
+                m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "tithi"
+        assert isinstance(exc.value.__cause__, ZeroDivisionError)
         assert any("muhurat_tithi_failed" in r.message for r in caplog.records)
 
     def test_karana_failure_fails_closed(self, monkeypatch):
+        """The karana NAME carries the Bhadra (Vishti) veto, which the scorer
+        applies as ``karana == "Vishti"``. A null name read there as the empty
+        string, so an unverifiable Bhadra silently became a clean one."""
         monkeypatch.setattr(m.drik, "karana", _raise)
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "karana"
+
+    def test_a_failed_end_time_alone_still_only_degrades(self, monkeypatch):
+        """The refinement half of the same call is NOT recommendation-affecting:
+        the four panchanga end-times have zero reads in the scan pipeline."""
+        real = m.drik.tithi
+        calls = {"n": 0}
+
+        def _bad_end(*a, **k):
+            calls["n"] += 1
+            # drik.karana calls drik.tithi internally, so sabotage only the
+            # muhurat module's own (first) call.
+            return (5, 0.0, None) if calls["n"] == 1 else real(*a, **k)
+
+        monkeypatch.setattr(m.drik, "tithi", _bad_end)
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["panchanga"]["karana"] is None
-        assert out["panchanga"]["karana_end"] is None
+        assert out["panchanga"]["tithi"] is not None
+        assert out["panchanga"]["tithi_end"] is None
         assert out["degraded"] is True
+        assert "panchanga.tithi_end" in out["degraded_limbs"]
 
 
 # ---------------------------------------------------------------------------
@@ -89,23 +134,44 @@ class TestTithiFailClosed:
 # ---------------------------------------------------------------------------
 
 class TestHardGateFailClosed:
-    def test_all_three_failures_flag_hard_gate(self, monkeypatch):
+    """The three absolute vetoes now raise instead of flagging the day.
+
+    ``hard_gate_failed`` made every candidate instant of the day score 0.0 —
+    unrecommendable, which was right. Raising states the same thing where it
+    cannot be read as a computed result, and it stops a day built on an
+    unverifiable veto from travelling any further.
+    """
+
+    def test_all_three_failures_raise(self, monkeypatch):
         for fn in ("raahu_kaalam", "yamaganda_kaalam", "gulikai_kaalam"):
             monkeypatch.setattr(m.drik, fn, _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["hard_gate_failed"] is True
-        assert out["degraded"] is True
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "rahu_kaalam"   # the first of the three
 
-    def test_single_hard_gate_failure_flags(self, monkeypatch):
-        """Any ONE of the three failing trips the gate (the veto is unverifiable)."""
+    def test_single_hard_gate_failure_raises(self, monkeypatch):
+        """Any ONE of the three failing is enough (the veto is unverifiable)."""
         monkeypatch.setattr(m.drik, "gulikai_kaalam", _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["hard_gate_failed"] is True
-        assert out["degraded"] is True
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "gulikai_kaalam"
 
     def test_happy_path_hard_gate_not_failed(self):
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["hard_gate_failed"] is False
+
+    def test_consumer_side_gate_still_fails_closed_on_the_flag(self):
+        """The scorer's ``hard_gate_failed`` branch stays live and asserted.
+
+        This producer can no longer set the flag, but the field remains on the
+        wire and the gate remains correct for any day payload that carries it —
+        removing either would be a breaking change AND the loss of a
+        defence-in-depth layer.
+        """
+        dd = _base_day_data(hard_gate_failed=True)
+        score, detail = _score(dd)
+        assert detail["hard_excluded"] is True
+        assert score == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -156,16 +222,32 @@ class TestMuhurthasFailClosed:
 # ---------------------------------------------------------------------------
 
 class TestEclipseAdhikNone:
-    def test_eclipse_failure_returns_none(self, monkeypatch):
+    """These used to resolve to ``None`` for 'could not be computed'.
+
+    Downstream ``None`` VETOES (``is_eclipse_day in (True, None)``), which is
+    the right reading of a null — but it meant an unverifiable finder silently
+    deleted candidate days from a scan while the response stayed well formed and
+    reported nothing. The producer now raises; the consumer-side null gate is
+    unchanged and still asserted (TestScoreInstantFailClosed below).
+    """
+
+    def test_eclipse_failure_raises(self, monkeypatch):
         monkeypatch.setattr(m.drik, "next_solar_eclipse", _raise)
         monkeypatch.setattr(m.drik, "next_lunar_eclipse", _raise)
-        out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["is_eclipse_day"] is None
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "eclipse"
 
-    def test_adhik_maasa_failure_returns_none(self, monkeypatch):
+    def test_adhik_maasa_failure_raises(self, monkeypatch):
         monkeypatch.setattr(m.drik, "lunar_month", _raise)
+        with pytest.raises(m.MuhurtaLimbError) as exc:
+            m.compute_muhurat_for_day(PLACE, TARGET)
+        assert exc.value.limb == "adhik_maasa"
+
+    def test_clean_day_answers_both_gates(self):
         out = m.compute_muhurat_for_day(PLACE, TARGET)
-        assert out["is_adhik_maasa"] is None
+        assert out["is_eclipse_day"] in (True, False)
+        assert out["is_adhik_maasa"] in (True, False)
 
 
 # ---------------------------------------------------------------------------

@@ -354,11 +354,15 @@ class LagnaShuddhiAlternative(BaseModel):
 
 
 class PanchangaInfo(BaseModel):
-    # tithi/karana names may be None when their pyjhora computation fails (e.g. a
-    # ZeroDivisionError at an exact phase boundary); the day is marked degraded.
+    # The tithi and karana NAMES are recommendation-affecting (the scorer reads
+    # the tithi for rikta/Amavasya and the karana for the Bhadra/Vishti veto), so
+    # since 2026-08-17 this service raises rather than serving them as None. They
+    # stay nullable for wire compatibility, not because null is produced here.
     tithi: str | None = None
-    # End-times may be None: the end-time backstop yields None (and degrades the
-    # day) when the pyjhora call raises or returns an out-of-range index.
+    # End-times may be None: they are display-only refinements (zero reads in the
+    # scan pipeline), so they degrade — the day is marked degraded and the limb
+    # names itself in DayMuhurat.degraded_limbs — when the pyjhora call raises or
+    # returns an out-of-range index.
     tithi_end: str | None = None
     # nakshatra/yogam are now computed DIRECTLY from sidereal longitudes, so in
     # practice always populated; kept nullable for the tithi/karana-failure paths.
@@ -387,19 +391,33 @@ class DayMuhurat(BaseModel):
     chogadiya: list[TimeWindow]
     inauspicious_periods: list[TimeWindow]
     amrita_periods: list[TimeWindow]
-    # None == 'panchaka status could not be computed' (fail closed; not a clean default).
+    # The three veto flags below stay nullable on the wire, but are always
+    # answered by this service: since the failure-mode decision of 2026-08-17 an
+    # unverifiable veto raises rather than resolving to null (a null that the
+    # consumer must remember to read as 'veto' is the same silent-drop shape as
+    # an omitted window). ``None`` remains legal so a payload from any other
+    # producer still parses, and the consumer-side fail-closed gate that treats
+    # it as a veto is unchanged.
     panchaka_free: bool | None = None
     personal_balam: PersonalBalam | None = None
     all_muhurtas: list[TimeWindow]
-    # bool | None: None == 'status could not be computed' → the consumer vetoes (fail closed).
     is_eclipse_day: bool | None = None
     is_adhik_maasa: bool | None = None
     # True when the absolute-veto (Rahu/Yama/Gulika) computation failed → every
     # candidate instant for this day fails closed (the veto is unverifiable).
+    # Always False from this service — those three limbs raise instead — but
+    # retained on the wire, and still honoured by the scorer, for the same
+    # reason as the nullable flags above.
     hard_gate_failed: bool = False
-    # True on any failure that corrupts the day: sunrise/sunset fallback,
-    # tithi/nakshatra/yoga/karana name-or-end failure, or hard-gate failure.
+    # True when any SUPPLEMENTARY limb degraded. Derived from degraded_limbs, so
+    # it can never disagree with the detail. Recommendation-affecting limbs do
+    # not appear here at all: they raise, and the request fails.
     degraded: bool = False
+    # Which supplementary limbs degraded, by served-field name (e.g.
+    # "moonrise", "panchanga.tithi_end", "all_muhurtas",
+    # "personal_balam.tara_bala"). Additive: a consumer seeing degraded=True can
+    # tell WHAT it lost instead of having to diff the payload.
+    degraded_limbs: list[str] = []
 
 
 class MuhurtResponse(BaseModel):

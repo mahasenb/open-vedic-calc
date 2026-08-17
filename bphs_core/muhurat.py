@@ -1,10 +1,158 @@
 import logging
+from contextlib import contextmanager
 from datetime import datetime, date as date_type
 import swisseph as swe
 from jhora.panchanga import drik
 from . import utils
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-limb failure modes
+#
+# Project decision, 2026-08-17: a limb failure that can change WHICH time is
+# recommended must RAISE (fail loud); only genuinely supplementary limbs may
+# degrade, and then only behind an EXPLICIT per-limb flag.
+#
+# Before that decision every limb here failed the same way — a log line plus a
+# default, a dropped window, or a None — so a day assembled from a broken frame
+# was indistinguishable on the wire from a day assembled from a good one. The
+# split below is drawn from what the scan pipeline actually reads
+# (bphs_core/lagna_shuddhi.py), not from how central a limb sounds:
+#
+#   * ``_candidate_minutes`` builds the ENTIRE candidate-minute set for a day
+#     from ``auspicious_muhurtas`` + the favourable ``chogadiya`` windows. A
+#     dropped window there does not make the engine cautious; it deletes
+#     candidate minutes, so the recommended minute moves.
+#   * ``_score_instant`` hard-excludes on the Rahu/Yamaganda/Gulika windows and,
+#     per activity, on Durmuhurtam/Varjyam, the Vishti karana, the eclipse flag
+#     and the adhika-maasa flag. A dropped window or an unverifiable flag there
+#     silently DELETES a classical veto (or, for the ``None`` vetoes, silently
+#     deletes whole candidate days).
+#   * It scores on the tithi and yoga NAMES and derives the hora lord from the
+#     served ``sunrise`` string, so a fabricated day frame moves every hora.
+#
+# Limbs with ZERO reads anywhere in that pipeline — moonrise, moonset, the four
+# panchanga end-times, the amrita windows, the 30-muhurta display table and the
+# personal-balam strings — are the ones that may degrade. They still degrade
+# VISIBLY: the served field falls back to its documented sentinel and the limb
+# names itself in ``degraded_limbs``, from which the summary ``degraded`` flag
+# is derived, so the flag and the list cannot disagree.
+#
+# Contract: tests/test_muhurat_limb_failure_modes.py. It discovers the ``drik``
+# entry points by parsing this module and fails on any limb that carries no
+# recorded classification, so a limb added later cannot ship silent.
+# ---------------------------------------------------------------------------
+
+class MuhurtaLimbError(RuntimeError):
+    """A limb that decides WHICH time can be recommended could not be computed.
+
+    Carries the limb name so a caller (and a log line) can say what failed
+    rather than reporting a generic computation error. The originating
+    exception is preserved as ``__cause__``.
+    """
+
+    def __init__(self, limb: str, target_date: date_type, hint: str = "") -> None:
+        self.limb = limb
+        self.target_date = target_date
+        self.hint = hint
+        message = (
+            f"muhurat limb {limb!r} could not be computed for "
+            f"{target_date.strftime('%Y-%m-%d')}"
+        )
+        if hint:
+            message = f"{message}: {hint}"
+        super().__init__(message)
+
+
+@contextmanager
+def _require(limb: str, target_date: date_type, event: str, hint: str = ""):
+    """Guard a recommendation-affecting limb: any failure becomes a raise.
+
+    The broad ``except`` covering both the library call and the parse of its
+    result is deliberate here and does NOT conflict with the try/except/else
+    rule that governs the degrading limbs: that rule exists so a contract break
+    cannot be SWALLOWED, and nothing is swallowed on a path that re-raises. What
+    the wrapper adds is the limb name and the diagnosable hint.
+    """
+    try:
+        yield
+    except MuhurtaLimbError:
+        raise
+    except Exception as exc:
+        logger.error(event, exc_info=True)
+        raise MuhurtaLimbError(limb, target_date, hint) from exc
+
+
+@contextmanager
+def _degradable(field: str, degraded_limbs: list[str], event: str):
+    """Guard a supplementary limb: a failure degrades, naming itself.
+
+    The caller assigns the fallback value BEFORE the block, so the served
+    sentinel is visible at the site rather than hidden in a handler.
+    """
+    try:
+        yield
+    except MuhurtaLimbError:
+        # A recommendation-affecting failure must never be absorbed by a
+        # supplementary guard on its way out.
+        raise
+    except Exception:
+        logger.warning(event, exc_info=True)
+        if field not in degraded_limbs:
+            degraded_limbs.append(field)
+
+
+# One full wrap of the local day. Rise/set events legitimately land after local
+# midnight (a night-side event on the target date), so the bound is 48h, not 24h.
+#
+# Measured 2026-08-17 against the real Swiss data files: over 5980 rise/set
+# samples (latitude -66..66 in steps of 6, five longitudes, thirteen dates,
+# sunrise/sunset/moonrise/moonset) the float-hour element ran min 0.0033 h,
+# max 26.0241 h and NONE fell outside [0, 48). Over 600 polar samples
+# (|latitude| 67..89, three longitudes, ten dates, sunrise/sunset) 228 were real
+# events inside the bound and the other 372 were all large negative sentinels in
+# [-59073516.0, -59064996.0].
+_EVENT_HOURS_LIMIT = 48.0
+
+
+def _event_hours(raw: object) -> float:
+    """The float-hour element of a ``drik`` rise/set result, validated.
+
+    This is the check the ``except`` handlers could never make, because at a
+    latitude where a body neither rises nor sets ``drik.sunrise``/``sunset``/
+    ``moonrise``/``moonset`` do NOT raise — they return a large negative
+    sentinel. ``float_hours_to_hhmm`` reduces that modulo 24, so the sentinel
+    renders as a perfectly plausible wall-clock string.
+
+    Measured 2026-08-17 on the unguarded code, latitude 78.0 / 2026-06-21:
+    ``drik.sunrise`` returned ``-59069099.0`` and the day was served as
+    ``sunrise`` "13:00", ``sunset`` "13:00", ``degraded`` False,
+    ``hard_gate_failed`` False, with 30 muhurtas, 16 chogadiya windows and
+    three ZERO-WIDTH absolute-veto windows — a complete, clean-looking
+    recommendation resting on a day frame that does not exist.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise TypeError(f"rise/set event hour is not a number: {raw!r}")
+    hours = float(raw)
+    if not 0.0 <= hours < _EVENT_HOURS_LIMIT:
+        raise ValueError(
+            f"rise/set event hour {hours!r} lies outside [0, {_EVENT_HOURS_LIMIT}): "
+            f"this is the library's no-rise/no-set sentinel — the body neither "
+            f"rises nor sets at this latitude on this date (polar day/night)"
+        )
+    return hours
+
+
+# Named on the day-frame errors so a polar request is diagnosable from the
+# message alone rather than from a stack trace.
+_DAY_FRAME_HINT = (
+    "the day frame could not be established — the Sun may neither rise nor set "
+    "at this latitude on this date (polar day/night). Every panchanga limb and "
+    "every candidate window is measured from sunrise/sunset, so no time can be "
+    "recommended without it"
+)
 
 TITHIS = [
     "Prathama", "Dwitiya", "Tritiya", "Chaturthi", "Panchami", "Shashthi",
@@ -188,7 +336,7 @@ def _yoga_from_sun_moon(jd: float) -> tuple[str, int]:
     return YOGAS[idx], idx + 1
 
 
-def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool | None:
+def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool:
     """True if a solar OR lunar eclipse is VISIBLE at *place* on this local day.
 
     An eclipse not visible at the location carries no grahana dosha, so the
@@ -197,8 +345,12 @@ def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool | None:
     but not the 2026-02-17 / 2026-08-12 solar eclipses). The next-eclipse JD is
     in ``tret[0]``; we accept it when it falls inside this local calendar day.
 
-    Returns None (fail closed: 'eclipse status could not be computed') when a
-    finder raises — an unknown grahana status must veto, never silently clear.
+    RAISES on a finder failure (project decision 2026-08-17). This used to
+    return None for 'eclipse status could not be computed', and the scan then
+    read that None as a veto (`is_eclipse_day in (True, None)`) — so an
+    unverifiable finder silently DELETED candidate days from the recommendation
+    while the response stayed well formed. An eclipse veto that cannot be
+    verified is a failure, not a result.
     """
     tz = place.timezone
     day_start = swe.julday(
@@ -206,7 +358,10 @@ def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool | None:
     )
     day_end = day_start + 1.0
     for finder in (drik.next_solar_eclipse, drik.next_lunar_eclipse):
-        try:
+        with _require(
+            "eclipse", target_date, "muhurat_eclipse_check_failed",
+            "the grahana (eclipse) veto could not be verified for this day",
+        ):
             res = finder(day_start - 2.0, place)
             t_max = res[1][0]
             guard = 0
@@ -217,13 +372,10 @@ def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool | None:
                 guard += 1
             if day_start <= t_max < day_end:
                 return True
-        except Exception:
-            logger.warning("muhurat_eclipse_check_failed", exc_info=True)
-            return None
     return False
 
 
-def _is_adhik_maasa(jd: float, place: drik.Place) -> bool | None:
+def _is_adhik_maasa(jd: float, place: drik.Place, target_date: date_type) -> bool:
     """True if the lunar month containing *jd* is an Adhika (intercalary) Maasa.
 
     ``drik.lunar_month`` returns ``[maasa_number, is_leap_month, is_nija_month]``;
@@ -233,14 +385,15 @@ def _is_adhik_maasa(jd: float, place: drik.Place) -> bool | None:
     (set in utils import), under which this is verified against Adhika Shravana
     2023. No auspicious samskara is begun in an Adhika Maasa.
 
-    Returns None (fail closed: 'adhika-maasa status could not be computed') when
-    the computation raises — an unknown status must veto, never silently clear.
+    RAISES on failure, for the same reason as :func:`_is_eclipse_day`: the None
+    this used to return is read downstream as a veto, so an unverifiable month
+    silently removed candidate days rather than reporting that it failed.
     """
-    try:
+    with _require(
+        "adhik_maasa", target_date, "muhurat_adhika_maasa_check_failed",
+        "the Adhika Maasa veto could not be verified for this day",
+    ):
         return bool(drik.lunar_month(jd, place)[1])
-    except Exception:
-        logger.warning("muhurat_adhika_maasa_check_failed", exc_info=True)
-        return None
 
 
 @utils.serialized_ephemeris
@@ -271,6 +424,12 @@ def compute_muhurat_for_day(
     jd_utc = swe.julday(y, m, d, 12.0 - place.timezone) # UTC noon   — for drik.sidereal_longitude
     drik.set_ayanamsa_mode('LAHIRI')
 
+    # Limbs that degraded, by served-field name. ``degraded`` is DERIVED from
+    # this list at the end, so the summary flag and the per-limb detail cannot
+    # disagree — the predecessor tracked only the summary bool, and a consumer
+    # seeing degraded=True could not tell what it had lost.
+    degraded_limbs: list[str] = []
+
     # 2. Get Sunrise, Sunset, Moonrise, Moonset.
     #
     # Render the FLOAT hours (drik.*()[0]) through float_hours_to_hhmm — the SAME
@@ -279,32 +438,30 @@ def compute_muhurat_for_day(
     # truncate-the-minute clock (byte-identical, pinned in test_muhurat_deep.py),
     # so the value served is unchanged; what changes is that the event and the
     # window derived from it now go through ONE formatter and can never disagree
-    # (register #176). degraded=True when sunrise or sunset fails: the "06:00"/
-    # "18:00" fallbacks corrupt downstream day-length calculations (chogadiya
-    # widths etc).
-    degraded = False
-    try:
-        sr = float_hours_to_hhmm(drik.sunrise(jd, place)[0])
-    except Exception:
-        logger.warning("muhurat_sunrise_failed", exc_info=True)
-        sr = "06:00"
-        degraded = True
-    try:
-        ss = float_hours_to_hhmm(drik.sunset(jd, place)[0])
-    except Exception:
-        logger.warning("muhurat_sunset_failed", exc_info=True)
-        ss = "18:00"
-        degraded = True
-    try:
-        mr = float_hours_to_hhmm(drik.moonrise(jd, place)[0])
-    except Exception:
-        logger.warning("muhurat_moonrise_failed", exc_info=True)
-        mr = None
-    try:
-        ms = float_hours_to_hhmm(drik.moonset(jd, place)[0])
-    except Exception:
-        logger.warning("muhurat_moonset_failed", exc_info=True)
-        ms = None
+    # (register #176).
+    #
+    # Sunrise and sunset RAISE (project decision 2026-08-17): they are the day
+    # frame, so a "06:00"/"18:00" stand-in does not degrade the answer, it
+    # fabricates one — the chogadiya and muhurta divisions are cut from it and
+    # the scan derives every hora lord from the served sunrise string. The
+    # moon events are display-only (zero reads in the scan pipeline) and so
+    # degrade, naming themselves.
+    #
+    # _event_hours is what makes the sunrise/sunset raise real: at a polar
+    # latitude the library returns a sentinel rather than raising, so the
+    # exception handler this replaced was unreachable on exactly the input it
+    # was written for.
+    with _require("sunrise", target_date, "muhurat_sunrise_failed", _DAY_FRAME_HINT):
+        sr = float_hours_to_hhmm(_event_hours(drik.sunrise(jd, place)[0]))
+    with _require("sunset", target_date, "muhurat_sunset_failed", _DAY_FRAME_HINT):
+        ss = float_hours_to_hhmm(_event_hours(drik.sunset(jd, place)[0]))
+
+    mr = None
+    with _degradable("moonrise", degraded_limbs, "muhurat_moonrise_failed"):
+        mr = float_hours_to_hhmm(_event_hours(drik.moonrise(jd, place)[0]))
+    ms = None
+    with _degradable("moonset", degraded_limbs, "muhurat_moonset_failed"):
+        ms = float_hours_to_hhmm(_event_hours(drik.moonset(jd, place)[0]))
 
     # 3. Panchanga limbs.
     #
@@ -313,63 +470,76 @@ def compute_muhurat_for_day(
     # is always produced, bypassing the pyjhora index-lookup bug that could wrap
     # an out-of-range index to a wrong entry (precedent: chart.py computes the
     # ascendant directly via swisseph). The pyjhora calls are kept ONLY for their
-    # end-time values, and the end-time extraction is individually guarded: a
-    # failed end-time (exception OR an out-of-range pyjhora index) yields a null
-    # end-time and marks the day degraded — the end-time is a refinement, never a
-    # crash. The tithi NAME stays pyjhora-derived (a fortnight count, not a
-    # single-body longitude bucket); on failure it goes None and the day degrades.
+    # end-time values.
+    #
+    # NAME and END TIME are classified SEPARATELY even where one call yields
+    # both, because they are read very differently: the scan reads the tithi
+    # name (rikta/amavasya scoring) and the karana name (the Vishti hard veto),
+    # while the four end-times have ZERO reads anywhere in the pipeline. So a
+    # name failure raises and an end-time failure degrades, rather than a single
+    # handler collapsing both into a degraded day.
 
-    # Tithi (name + end both from pyjhora; a crash here — e.g. a ZeroDivisionError
-    # at an exact phase boundary — must not abort the whole day).
-    try:
+    # Tithi — NAME from pyjhora (a fortnight count, not a single-body longitude
+    # bucket, so it cannot be recomputed here the way nakshatra/yoga are). It
+    # feeds panchanga_suitable in the scorer, so it RAISES: a null tithi scored
+    # the day as merely 'not suitable', which is a different (and quieter)
+    # statement than 'this day could not be computed'.
+    with _require(
+        "tithi", target_date, "muhurat_tithi_failed",
+        "the tithi could not be computed (e.g. a ZeroDivisionError at an exact "
+        "phase boundary); it is a primary limb of the recommendation",
+    ):
         t_res = drik.tithi(jd, place)
         t_name = get_tithi_name(t_res[0])
+    t_end = None
+    with _degradable(
+        "panchanga.tithi_end", degraded_limbs, "muhurat_tithi_end_unavailable"
+    ):
         t_end = float_hours_to_hhmm(t_res[2])
-    except Exception:
-        logger.warning("muhurat_tithi_failed", exc_info=True)
-        t_name = None
-        t_end = None
-        degraded = True
 
     # Nakshatra: NAME directly from the Moon's longitude (always valid); end-time
-    # from pyjhora, guarded. Use jd_utc so drik.sidereal_longitude gets the true
-    # UTC Julian Day (local jd causes a ~tz * 0.55°/hr error — ~3° for IST).
+    # from pyjhora, degradable. Use jd_utc so drik.sidereal_longitude gets the
+    # true UTC Julian Day (local jd causes a ~tz * 0.55°/hr error — ~3° for IST).
     n_name, _ = _nakshatra_from_moon(jd_utc)
-    try:
+    n_end = None
+    with _degradable(
+        "panchanga.nakshatra_end", degraded_limbs, "muhurat_nakshatra_end_unavailable"
+    ):
         n_res = drik.nakshatra(jd, place)
         n_idx = n_res[0]
         if not 1 <= n_idx <= len(utils.NAKSHATRAS):
             raise ValueError(f"nakshatra index out of range: {n_idx}")
         n_end = float_hours_to_hhmm(n_res[3])  # index 3 contains the end float hour
-    except Exception:
-        logger.warning("muhurat_nakshatra_end_unavailable", exc_info=True)
-        n_end = None
-        degraded = True
 
     # Yoga: NAME directly from the Sun+Moon longitude sum (always valid); end-time
-    # from pyjhora, guarded. Use jd_utc for the same reason as nakshatra above.
+    # from pyjhora, degradable. Use jd_utc for the same reason as nakshatra above.
     y_name, _ = _yoga_from_sun_moon(jd_utc)
-    try:
+    y_end = None
+    with _degradable(
+        "panchanga.yogam_end", degraded_limbs, "muhurat_yoga_end_unavailable"
+    ):
         y_res = drik.yogam(jd, place)
         y_idx = y_res[0]
         if not 1 <= y_idx <= len(YOGAS):
             raise ValueError(f"yoga index out of range: {y_idx}")
         y_end = float_hours_to_hhmm(y_res[2])
-    except Exception:
-        logger.warning("muhurat_yoga_end_unavailable", exc_info=True)
-        y_end = None
-        degraded = True
 
-    # Karana (name + end both from pyjhora; guarded).
-    try:
+    # Karana — the NAME carries the Bhadra (Vishti) hard veto, which the scorer
+    # applies as `karana == "Vishti"`. A null name reads there as the empty
+    # string, so the veto simply does not fire: an unverifiable Bhadra silently
+    # became a clean one. It RAISES; the end time degrades.
+    with _require(
+        "karana", target_date, "muhurat_karana_failed",
+        "the karana could not be computed; its name carries the Bhadra (Vishti) "
+        "veto, which cannot be applied without it",
+    ):
         k_res = drik.karana(jd, place)
         k_name = get_karana_name(k_res[0])
+    k_end = None
+    with _degradable(
+        "panchanga.karana_end", degraded_limbs, "muhurat_karana_end_unavailable"
+    ):
         k_end = float_hours_to_hhmm(k_res[2])
-    except Exception:
-        logger.warning("muhurat_karana_failed", exc_info=True)
-        k_name = None
-        k_end = None
-        degraded = True
 
     # Derived weekday
     weekday = target_date.strftime("%A")
@@ -386,114 +556,116 @@ def compute_muhurat_for_day(
         "vaara": weekday
     }
 
-    # 4. Auspicious windows (Abhijit, Brahma, Vijaya, Godhuli, Nishita)
+    # 4. Auspicious windows (Abhijit, Brahma, Vijaya, Godhuli, Nishita).
+    #
+    # These RAISE. They are not decoration: together with the favourable
+    # chogadiya windows they ARE the candidate set — lagna_shuddhi's
+    # _candidate_minutes scans only the minutes these windows cover. Dropping a
+    # failed window quietly removed candidate minutes, so the recommended
+    # instant moved to whatever survived; drop them all and the day yields no
+    # candidates at all while still serving HTTP 200 with an empty list.
+    _AUSPICIOUS_HINT = (
+        "an auspicious window failed; these windows define the candidate "
+        "minutes a recommendation is chosen from"
+    )
     auspicious = []
-    try:
+    with _require("abhijit_muhurta", target_date, "muhurat_abhijit_failed", _AUSPICIOUS_HINT):
         ab = drik.abhijit_muhurta(jd, place)
         auspicious.append({"start": ab[0][:5], "end": ab[1][:5], "label": "Abhijit Muhurta"})
-    except Exception:
-        logger.warning("muhurat_abhijit_failed", exc_info=True)
 
-    try:
+    with _require("brahma_muhurtha", target_date, "muhurat_brahma_failed", _AUSPICIOUS_HINT):
         bm = drik.brahma_muhurtha(jd, place)
         auspicious.append({"start": float_hours_to_hhmm(bm[0]), "end": float_hours_to_hhmm(bm[1]), "label": "Brahma Muhurtha"})
-    except Exception:
-        logger.warning("muhurat_brahma_failed", exc_info=True)
 
-    try:
+    with _require("vijaya_muhurtha", target_date, "muhurat_vijaya_failed", _AUSPICIOUS_HINT):
         vm = drik.vijaya_muhurtha(jd, place)
         # vm is double tuple: ((day_start, day_end), (night_start, night_end))
         auspicious.append({"start": float_hours_to_hhmm(vm[0][0]), "end": float_hours_to_hhmm(vm[0][1]), "label": "Vijaya Muhurtha (Day)"})
         auspicious.append({"start": float_hours_to_hhmm(vm[1][0]), "end": float_hours_to_hhmm(vm[1][1]), "label": "Vijaya Muhurtha (Night)"})
-    except Exception:
-        logger.warning("muhurat_vijaya_failed", exc_info=True)
 
-    try:
+    with _require("godhuli_muhurtha", target_date, "muhurat_godhuli_failed", _AUSPICIOUS_HINT):
         gm = drik.godhuli_muhurtha(jd, place)
         auspicious.append({"start": float_hours_to_hhmm(gm[0]), "end": float_hours_to_hhmm(gm[1]), "label": "Godhuli Muhurtha"})
-    except Exception:
-        logger.warning("muhurat_godhuli_failed", exc_info=True)
 
-    try:
+    with _require("nishita_muhurtha", target_date, "muhurat_nishita_failed", _AUSPICIOUS_HINT):
         nm = drik.nishita_muhurtha(jd, place)
         auspicious.append({"start": float_hours_to_hhmm(nm[0]), "end": float_hours_to_hhmm(nm[1]), "label": "Nishita Muhurtha"})
-    except Exception:
-        logger.warning("muhurat_nishita_failed", exc_info=True)
 
-    # 5. Chogadiya windows
+    # 5. Chogadiya windows — the other half of the candidate set (the favourable
+    # labels are scanned directly) and a scored factor in its own right, so a
+    # failure RAISES rather than serving an empty division of the day.
     chogadiya_list = []
-    try:
+    with _require(
+        "chogadiya", target_date, "muhurat_chogadiya_failed",
+        "the chogadiya division failed; its favourable windows are half the "
+        "candidate minutes a recommendation is chosen from",
+    ):
         gc = drik.gauri_choghadiya(jd, place)
         for g_type, g_start, g_end in gc:
             label = _CHOGHADIYA_TYPES.get(g_type, "Unknown")
             chogadiya_list.append({"start": g_start[:5], "end": g_end[:5], "label": label})
-    except Exception:
-        logger.warning("muhurat_chogadiya_failed", exc_info=True)
 
     # 6. Inauspicious periods (Rahu Kala, Yamagandam, Gulikai, Durmuhurtam, Varjyam).
     #
-    # Rahu Kala / Yamaganda / Gulika are ABSOLUTE classical vetoes. If any of the
-    # three cannot be computed the veto cannot be enforced, so the day is flagged
-    # hard_gate_failed (and degraded): the consumer must then fail every candidate
-    # instant closed rather than silently passing the missing veto. Durmuhurtam /
-    # Varjyam / Amrita are per-activity soft signals and do NOT trip the hard gate.
+    # ALL FIVE RAISE. Rahu Kala / Yamaganda / Gulika are ABSOLUTE classical
+    # vetoes; Durmuhurtam and Varjyam are per-activity hard vetoes the scorer
+    # applies through ``rule.hard_excludes``. Every one of them reaches the
+    # scorer as a WINDOW LIST it matches labels against, so a dropped window is
+    # not a missing signal the consumer can see — it is a veto that silently
+    # does not fire, which recommends an instant the classical rule forbids.
+    #
+    # The three absolute vetoes previously set ``hard_gate_failed``, a flag that
+    # made the whole day unrecommendable. Raising is the same fail-closed
+    # intent, stated where it cannot be misread as a computed result.
+    _VETO_HINT = (
+        "a classical veto window could not be computed; an unverifiable veto "
+        "must not be served as an absent one"
+    )
     inauspicious = []
-    hard_gate_failed = False
-    try:
+    with _require("rahu_kaalam", target_date, "muhurat_rahu_kaalam_failed", _VETO_HINT):
         rk = drik.raahu_kaalam(jd, place)
         inauspicious.append({"start": rk[0][:5], "end": rk[1][:5], "label": "Rahu Kala"})
-    except Exception:
-        logger.warning("muhurat_rahu_kaalam_failed", exc_info=True)
-        hard_gate_failed = True
 
-    try:
+    with _require("yamaganda_kaalam", target_date, "muhurat_yamaganda_failed", _VETO_HINT):
         yg = drik.yamaganda_kaalam(jd, place)
         inauspicious.append({"start": yg[0][:5], "end": yg[1][:5], "label": "Yamagandam"})
-    except Exception:
-        logger.warning("muhurat_yamaganda_failed", exc_info=True)
-        hard_gate_failed = True
 
-    try:
+    with _require("gulikai_kaalam", target_date, "muhurat_gulikai_failed", _VETO_HINT):
         gk = drik.gulikai_kaalam(jd, place)
         inauspicious.append({"start": gk[0][:5], "end": gk[1][:5], "label": "Gulika"})
-    except Exception:
-        logger.warning("muhurat_gulikai_failed", exc_info=True)
-        hard_gate_failed = True
 
-    if hard_gate_failed:
-        degraded = True
-
-    try:
+    with _require("durmuhurtam", target_date, "muhurat_durmuhurtam_failed", _VETO_HINT):
         dm = drik.durmuhurtam(jd, place)
         # dm list of strings in pairs
         if len(dm) >= 2:
             inauspicious.append({"start": dm[0][:5], "end": dm[1][:5], "label": "Durmuhurtam Period 1"})
         if len(dm) >= 4:
             inauspicious.append({"start": dm[2][:5], "end": dm[3][:5], "label": "Durmuhurtam Period 2"})
-    except Exception:
-        logger.warning("muhurat_durmuhurtam_failed", exc_info=True)
 
-    try:
+    with _require("varjyam", target_date, "muhurat_varjyam_failed", _VETO_HINT):
         vj = drik.varjyam(jd, place)
         # float hours, can span sunrise
         inauspicious.append({"start": float_hours_to_hhmm(vj[0]), "end": float_hours_to_hhmm(vj[1]), "label": "Varjyam"})
-    except Exception:
-        logger.warning("muhurat_varjyam_failed", exc_info=True)
 
-    # 7. Amrita periods
+    # 7. Amrita periods — served for display only (zero reads in the scan
+    # pipeline: they are neither a veto nor a candidate-window source), so this
+    # is one of the limbs that may degrade. It names itself when it does.
     amrita = []
-    try:
+    with _degradable("amrita_periods", degraded_limbs, "muhurat_amrita_failed"):
         ag = drik.amrita_gadiya(jd, place)
         amrita.append({"start": float_hours_to_hhmm(ag[0]), "end": float_hours_to_hhmm(ag[1]), "label": "Amrita Gadiya"})
-    except Exception:
-        logger.warning("muhurat_amrita_failed", exc_info=True)
 
     # 8. Panchaka free periods.
-    # Starts None ('panchaka status could not be computed'); set True/False only
-    # on a successful computation. None remains on failure so the consumer fails
-    # closed rather than defaulting to a false 'clean' (panchaka_free=True).
-    panchaka_free = None
-    try:
+    #
+    # RAISES. This used to stay None for 'panchaka status could not be computed'
+    # and rely on the consumer to fail closed on the null — but a veto flag that
+    # asks its reader to guess is the same silent-drop shape as an omitted
+    # window, and nothing in this service could tell whether the reader did.
+    # panchaka_free is now always an answered bool or an error.
+    with _require(
+        "panchaka", target_date, "muhurat_panchaka_failed",
+        "the panchaka-rahita veto could not be computed",
+    ):
         pk = drik.panchaka_rahitha(jd, place)
         # pk is list of tuples: (dosha_idx, start_h, end_h)
         # if there are any non-zero doshas spanning noon, we can mark as not panchaka free
@@ -502,28 +674,41 @@ def compute_muhurat_for_day(
             if s_h <= 12.0 <= e_h and dosha != 0:
                 panchaka_free = False
                 break
-    except Exception:
-        logger.warning("muhurat_panchaka_failed", exc_info=True)
 
     # 9. Personalized Balam
     personal = None
     if birth_nakshatra and birth_moon_sign:
+        # Tara / Chandra Bala keep DEGRADING rather than raising, because
+        # 'Unknown' is already a visible degradation downstream: the scorer
+        # penalises it exactly as it penalises a classically-bad Tara and caps
+        # the band at Fair, so the recommendation cannot silently improve on a
+        # failed limb. What they lacked — and now have — is a log line and a
+        # named entry in degraded_limbs; before this they were the only limbs in
+        # the module that failed with no record at all.
+        #
+        # 'Unknown' (NOT 'Neutral') uniformly means 'could not be computed',
+        # matching compute_balam_at_jd.
+
         # Tara Bala — the transit star comes from the DIRECT Moon-longitude
         # computation (1-based index), never the pyjhora index that may be
-        # corrupt. On failure 'Unknown' (NOT 'Neutral'): 'Unknown' uniformly
-        # means 'could not be computed', matching compute_balam_at_jd.
-        try:
+        # corrupt.
+        tara_str = "Unknown"
+        with _degradable(
+            "personal_balam.tara_bala", degraded_limbs, "muhurat_tara_bala_unavailable"
+        ):
             _, transit_star = _nakshatra_from_moon(jd_utc)  # 1-27, from UTC-corrected longitude
             birth_star_idx = utils.NAKSHATRAS.index(birth_nakshatra) + 1
             tb_div = (((transit_star - birth_star_idx + 27) % 27) + 1) % 9
             tb_label, tb_desc = _TARA_BALA_LEVELS.get(tb_div, ("Unknown", "Neutral"))
             tara_str = f"{tb_label} ({tb_desc})"
-        except Exception:
-            tara_str = "Unknown"
 
-        # Chandra Bala — on failure 'Unknown' (NOT 'Neutral'), same convention.
+        # Chandra Bala — same convention.
         # Use jd_utc: utils.graha_sidereal_longitude expects a UTC Julian Day.
-        try:
+        chandra_str = "Unknown"
+        with _degradable(
+            "personal_balam.chandra_bala", degraded_limbs,
+            "muhurat_chandra_bala_unavailable",
+        ):
             transit_moon_lon = utils.graha_sidereal_longitude(jd_utc, "Moon")
             transit_moon_sign_idx = int(transit_moon_lon // 30) % 12
             birth_moon_sign_idx = utils.SIGNS.index(birth_moon_sign)
@@ -534,8 +719,6 @@ def compute_muhurat_for_day(
                 chandra_str = "Neutral"
             else:
                 chandra_str = "Inauspicious (Avoid)"
-        except Exception:
-            chandra_str = "Unknown"
 
         personal = {
             "tara_bala": tara_str,
@@ -544,11 +727,21 @@ def compute_muhurat_for_day(
 
     # 10. All 30 muhurtas.
     #
-    # The guard covers ONLY the library call, which has a legitimate
-    # environmental failure mode: the division is derived from sunrise/sunset,
-    # and those genuinely fail at extreme latitudes. That failure drops the limb
-    # and marks the day degraded — an empty list a consumer cannot tell apart
-    # from "this day has no muhurtas" is not an acceptable answer on its own.
+    # This limb DEGRADES rather than raising, and the line is drawn on what the
+    # limb decides, not on how classical it is: the 30-fold division is a named
+    # display table with zero reads anywhere in the scan pipeline (the candidate
+    # minutes come from auspicious_muhurtas + chogadiya, not from here), so its
+    # loss cannot move the recommended instant. Contrast the panchaka / eclipse /
+    # adhika-maasa flags above, which are VETOES and therefore raise. The
+    # degradation is explicit: the limb names itself in degraded_limbs.
+    #
+    # The guard covers ONLY the library call, which had a legitimate
+    # environmental failure mode: the division is derived from sunrise/sunset.
+    # That mode is now largely unreachable from here — the sunrise/sunset limbs
+    # raise before this point on exactly those inputs — but the guard stays,
+    # because a library failure that is not the day frame must still not be
+    # served as an empty table a consumer cannot tell apart from "this day has
+    # no muhurtas".
     #
     # Parsing sits in the `else` block, OUTSIDE the guard, and is strict: an
     # entry that does not match the contracted shape, or a count other than the
@@ -560,12 +753,10 @@ def compute_muhurat_for_day(
     # `except Exception` logged it, and the endpoint served `[]` behind HTTP 200
     # with `degraded` still False.
     all_muhur = []
-    try:
+    m30 = None
+    with _degradable("all_muhurtas", degraded_limbs, "muhurat_muhurthas_failed"):
         m30 = drik.muhurthas(jd, place)
-    except Exception:
-        logger.warning("muhurat_muhurthas_failed", exc_info=True)
-        degraded = True
-    else:
+    if m30 is not None:
         if len(m30) != len(_MUHURTA_NAMES):
             raise ValueError(
                 f"muhurthas returned {len(m30)} entries, expected "
@@ -618,14 +809,23 @@ def compute_muhurat_for_day(
         "personal_balam": personal,
         "all_muhurtas": all_muhur,
         # Day-level electional gates referenced by per-activity rule tables
-        # (lagna_shuddhi._ACTIVITY_RULES.hard_excludes). bool | None: None ==
-        # 'status could not be computed' → the consumer vetoes (fail closed).
+        # (lagna_shuddhi._ACTIVITY_RULES.hard_excludes). Always an answered bool
+        # from this producer: an unverifiable veto raises rather than resolving
+        # to the None that the consumer-side gate reads as 'veto'.
         "is_eclipse_day": _is_eclipse_day(target_date, place),
-        "is_adhik_maasa": _is_adhik_maasa(jd, place),
-        # Absolute-veto (Rahu/Yama/Gulika) computation failed → the consumer must
-        # fail every candidate instant closed (the classical veto is unverifiable).
-        "hard_gate_failed": hard_gate_failed,
-        # True on any failure that corrupts the day: sunrise/sunset fallback,
-        # tithi/nakshatra/yoga/karana name-or-end failure, or hard-gate failure.
-        "degraded": degraded,
+        "is_adhik_maasa": _is_adhik_maasa(jd, place, target_date),
+        # Retained on the wire, and always False from this producer: the three
+        # absolute-veto limbs (Rahu/Yama/Gulika) now raise instead of setting
+        # it. The field and the consumer-side fail-closed gate that reads it
+        # (lagna_shuddhi._score_instant) both stay — removing a served field is
+        # a breaking change to /v1, and the gate remains correct for any day
+        # payload that carries the flag set.
+        "hard_gate_failed": False,
+        # DERIVED from degraded_limbs, so the summary flag and the per-limb
+        # detail cannot disagree.
+        "degraded": bool(degraded_limbs),
+        # Which supplementary limbs degraded, by served-field name — a consumer
+        # seeing degraded=True can now tell WHAT it lost. Recommendation-
+        # affecting limbs are absent from this list by construction: they raise.
+        "degraded_limbs": degraded_limbs,
     }

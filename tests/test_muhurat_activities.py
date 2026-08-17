@@ -153,8 +153,12 @@ def test_surgery_vetoes_durmuhurtam_generic_does_not():
 # ---------------------------------------------------------------------------
 
 def test_adhik_maasa_gate_known_dates():
-    assert muhurat._is_adhik_maasa(swe.julday(2023, 8, 1, 12.0), _DELHI) is True
-    assert muhurat._is_adhik_maasa(swe.julday(2026, 5, 10, 12.0), _DELHI) is False
+    assert muhurat._is_adhik_maasa(
+        swe.julday(2023, 8, 1, 12.0), _DELHI, dt.date(2023, 8, 1)
+    ) is True
+    assert muhurat._is_adhik_maasa(
+        swe.julday(2026, 5, 10, 12.0), _DELHI, dt.date(2026, 5, 10)
+    ) is False
 
 
 def test_eclipse_gate_is_location_aware():
