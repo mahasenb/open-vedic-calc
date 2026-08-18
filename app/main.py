@@ -186,6 +186,56 @@ async def _validation_exception_handler(
     return JSONResponse(status_code=422, content={"detail": sanitized})
 
 
+# Stable, machine-readable discriminator carried in the error body so the HTTP
+# caller can branch on this specific failure class without string-matching a
+# human message. Part of the wire contract — see the handler below.
+MUHURAT_LIMB_ERROR_CODE = "muhurat_limb_error"
+
+
+@app.exception_handler(muhurat_mod.MuhurtaLimbError)
+async def _muhurat_limb_error_handler(
+    request: Request, exc: muhurat_mod.MuhurtaLimbError
+) -> JSONResponse:
+    """Surface a recommendation-affecting limb failure as a structured 422.
+
+    ``bphs_core.muhurat`` RAISES ``MuhurtaLimbError`` (project decision
+    2026-08-17) for every limb that decides WHICH time can be recommended,
+    rather than fabricating a day frame the caller cannot distinguish from a
+    real one. On a synchronous route that exception would otherwise propagate
+    as an opaque 500, so the caller could not tell WHICH limb failed. This
+    handler maps it into the same ``{"detail": ...}`` envelope the validation
+    handler above uses, carrying the limb name, the target date and the stable
+    ``code`` so the caller can branch on the failure precisely — never a 200
+    masking an empty/partial muhurat list, never an opaque 500.
+
+    422 (Unprocessable), not a 5xx, matches this service's existing convention:
+    every "well-formed request the engine cannot fulfil" here (date-range caps,
+    end-before-start, member counts, invalid activity) is already a 422, and a
+    limb that cannot be computed for the requested date/place is the same class
+    of outcome — deterministic, so retrying the identical request cannot change
+    it. The failure is still logged server-side at ERROR with the originating
+    traceback at the raise site (``muhurat._require``), so mapping it to 422
+    loses no observability.
+
+    Registered against the exception class, so it fires wherever a limb error
+    reaches the request/response cycle (the ``/v1/muhurat`` sync route and the
+    synchronous lagna-shuddhi routes alike). It does NOT fire on the async
+    scan-job path: that path captures every exception into ``job.error`` on its
+    background thread (see ``app/jobs.py``), which never enters this cycle.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "code": MUHURAT_LIMB_ERROR_CODE,
+                "limb": exc.limb,
+                "target_date": exc.target_date.strftime("%Y-%m-%d"),
+                "message": str(exc),
+            }
+        },
+    )
+
+
 AUTH = [Depends(require_token)]
 
 
