@@ -132,3 +132,21 @@ Endpoints under `/v1/`:
 | POST | `/transits` | Saturn/Jupiter gochara, Sade Sati, Vedha |
 | POST | `/special-points` | Arudha, Upapada, Atmakaraka, Karakamsa |
 | GET | `/source` | License, source URL, running commit |
+
+### Errors
+
+Request-validation failures return `422` with `{"detail": [...]}` (the standard
+FastAPI shape). One engine-compute failure has its own structured shape: when a
+muhurat/electional limb that decides *which* time can be recommended cannot be
+computed for the requested date/place, the engine raises rather than fabricating
+a day frame, and the synchronous routes surface that as a `422` naming the limb:
+
+```json
+{"detail": {"code": "muhurat_limb_error", "limb": "sunrise",
+            "target_date": "2026-05-26", "message": "..."}}
+```
+
+The stable `code` is the field to branch on; `limb` names what failed. This is
+returned instead of an opaque `500`, and never as a `200` with an empty or
+partial result. On the async scan-job endpoints the same failure is reported in
+the job's `error` field on poll, not as an HTTP error on submit.

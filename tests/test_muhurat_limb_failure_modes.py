@@ -498,11 +498,14 @@ class TestTheEndpointSurfacesTheFailure:
     """End to end: a recommendation-affecting limb failure must not be servable
     as a well-formed day.
 
-    The point of raising is what the CALLER sees. A limb error propagates out of
-    the route rather than being rendered into a 200 carrying a partial day —
-    'an empty field a consumer cannot distinguish from a real answer is worse
-    than a 500' is this repo's own standing rule, and this is the case it was
-    written for.
+    The point of raising is what the CALLER sees. A limb error is surfaced by
+    the synchronous route as a structured 422 naming the failed limb (register
+    #285) rather than being rendered into a 200 carrying a partial day, and
+    rather than an opaque 500 the caller cannot attribute to a limb — 'an empty
+    field a consumer cannot distinguish from a real answer is worse than a 500'
+    is this repo's own standing rule, and this is the case it was written for.
+    The route envelope itself is pinned in tests/test_muhurat_limb_error_route.py;
+    this case proves the real engine raise reaches that envelope end to end.
     """
 
     def _request(self):
@@ -522,8 +525,17 @@ class TestTheEndpointSurfacesTheFailure:
         from bphs_core import muhurat as mod
         _patch_first_failure(monkeypatch, "gauri_choghadiya")
         assert mod.drik is m.drik  # one shared module object, so the patch applies
-        with pytest.raises(m.MuhurtaLimbError):
-            client.post("/v1/muhurat", json=self._request())
+        # gauri_choghadiya feeds the chogadiya windows — a recommendation-
+        # affecting limb — so it RAISES MuhurtaLimbError, which the route surfaces
+        # as a structured 422 naming the limb (register #285): never a 200 with a
+        # partial day, never an opaque 500.
+        r = client.post("/v1/muhurat", json=self._request())
+        assert r.status_code == 422, r.text
+        body = r.json()
+        assert "days" not in body  # not served as a well-formed day
+        detail = body["detail"]
+        assert detail["code"] == "muhurat_limb_error"
+        assert detail["limb"] == "chogadiya"
 
 
 class TestEventHoursValidator:
