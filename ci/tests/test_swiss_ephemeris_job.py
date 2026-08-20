@@ -1559,6 +1559,273 @@ def test_enablement_snapshot_catches_forms_the_semantic_checks_do_not() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# The suite step must still REACH every swiss-gated module
+# ---------------------------------------------------------------------------
+#
+# The checks above prove the job exists, fetches the data, installs frozen, and runs
+# `pytest tests/…` with the fail-closed flag. None of them proves WHICH tests that
+# pytest invocation reaches, and `_runs_the_test_suite` deliberately accepts any target
+# under `tests/`. So this passes every assertion above:
+#
+#     REQUIRE_SWISS_EPHEMERIS: "1"
+#     run: uv run --frozen python -m pytest tests/test_swiss_ephemeris.py -q
+#
+# and it silently drops tests/test_independent_reference_corpus.py (the NASA/JPL
+# corpus) and tests/test_ayanamsa_zero_point.py out of the accuracy gate. Those modules
+# are gated on the `swiss_ephemeris` fixture, so in the fast `test` job — which has no
+# ephemeris data — they SKIP. Narrow the target here and they skip in BOTH jobs: the
+# external-authority accuracy assertions stop running anywhere, green, silently. That
+# is the same fail-open shape as deleting the job, reached by editing one path.
+#
+# SCOPE COMES FROM THE SOURCE OF TRUTH, NOT A HARDCODED LIST. The protected set is
+# derived by parsing tests/*.py and finding functions that take the `swiss_ephemeris`
+# fixture, so a THIRD swiss-gated module added tomorrow is protected the day it lands
+# without anyone remembering to edit this file. A hardcoded list would silently stop
+# covering exactly the module a future author forgot about.
+#
+# ast, not grep: `swiss_ephemeris` appears in comments, in docstrings, and in this very
+# file. Only a parameter in a function signature means a test is actually gated.
+
+_CORPUS_MODULE = "tests/test_independent_reference_corpus.py"
+_FIXTURE = "swiss_ephemeris"
+# pytest flags that REMOVE tests from a run. The accuracy job exists to run the whole
+# suite against real data, so any of these in its suite step is treated as narrowing.
+_DESELECTING_FLAGS = ("--ignore", "--ignore-glob", "--deselect", "-k", "-m")
+
+
+def _swiss_gated_modules() -> list[str]:
+    """Repo-relative paths of test modules with at least one `swiss_ephemeris`-gated test."""
+    import ast
+
+    gated: list[str] = []
+    for path in sorted((_REPO_ROOT / "tests").glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a broken test file fails elsewhere
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = node.args
+            names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+            if _FIXTURE in names and node.name.startswith("test_"):
+                gated.append(path.relative_to(_REPO_ROOT).as_posix())
+                break
+    return gated
+
+
+def _pytest_targets(run: str) -> list[str]:
+    """Positional (non-flag) arguments of the pytest command in ``run``.
+
+    Flag VALUES are skipped in both spellings: `--ignore=x` collapses to one token,
+    while `--ignore x` puts the path in the next argv slot where it would otherwise
+    look like a target.
+    """
+    for tokens in _commands(run):
+        if "pytest" not in tokens:
+            continue
+        targets: list[str] = []
+        after_pytest = tokens[tokens.index("pytest") + 1 :]
+        skip_next = False
+        for token in after_pytest:
+            if skip_next:
+                skip_next = False
+                continue
+            if token.startswith("-"):
+                if "=" not in token and token in _DESELECTING_FLAGS:
+                    skip_next = True
+                continue
+            targets.append(token)
+        return targets
+    return []
+
+
+def _deselecting_flags(run: str) -> list[str]:
+    """Narrowing flags present on the pytest command, however they are spelled."""
+    found: list[str] = []
+    for tokens in _commands(run):
+        if "pytest" not in tokens:
+            continue
+        for token in tokens[tokens.index("pytest") + 1 :]:
+            if not token.startswith("-"):
+                continue
+            name = token.split("=", 1)[0]
+            if name in _DESELECTING_FLAGS:
+                found.append(name)
+    return found
+
+
+def _target_reaches(target: str, module: str) -> bool:
+    """True when a pytest positional argument would collect ``module``."""
+    normalised = target.replace("\\", "/").rstrip("/")
+    # `pytest tests` / `pytest tests/` — the whole tree, and anything under it.
+    if normalised in {"tests", "."}:
+        return True
+    # An explicit file, with or without a `::node` selector.
+    return normalised.split("::", 1)[0] == module
+
+
+def _job_reaches(job: dict, module: str) -> bool:
+    step = _suite_step(job)
+    if step is None:
+        return False
+    run = str(step.get("run", ""))
+    if _deselecting_flags(run):
+        return False
+    return any(_target_reaches(target, module) for target in _pytest_targets(run))
+
+
+_FIXTURE_TARGET_NARROWED = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/test_swiss_ephemeris.py -q
+"""
+
+_FIXTURE_TARGET_IGNORES_CORPUS = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ -q --ignore=tests/test_independent_reference_corpus.py
+"""
+
+_FIXTURE_TARGET_IGNORES_SPACE_SEPARATED = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ --ignore tests/test_independent_reference_corpus.py -q
+"""
+
+_FIXTURE_TARGET_DESELECTED_BY_K = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ -q -k "not corpus"
+"""
+
+_FIXTURE_TARGET_EXPLICIT_FILE = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: |
+          uv run --frozen python -m pytest tests/test_swiss_ephemeris.py \
+            tests/test_independent_reference_corpus.py -q
+"""
+
+_FIXTURE_TARGET_ONLY_ECHOED = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: |
+          echo "pytest tests/ -q"
+          uv run --frozen python -m pytest tests/test_swiss_ephemeris.py -q
+"""
+
+
+def test_reachability_parser_discriminates() -> None:
+    """Fixtures the coverage check must get right — each one keeps the job, the fetch
+    step and the flag, and differs ONLY in which tests the suite step reaches."""
+    corpus = _CORPUS_MODULE
+
+    def job_of(fixture: str) -> dict:
+        parsed = _job(yaml.safe_load(fixture), _JOB)
+        assert parsed is not None
+        return parsed
+
+    # The real shape (whole tree) reaches everything.
+    assert _job_reaches(job_of(_FIXTURE_GOOD), corpus)
+    # Narrowing the target to one module drops the corpus.
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_NARROWED), corpus)
+    # --ignore, in both spellings.
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_IGNORES_CORPUS), corpus)
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_IGNORES_SPACE_SEPARATED), corpus)
+    # -k deselection.
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_DESELECTED_BY_K), corpus)
+    # Naming the file explicitly is legitimate coverage, so it must NOT false-reject.
+    assert _job_reaches(job_of(_FIXTURE_TARGET_EXPLICIT_FILE), corpus)
+    # A narrowed real command is not rescued by the full command appearing in an echo.
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_ONLY_ECHOED), corpus)
+
+    # The space-separated `--ignore <path>` form must not leave the path looking like a
+    # target: without the skip_next branch this would read as a positional argument.
+    assert "tests/test_independent_reference_corpus.py" not in _pytest_targets(
+        "pytest tests/ --ignore tests/test_independent_reference_corpus.py -q"
+    )
+
+    # And the module-discovery half must actually discover something, or every
+    # assertion below is vacuous on an empty set.
+    discovered = _swiss_gated_modules()
+    assert corpus in discovered, (
+        f"{corpus} is not being discovered as a swiss-gated module — the ast scan is "
+        f"broken and the real assertion would be vacuous. Found: {discovered}"
+    )
+    assert "tests/test_swiss_ephemeris.py" in discovered, discovered
+
+
+def test_swiss_job_reaches_every_swiss_gated_module() -> None:
+    """The accuracy job's pytest target must still collect every fixture-gated module.
+
+    Deleting the job is caught by ``_real_job``; this catches the quieter edit that
+    keeps the job and narrows what it runs. Both end the same way — an accuracy
+    assertion that no job on earth executes, with CI green.
+    """
+    test_parser_discriminates()
+    test_reachability_parser_discriminates()
+    job = _real_job()
+
+    gated = _swiss_gated_modules()
+    assert gated, (
+        "no test module takes the `swiss_ephemeris` fixture — either the fixture was "
+        "renamed (update _FIXTURE here with it) or the accuracy modules are gone. "
+        "Either way this guard has silently stopped guarding anything."
+    )
+    assert _CORPUS_MODULE in gated, (
+        f"{_CORPUS_MODULE} no longer has any `swiss_ephemeris`-gated test. That module "
+        "carries the only externally-sourced (NASA/JPL Horizons) accuracy assertions in "
+        "this repo; if it is genuinely gone, this guard must be revisited deliberately."
+    )
+
+    step = _suite_step(job)
+    assert step is not None, f"the `{_JOB}` job has no suite step (see the check above)"
+    run = str(step.get("run", ""))
+
+    narrowing = _deselecting_flags(run)
+    assert not narrowing, (
+        f"the `{_JOB}` job's suite step carries deselecting pytest flag(s) {narrowing}. "
+        "This job exists to run the WHOLE suite against real ephemeris data; anything "
+        f"that removes tests from it can silently disarm an accuracy module. run:\n{run}"
+    )
+
+    unreached = [module for module in gated if not _job_reaches(job, module)]
+    assert not unreached, (
+        f"the `{_JOB}` job's pytest invocation does not collect {unreached}.\n"
+        f"targets parsed: {_pytest_targets(run)}\nrun:\n{run}\n\n"
+        "Those modules are gated on the `swiss_ephemeris` fixture, so they SKIP in the "
+        "fast `test` job (which has no ephemeris data). This job is the only one that "
+        "asserts them. A target that misses them means they now run NOWHERE — the gate "
+        "reports green while the accuracy assertions it exists to run never execute."
+    )
+
+
 def test_manifest_and_goldens_are_committed() -> None:
     assert (_REPO_ROOT / _FETCHER).is_file(), f"{_FETCHER} is missing"
     assert (_REPO_ROOT / "ci" / "swiss_ephemeris.json").is_file(), (
