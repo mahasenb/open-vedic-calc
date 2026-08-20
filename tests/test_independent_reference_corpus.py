@@ -94,8 +94,14 @@ WHAT THE CORPUS DELIBERATELY DOES NOT COVER
   cannot supply an expected value for it at any price. ``ayanamsa_deg`` is recorded
   from the engine and labelled ``independent_of_this_engine: false`` in the corpus.
   ``test_ayanamsa_is_pinned_but_not_independently_sourced`` pins it as a regression
-  value and says so in its own name; pinning it to a published authority is
-  follow-up work, recorded in the PR.
+  value and says so in its own name. The *convention* that value expresses is no
+  longer unanchored: ``tests/test_ayanamsa_zero_point.py`` pins the sidereal origin to
+  the Calendar Reform Committee's own definition (Chitra/Spica at 180 deg sidereal,
+  plus the decreed 23 deg 15' at the 1956 reform epoch), which is external to this
+  engine and cannot be re-recorded. The division is deliberate: that file proves the
+  CONVENTION is right against an outside authority and rejects every other ayanamsa
+  family; the 1e-6 deg pin here proves the VALUE has not moved, which is what
+  separates Lahiri from the neighbouring true-Chitra model at ~61 arcsec.
 * **Dasha boundaries and muhurta.** Not astronomy any solar-system ephemeris
   publishes, so Horizons cannot supply expected values for them. Out of scope here,
   and — importantly — NOT claimed anywhere either: a gate that advertises coverage
@@ -246,7 +252,7 @@ def test_the_corpus_covers_all_nine_grahas() -> None:
 
 
 def test_apparent_longitudes_match_jpl(swiss_ephemeris: int) -> None:
-    """Seven visible grahas vs JPL Horizons, like-for-like, at 2 arcsec.
+    """Seven visible grahas vs JPL Horizons, like-for-like, at 1 arcsec.
 
     Requested through ``utils._GRAHA_SWE_BODY`` — the engine's own declared graha
     -> swisseph body map — so this fails by DEGREES if the two planet-id spaces
@@ -427,7 +433,15 @@ def test_ayanamsa_is_pinned_but_not_independently_sourced(swiss_ephemeris: int) 
     astrological convention, not an astronomical observable, and Horizons has no
     counterpart for it — so this value came from this engine and only detects the
     engine's ayanamsa MOVING, exactly like swiss_ephemeris_goldens.json does for
-    everything else. Sourcing it from a published authority is follow-up work.
+    everything else.
+
+    That remains true and this test keeps its name, but it is no longer the ONLY thing
+    holding the zero point: ``tests/test_ayanamsa_zero_point.py`` anchors the
+    convention to the Calendar Reform Committee's published definition. Keep both. At
+    1e-6 deg (0.0036 arcsec) this pin is four orders of magnitude tighter than either
+    anchor there (120 and 60 arcsec), so it is what catches a swap to the neighbouring
+    true-Chitra model (~61 arcsec) — a change the published record is too coarse to
+    distinguish.
     """
     from jhora.panchanga import drik
 
