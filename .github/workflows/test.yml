@@ -80,6 +80,27 @@ jobs:
         # `pytest` entry point does NOT put the CWD on sys.path, which is what
         # makes `from ci import …` fail in ci/tests/ and why those tests load
         # repo files by path. `python -m pytest` would quietly change that.
+        #
+        # THIS STEP COLLECTS THE ACCURACY MODULES BUT ASSERTS NOTHING IN THEM.
+        # tests/test_swiss_ephemeris.py, tests/test_independent_reference_corpus.py
+        # and tests/test_ayanamsa_zero_point.py are gated on the `swiss_ephemeris`
+        # fixture, and this job deliberately has NO ephemeris data — so every one of
+        # those tests SKIPS here and this job reports green having validated none of
+        # them. That is intended (compiling and downloading the data twice per PR buys
+        # nothing) but it makes the redundancy load-bearing rather than incidental:
+        #
+        #   the ONLY job that asserts the accuracy modules is `swiss-ephemeris` below.
+        #
+        # So a future edit that deletes that job, disables it, or merely narrows its
+        # pytest target does not turn those assertions red — it turns them into skips
+        # in the one job and nothing at all in the other, and the whole workflow stays
+        # green while the external-authority accuracy gate has been switched off. Do
+        # not "consolidate" the two jobs, and do not read this step's green as evidence
+        # about accuracy. ci/tests/test_swiss_ephemeris_job.py parses this file and
+        # fails on each of those mutations, including the narrowed-target one
+        # (test_swiss_job_reaches_every_swiss_gated_module), and derives the protected
+        # module set from the fixture itself so a new accuracy module is covered the
+        # day it lands.
         if: github.event_name != 'schedule'
         run: uv run --frozen pytest tests/ -q
       - name: Run CI gate regression suite
