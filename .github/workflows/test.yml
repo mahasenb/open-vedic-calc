@@ -181,7 +181,7 @@ jobs:
       # fetcher re-verifies every file on every run regardless of cache hit, so a
       # corrupted cache entry fails the job rather than being trusted.
       - name: Cache Swiss ephemeris data files
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data/ephe
           key: swiss-ephe-${{ hashFiles('ci/swiss_ephemeris.json') }}
