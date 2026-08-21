@@ -614,8 +614,8 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 #                       (``drik.lunar_month``) searching back to 1798-07-10.
 #   scanned 2400-01-09   342/2800 on Moshier — 48 from ``_is_adhik_maasa``
 #                       reaching forward to 2400-01-29, and 294 from the day's
-#                       OWN panchanga limbs — ``drik.tithi``, the first of the
-#                       four — at 2400-01-08..2400-01-10.
+#                       OWN panchanga limbs — ``drik.tithi`` first — at
+#                       2400-01-08..2400-01-10.
 #
 # Those call sites are named by FUNCTION, deliberately, not by line number. The
 # first draft of this block cited the tithi call by line number, which was true
@@ -623,11 +623,23 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 # added this comment added ~25 lines to ``_is_eclipse_day`` above it, shifting
 # that call (492 -> 517). A citation invalidated by its own commit is the worst
 # case of the failure this repo already recorded ("a citation that rots
-# silently is worse than none"), and it is not hypothetical here — sweeping
-# every file:line citation in the tree found FOUR more that no longer point at
-# what they claim, all of them predating this change. Name the callee and its
-# enclosing function; both are greppable and neither moves when a line is
-# inserted somewhere above.
+# silently is worse than none"), and it is not hypothetical here — sweeping the
+# tree's other file:line citations turned up further pre-existing ones that no
+# longer point at what they claim, none of them introduced by this change.
+#
+# HOW MANY is deliberately not written here, and that omission is the point.
+# A count in this comment is another hand-typed number that nothing recounts: it
+# would rot the next time any cited file is edited, which is the same defect the
+# paragraph above is warning about. Two review rounds on this very change died on
+# hand-typed numbers, and the sweeping instrument has known blind spots as well:
+# a citation naming two lines of one file at once, prose phrasings, and
+# citations into dependencies whose line numbers move with the pinned version. Any
+# total would therefore be one instrument's lower bound wearing the costume of a
+# fact. The enumeration lives in the change's report against a stated commit,
+# where it is a dated measurement instead of a standing claim.
+#
+# Name the callee and its enclosing function; both are greppable and neither
+# moves when a line is inserted somewhere above.
 #
 # THE PART THAT ACTUALLY COSTS ACCURACY
 # -------------------------------------
