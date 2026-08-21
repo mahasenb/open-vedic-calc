@@ -70,9 +70,11 @@ not a dead probe:
     jhora.horoscope.chart.strength ...............  never in sys.modules
     jhora.horoscope.chart.ashtakavarga ...........  never in sys.modules
 
-Those two calls are one expression — ``jhora/const.py:497``, an integer index
-extraction building a constant lookup table. Whether crossing the fork
-perturbs it was measured rather than assumed in either direction: the same
+Those two calls are one expression — the ``house_owners = np.where(...)``
+assignment in ``jhora/const.py``, an integer index extraction building a
+constant lookup table. Cited by symbol, not by line: it sits in a vendored
+dependency whose line numbers move with the pinned version. Whether crossing
+the fork perturbs it was measured rather than assumed in either direction: the
 expression on the same table yields ``[2, 5, 3, 1, 0, 3, 5, 2, 4, 6, 6, 4]``
 under numpy 2.2.6 on python 3.10 and under numpy 2.4.6 on python 3.11, same
 values and same element types.

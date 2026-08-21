@@ -1,7 +1,8 @@
 """Tests for CALC-4 — reject a bare wildcard ALLOWED_ORIGINS at boot.
 
-CLAUDE.md:47 states the rule ("Do not introduce a wildcard [\"*\"] origin"),
-but nothing enforced it: ALLOWED_ORIGINS flowed straight from the environment
+This repo's CLAUDE.md states the rule in its "HTTP service hardening" section
+("Do not introduce a wildcard [\"*\"] origin"), but nothing enforced it:
+ALLOWED_ORIGINS flowed straight from the environment
 into CORSMiddleware with no validation, so a deploy-time
 ``ALLOWED_ORIGINS=*`` (typo or copy-paste from another service) would
 silently open the API to any browser origin. This mirrors app.auth's

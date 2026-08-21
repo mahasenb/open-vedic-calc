@@ -211,7 +211,8 @@ class TestSourceEndpoint:
     def test_source_commit_fallback_when_git_missing(self, monkeypatch):
         """
         Branch: `except Exception: commit = 'unknown'` in /source.
-        _COMMIT is computed at module import time (line 72 of main.py),
+        _COMMIT is computed at module import time (`_COMMIT = _resolve_version()`
+        at module level in app/main.py),
         so we monkeypatch the endpoint's response directly by replacing
         the cached _COMMIT value. This exercises the fallback path.
         """

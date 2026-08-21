@@ -44,7 +44,8 @@ def _make_place(lat: float, lon: float, tz: float):
 
 class TestMuhuratUTCNakshatra:
     """drik.sidereal_longitude() expects a UTC Julian Day (jd_utc = jd_local - tz/24).
-    muhurat.py:191 previously set jd = swe.julday(y, m, d, 12.0) and passed that
+    compute_muhurat_for_day (bphs_core/muhurat.py) previously set
+    jd = swe.julday(y, m, d, 12.0) and passed that
     to _nakshatra_from_moon / _yoga_from_sun_moon — which call drik.sidereal_longitude
     — as if it were UTC, causing a ~tz*0.55°/hr error (≈3° for IST).
 
@@ -325,8 +326,8 @@ class TestLagnaShuddhiStepGranularity:
         )
 
     def test_family_scan_step_filter_uses_minute_value_not_index(self):
-        """The same bug exists at line 1171 in scan_family_lagna_shuddhi.
-        Check both call sites are fixed."""
+        """The same bug was present at the second call site — the candidate
+        step filter inside scan_family_lagna_shuddhi. Check both are fixed."""
         # Replicate the filtering logic from scan_family_lagna_shuddhi
         candidates = list(range(63, 80))
         step_mins = 5
