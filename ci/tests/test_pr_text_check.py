@@ -44,6 +44,11 @@ _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _SYNTHETIC_TOKEN = "zzznotarealbrand"
 _OTHER_SYNTHETIC_TOKEN = "zzzalsonotreal"
 
+# The legacy base pattern's target word, assembled from parts so this test file
+# does not itself trip the gate that scans it. Same convention as the sibling
+# guard in ci/tests/test_check_no_proprietary_refs.py.
+_LEGACY_WORD = "".join(["a", "s", "t", "r", "o"])
+
 _THIS_REPO = "owner/open-vedic-calc"
 _A_FORK = "someone-else/open-vedic-calc"
 
@@ -201,6 +206,57 @@ def test_advisory_does_not_mean_permissive_about_an_actual_hit(overrides) -> Non
         )
     )
     assert rc == 1, f"a token hit on an advisory run returned {rc}, not a failure"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"PR_HEAD_REPO": _A_FORK},
+        {"GITHUB_ACTOR": "dependabot[bot]"},
+    ],
+    ids=["fork", "dependabot"],
+)
+def test_a_legacy_hit_fails_even_with_NO_secret_at_all(overrides) -> None:
+    """The realistic advisory shape: withheld secret AND zero brand tokens.
+
+    Its sibling above supplies tokens, which is not what a fork run actually
+    looks like — GitHub gives it none. So that test leaves the important path
+    unexercised, and a neuter measured it: gating the violation report on
+    ``token_count`` (``if violations and token_count:``) left the whole suite
+    GREEN while a legacy match on a fork PR was silently tolerated. That is the
+    advisory mode becoming a bypass, which is the one thing it must never be.
+
+    The legacy pattern needs no secret, so it is live on every run, and a match
+    on it must fail the job whatever the secret situation is.
+    """
+    checker = _load_checker()
+    rc = checker.main(
+        _env(
+            PROPRIETARY_REF_TOKENS="",
+            PR_BODY=f"this mentions {_LEGACY_WORD} directly",
+            **overrides,
+        )
+    )
+    assert rc == 1, (
+        f"a legacy-pattern hit on a secret-less advisory run returned {rc}. "
+        "Advisory scopes the missing secret, never the verdict — tolerating a "
+        "match here turns the degraded mode into a way around the gate."
+    )
+
+
+def test_the_legacy_pattern_is_live_when_no_secret_is_supplied() -> None:
+    """The premise of the test above: check the pattern set, not just a verdict.
+
+    If the legacy pattern were ever dropped from the no-secret path, the test
+    above would still pass for the wrong reason on some other match.
+    """
+    checker = _load_checker()
+    patterns, token_count = checker._patterns(_env(PROPRIETARY_REF_TOKENS=""))
+    assert token_count == 0
+    assert len(patterns) >= 1, "no patterns at all are active without the secret"
+    assert any(p.search(f"a {_LEGACY_WORD} reference") for p in patterns), (
+        "the legacy pattern is not active on a run without the secret"
+    )
 
 
 def test_the_advisory_says_exactly_what_it_could_not_check(capsys) -> None:
