@@ -17,6 +17,7 @@ rejected as a 422 at the schema boundary before the ephemeris is reached. Mirror
 test_birth_date_ephemeris_range.py / test_family_member_string_bounds.py for the
 /v1/muhurat and /v1/muhurat/lagna-shuddhi endpoints.
 """
+import datetime
 import os
 
 import pytest
@@ -26,8 +27,10 @@ os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
 from app.main import app
-from app.schemas import MAX_EPHEMERIS_YEAR, MIN_EPHEMERIS_YEAR
+from app.schemas import MAX_EPHEMERIS_DATE, MIN_EPHEMERIS_DATE
 from tests.conftest import SAMPLE_A
+
+_ONE_DAY = datetime.timedelta(days=1)
 
 client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
@@ -86,29 +89,46 @@ class TestMuhuratPersonFieldBounds:
         r = client.post(endpoint, json={**base, "birth_date": "0001-01-01"})
         assert r.status_code == 422
 
-    def test_birth_year_just_below_min_is_422(self, endpoint, base):
+    def test_birth_date_just_below_min_is_422(self, endpoint, base):
         r = client.post(
-            endpoint, json={**base, "birth_date": f"{MIN_EPHEMERIS_YEAR - 1}-01-01"}
+            endpoint,
+            json={**base, "birth_date": (MIN_EPHEMERIS_DATE - _ONE_DAY).isoformat()},
         )
         assert r.status_code == 422
 
-    def test_birth_year_just_above_max_is_422(self, endpoint, base):
+    def test_birth_date_just_above_max_is_422(self, endpoint, base):
         r = client.post(
-            endpoint, json={**base, "birth_date": f"{MAX_EPHEMERIS_YEAR + 1}-01-01"}
+            endpoint,
+            json={**base, "birth_date": (MAX_EPHEMERIS_DATE + _ONE_DAY).isoformat()},
         )
         assert r.status_code == 422
 
-    def test_birth_year_at_min_boundary_is_accepted(self, endpoint, base):
+    def test_birth_date_at_min_boundary_is_accepted(self, endpoint, base):
         r = client.post(
-            endpoint, json={**base, "birth_date": f"{MIN_EPHEMERIS_YEAR}-06-15"}
+            endpoint, json={**base, "birth_date": MIN_EPHEMERIS_DATE.isoformat()}
         )
         assert r.status_code != 422, r.text
 
-    def test_birth_year_at_max_boundary_is_accepted(self, endpoint, base):
+    def test_birth_date_at_max_boundary_is_accepted(self, endpoint, base):
         r = client.post(
-            endpoint, json={**base, "birth_date": f"{MAX_EPHEMERIS_YEAR}-06-15"}
+            endpoint, json={**base, "birth_date": MAX_EPHEMERIS_DATE.isoformat()}
         )
         assert r.status_code != 422, r.text
+
+    def test_the_silently_moshier_tail_is_rejected(self, endpoint, base):
+        """These person-like models share BoundedBirthDate, so they share the fix.
+
+        2400-06-01 sat inside the old year bound and was computed wholly on the
+        Moshier fallback at HTTP 200. Asserted here as well as in
+        tests/test_birth_date_ephemeris_range.py because the whole point of
+        BoundedPersonFields is that a second person-like model cannot quietly
+        carry a weaker guard than the first.
+        """
+        r = client.post(endpoint, json={**base, "birth_date": "2400-06-01"})
+        assert r.status_code == 422, (
+            f"{endpoint} accepted a birth_date past the shipped Swiss data files "
+            f"({MAX_EPHEMERIS_DATE.isoformat()}). Got {r.status_code}: {r.text[:200]}"
+        )
 
     # --- positive control: the golden-value sample must be unaffected ---
     def test_ordinary_request_returns_200(self, endpoint, base):

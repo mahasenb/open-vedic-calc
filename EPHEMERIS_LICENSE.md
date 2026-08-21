@@ -31,6 +31,16 @@ The files land in `data/ephe/` (git-ignored, and baked into the images) and are:
 - `sepl_18.se1` — planets, AD 1800–2400 (~0.5 MB)
 - `semo_18.se1` — Moon, AD 1800–2400 (~1.3 MB)
 - `seas_18.se1` — main asteroids / derived bodies, AD 1800–2400 (~0.2 MB)
+
+"AD 1800–2400" is upstream's label and is rounded at the top. Measured with
+`bphs_core.utils.probe_ephemeris_source()` at one-day steps, the last day the
+seven visible grahas answer from these files is **2400-01-10**; from 2400-01-11
+swisseph silently falls back to its built-in Moshier ephemeris and still returns
+a full, plausible result. The served birth-date range is bounded to the measured
+span rather than the label — see `MIN_EPHEMERIS_DATE` / `MAX_EPHEMERIS_DATE` in
+`app/schemas.py`, which additionally hold a day of margin at each end because a
+single local date spans UTC instants a day either side once
+`timezone_offset_hours` (\[-12, +14]) is applied.
 - `sefstars.txt` — fixed stars (~0.1 MB)
 
 ## Where the bytes actually come from

@@ -20,28 +20,74 @@ IsoDateStr = Annotated[str, AfterValidator(_validate_iso_date)]
 # The dasha systems the timeline builder actually computes; see get_dasha_timeline.
 DashaSystem = Literal["vimshottari", "yogini"]
 
-# Ephemeris data files ship AD 1800-2400 (see EPHEMERIS_LICENSE.md: seas_18/
-# semo_18/sepl_18 cover "AD 1800-2400"). A birth_date outside that span still
-# reaches swe.julday() unguarded downstream (bphs_core/chart.py, lagna_shuddhi.py,
-# muhurat.py, transits.py) — at best an inaccurate/undefined ephemeris result,
-# at worst a native-level fault in the single-worker container. Reject it at
-# the schema boundary as a clean 422 instead.
-MIN_EPHEMERIS_YEAR = 1800
-MAX_EPHEMERIS_YEAR = 2400
+# The supported birth-date span, MEASURED against the shipped Swiss Ephemeris
+# data files rather than taken from the label on them.
+#
+# Upstream describes seas_18/semo_18/sepl_18 as covering "AD 1800-2400"
+# (EPHEMERIS_LICENSE.md), and this bound used to be a YEAR range that took that
+# literally: 1800..2400, i.e. everything through 2400-12-31. The files stop
+# earlier. Measured with bphs_core.utils.probe_ephemeris_source() at one-day
+# steps, the last day the seven visible grahas answer from the data files is
+# 2400-01-10; on 2400-01-11 every one of them returns FLG_MOSEPH.
+#
+# That does not fail — it ANSWERS. swisseph silently substitutes its built-in
+# Moshier analytical ephemeris when the data runs out and still returns a full,
+# plausible result, so the whole tail of the advertised range was being served
+# at HTTP 200 off the fallback engine with nothing saying so. Measured on
+# /v1/chart, spying on every swe.calc_ut a served request makes: 2400-01-10 was
+# 15/15 calls on Swiss data, 2400-01-11 was 12/15 on Moshier, and 2400-06-01
+# through 2400-12-31 were 15/15 on Moshier. For a determinism-first engine that
+# is the wrong thing to advertise, so the bound is the measured one.
+#
+# THE ONE-DAY MARGIN AT EACH END IS DELIBERATE. These bound a local DATE, while
+# the ephemeris is queried at a UTC INSTANT, and timezone_offset_hours spans
+# [-12, +14] — so a single local date covers UTC instants from (D-1 10:00) to
+# (D+1 11:59:59). A date bound sitting exactly on the file boundary therefore
+# still admits requests that land past it: measured, 2400-01-10 23:59:59 at
+# tz=-12 was 12/15 Moshier, and the old lower bound leaked the same way
+# (1800-01-01 00:00:00 at tz=+14 was 12/15 Moshier). Pulling in one day at each
+# end makes every admissible (birth_time, timezone_offset_hours) combination
+# inside the range Swiss-backed; tests/test_birth_date_ephemeris_range.py
+# re-measures that property, and pins the file boundary as tight, on every run
+# against real data.
+#
+# Outside this span a birth_date would otherwise reach swe.julday() unguarded
+# downstream (bphs_core/chart.py, lagna_shuddhi.py, muhurat.py, transits.py) —
+# at best an ephemeris result computed on the fallback and reported as if it
+# were not, at worst a native-level fault in the single-worker container (year
+# 9999 raises an uncaught swisseph.Error deep in the pyjhora call chain).
+# Reject it at the schema boundary as a clean 422 instead.
+MIN_EPHEMERIS_DATE = date(1800, 1, 2)
+MAX_EPHEMERIS_DATE = date(2400, 1, 9)
 
 
-def _validate_ephemeris_year(value: date) -> date:
-    if not (MIN_EPHEMERIS_YEAR <= value.year <= MAX_EPHEMERIS_YEAR):
+def _validate_ephemeris_date(value: date) -> date:
+    if not (MIN_EPHEMERIS_DATE <= value <= MAX_EPHEMERIS_DATE):
         raise ValueError(
-            f"birth_date year must be between {MIN_EPHEMERIS_YEAR} and "
-            f"{MAX_EPHEMERIS_YEAR} (the supported ephemeris data range)"
+            f"birth_date must be between {MIN_EPHEMERIS_DATE.isoformat()} and "
+            f"{MAX_EPHEMERIS_DATE.isoformat()} (the span the shipped Swiss "
+            "Ephemeris data files actually cover for every supported timezone "
+            "offset; outside it the answer would come from the Moshier fallback)"
         )
     return value
 
 
 # A birth date carried on the wire as a date, bounded to the ephemeris range
-# supported by the shipped Swiss Ephemeris data files.
-BoundedBirthDate = Annotated[date, AfterValidator(_validate_ephemeris_year)]
+# supported by the shipped Swiss Ephemeris data files. The description is part
+# of the served contract: it is what /openapi.json advertises, and advertising
+# a range wider than the data covers is what this bound exists to stop.
+BoundedBirthDate = Annotated[
+    date,
+    AfterValidator(_validate_ephemeris_date),
+    Field(
+        description=(
+            f"Birth date, {MIN_EPHEMERIS_DATE.isoformat()} to "
+            f"{MAX_EPHEMERIS_DATE.isoformat()} inclusive — the span covered by "
+            "the shipped Swiss Ephemeris data files for every supported "
+            "timezone offset."
+        ),
+    ),
+]
 
 
 class BoundedPersonFields(BaseModel):
