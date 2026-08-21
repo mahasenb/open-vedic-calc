@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # One declaration of the interpreter, shared with test.yml and both
           # Dockerfiles. uv.lock forks at python_full_version 3.11 (numpy

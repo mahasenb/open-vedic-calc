@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # Read from .python-version, never inline. uv.lock FORKS at
           # python_full_version 3.11 (numpy 2.2.6/2.4.6, timezonefinder
@@ -166,7 +166,7 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # Same single declaration as the `test` job above. The goldens were
           # recorded on the pinned interpreter against the pinned pyswisseph,
