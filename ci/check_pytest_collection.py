@@ -261,13 +261,39 @@ def _git_working_tree_paths(root: Path) -> list[str] | None:
     could be wrong. That matters concretely: `.venv/Lib/site-packages` carries
     dozens of third-party `setup.cfg` and `tox.ini` files, and every one of them
     would be a false refusal under a naive walk.
+
+    `-z`, AND BYTES, AND NO SEPARATOR REWRITE — three halves of one fix, each
+    load-bearing. Measured on the commit before it, against a fixture repo
+    holding `caf<e-acute><s-caron>/pytest.ini` with `addopts = --collect-only`:
+    this returned `['"caf/303/251/305/241/pytest.ini"', 'plain.txt']` and the
+    scan reported CLEAN. `git ls-files` quotes a path carrying non-ASCII bytes
+    (`core.quotePath` defaults on), wrapping it in literal double quotes and
+    rendering each byte as a backslash-octal escape; the basename then read back
+    as `pytest.ini"` and matched nothing. The old `.replace("\\", "/")` — there
+    to normalise Windows separators — then rewrote those escapes into fabricated
+    directory separators. `-z` disables quoting entirely and NUL-separates the
+    records, so a path arrives verbatim whatever bytes it holds and whatever
+    `core.quotePath` is set to; git emits `/` separators on every platform, so
+    the rewrite has nothing left to do and is removed rather than left to
+    corrupt a literal backslash in a POSIX filename. Records are not stripped
+    either: with `-z` they are exact, and a leading or trailing space is a legal
+    filename character.
+
+    The decode happens HERE, on bytes, not inside subprocess. In text mode it
+    happens on a reader thread, where — measured — a UnicodeDecodeError kills
+    the thread and hands back `stdout=None` with `returncode=0`, so the next
+    `.splitlines()` raised `AttributeError` out of a checker whose contract is
+    to reach a verdict. A filename need not be valid UTF-8 on a POSIX
+    filesystem, so that is a reachable input, not a hypothetical one. An
+    undecodable listing is answered as `None` — "git cannot answer" — which is
+    not a silent pass: the caller falls back to `_walked_paths` and the tree is
+    still scanned.
     """
     try:
         completed = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
             cwd=root,
             capture_output=True,
-            text=True,
             timeout=120,
             check=False,
         )
@@ -275,11 +301,11 @@ def _git_working_tree_paths(root: Path) -> list[str] | None:
         return None
     if completed.returncode != 0:
         return None
-    return [
-        line.strip().replace("\\", "/")
-        for line in completed.stdout.splitlines()
-        if line.strip()
-    ]
+    try:
+        listing = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return [record for record in listing.split("\0") if record]
 
 
 def _walked_paths(root: Path) -> list[str]:

@@ -513,7 +513,7 @@ def test_importing_the_package_is_what_pins_the_serving_globals() -> None:
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=300, encoding="utf-8", errors="replace",
     )
     assert completed.returncode == 0, (
         f"probe interpreter failed:\nstdout:\n{completed.stdout}\n"
