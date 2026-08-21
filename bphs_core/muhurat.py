@@ -777,7 +777,7 @@ def compute_muhurat_for_day(
         # instead: tests/test_muhurat_deep.py pins the library's (name, flag)
         # sequence index by index against _MUHURTA_POSITIONAL_SIGNATURE, together
         # with the label each slot must serve under. That gate is sufficient
-        # because the dependency is an exact pin (pyjhora==4.8.6, installed
+        # because the dependency is an exact pin (pyjhora==4.8.7, installed
         # --frozen), so a reorder can only ever arrive through a deliberate,
         # reviewed bump -- and the pin turns that bump red before it ships.
         #

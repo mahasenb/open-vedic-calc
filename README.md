@@ -71,7 +71,7 @@ that differs from another tool can be explained rather than guessed at:
 |---|---|---|
 | Ayanamsa | **Lahiri** (Chitrapaksha) | `bphs_core/utils.py` |
 | Lunar nodes (Rahu / Ketu) | **True (osculating) node**; Ketu = Rahu + 180° | `bphs_core/utils.py`, `LUNAR_NODE_MODEL` |
-| Planetary position frame | **Geometric** (`FLG_TRUEPOS`), sidereal, geocentric — flag word `66386` | `bphs_core/utils.py`, `POSITION_FLAGS` |
+| Planetary position frame | **Geometric** (`FLG_TRUEPOS`), sidereal, geocentric — flag word `65810` | `bphs_core/utils.py`, `POSITION_FLAGS` |
 | Primary house frame | **Whole-sign**, counted from the lagna sign | `bphs_core/chart.py` |
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
@@ -99,6 +99,15 @@ sits within a minute of arc of this service's, an apparent-position engine is th
 thing to check. The word is declared as `POSITION_FLAGS` in `bphs_core/utils.py`
 and the service refuses to start if the dependency ever builds a different one;
 `tests/test_position_flags.py` is the contract.
+
+That guard has fired in anger once. `pyjhora` 4.8.7 changed the word it builds
+from `66386` to `65810` — dropping `FLG_NOGDEFL` and `FLG_NONUT` — and the
+service refused to start until the change was reviewed and the declaration
+re-derived. No served longitude moved: swisseph applies both flags of its own
+accord under `FLG_TRUEPOS` and `FLG_SIDEREAL` respectively, so the two words are
+the same computation (measured bit-identical across 72 graha-epoch pairs under
+both ephemeris runtimes). Every golden in this repository stayed green through
+it, which is precisely why the declaration exists.
 
 The **sunrise/sunset convention** is pinned the same way. Every panchanga and
 electional limb — tithi, nakshatra, yoga, karana, the thirty muhurtas and the

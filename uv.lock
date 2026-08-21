@@ -87,7 +87,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.23.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.0" },
     { name = "pydantic", specifier = ">=2.6.0" },
-    { name = "pyjhora", specifier = "==4.8.6" },
+    { name = "pyjhora", specifier = "==4.8.7" },
     { name = "pyswisseph", specifier = "==2.10.3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
@@ -1259,11 +1259,11 @@ wheels = [
 
 [[package]]
 name = "pyjhora"
-version = "4.8.6"
+version = "4.8.7"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3d/81/08cf46fee81b9bb482c7dc66b6306921275bc4da9a3847ee02d44f531a1d/pyjhora-4.8.6.tar.gz", hash = "sha256:6d9f225c48576c3002fb41a734704d6f19f64cf5af151e157f7551441e3a147b", size = 42194507, upload-time = "2026-05-28T13:12:58.853Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/72/bc8e2e9ffeda49e1569963fb2869c4f7b8871067c881c4d6ccf359e81c3a/pyjhora-4.8.7.tar.gz", hash = "sha256:0bfbe509f192595912f4621ffbf43b56380644b136001d3350d29290dd1b2357", size = 33427539, upload-time = "2026-06-07T22:10:21.46Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/ab/ce8b2dc9e2ed6f3f94e1c9f8660762835a777b0c67e30ffb8ed366bf36a0/pyjhora-4.8.6-py3-none-any.whl", hash = "sha256:6a9aceb6bb2ba879b29de372787ba2d514e48b4578a483c51994d96957036e33", size = 43080451, upload-time = "2026-05-28T13:12:51.943Z" },
+    { url = "https://files.pythonhosted.org/packages/36/20/bb89ec73d31ba0385ab896bb9a14431037bacb86f19dfc1c538b9b4cf146/pyjhora-4.8.7-py3-none-any.whl", hash = "sha256:d8d8014573a38ddefedcae57d3b8d84687cac2ad31bb5b1dd70d945906a4d54d", size = 33883486, upload-time = "2026-06-07T22:10:13.158Z" },
 ]
 
 [[package]]

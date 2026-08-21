@@ -14,7 +14,7 @@ from jhora.panchanga import drik
 # Rahu and Ketu can be computed from either the TRUE (osculating) lunar node --
 # the actual instantaneous intersection of the Moon's orbital plane with the
 # ecliptic -- or the MEAN node, a smoothed analytical fit to that intersection.
-# Measured with the pinned dependency set (pyswisseph 2.10.3.2, pyjhora 4.8.6)
+# Measured on the then-pinned dependency set (pyswisseph 2.10.3.2, pyjhora 4.8.6)
 # against the real Swiss ephemeris data files, over the engine's supported
 # birth-date span (1800-01-01..2400-12-31, app/schemas.py) at one-day steps and
 # refined at one-hour steps around the worst day:
@@ -27,6 +27,11 @@ from jhora.panchanga import drik
 # different RASI on 3.20%. Ketu follows Rahu exactly (Rahu + 180 deg), so the
 # choice moves both shadow grahas together. For scale, that is more than twice
 # the ~0.883 deg Lahiri-vs-Fagan/Bradley ayanamsa error documented above.
+#
+# Those figures are a property of swisseph's two node bodies, not of pyjhora, so
+# the 4.8.6 -> 4.8.7 bump did not disturb them; pyswisseph is unmoved at
+# 2.10.3.2. What the bump DID move is lever 3 below -- re-read that before
+# assuming any of this block still describes the mechanism.
 #
 # WHY TRUE. Every other graha this engine serves is a true/apparent position
 # from a modern ephemeris; the true node is the same class of quantity, so
@@ -62,20 +67,34 @@ from jhora.panchanga import drik
 #   2. ``drik.planet_list`` -- a MUTABLE module global, rebuilt by
 #      ``drik.set_planet_list()``; body id -> planet id for the position loops.
 #   3. ``drik.dhasavarga``'s own parameter default. This is the lever the chart
-#      path uses: ``charts.rasi_chart`` -> ``drik.dhasavarga(jd, place, 1)``,
-#      and dhasavarga declares ``set_rahu_ketu_as_true_nodes=True`` as a LITERAL
-#      default (not ``None``), so it re-derives planet_list from that literal and
-#      never consults lever 1 at all. Setting only the constants therefore leaves
-#      every served Rahu unchanged -- a declaration that looked applied and was
-#      not. ``apply_lunar_node_model`` below pins 1 and 2 and VERIFIES 3.
+#      path uses: ``charts.rasi_chart`` -> ``drik.dhasavarga(jd, place, 1)``.
+#      Under pyjhora 4.8.6 dhasavarga declared
+#      ``set_rahu_ketu_as_true_nodes=True`` as a LITERAL default (not ``None``),
+#      so it re-derived planet_list from that literal and never consulted lever 1
+#      at all: setting only the constants left every served Rahu unchanged -- a
+#      declaration that looked applied and was not.
+#      ``apply_lunar_node_model`` below pins 1 and 2 and VERIFIES 3.
 #
-# Because lever 3 is a library literal this repo cannot set, declaring
-# LUNAR_NODE_MODEL = "mean" hard-fails at import rather than silently serving
-# true-node charts under a mean-node banner. That is deliberate: switching model
-# is real work (routing the chart path through
-# ``drik.dhasavarga(..., set_rahu_ketu_as_true_nodes=False)`` instead of
-# ``charts.rasi_chart``) plus a deliberate re-recording of the Swiss goldens, and
-# a one-word edit here must not be able to look like it did that work.
+#      pyjhora 4.8.7 CHANGED THIS LEVER: the default is now ``None`` and the
+#      forcing body is commented out upstream ("it is altering/forcing other than
+#      configured values"), so dhasavarga now defers to lever 1. The verifier was
+#      already written for that case -- ``_serving_path_node_default`` returns the
+#      default and ``None`` is accepted precisely because it means "defers to the
+#      constants, which this function has already pinned". Re-measured on the
+#      4.8.7 resolve, the served node is unchanged: Rahu at 2000-01-01 12:00 UT is
+#      100.100800 deg, equal to swisseph's TRUE node, 3911.8 arcsec from MEAN.
+#
+# A CONSEQUENCE OF THAT CHANGE, stated rather than left to be discovered. Under
+# 4.8.6, lever 3 being an unsettable literal meant declaring
+# LUNAR_NODE_MODEL = "mean" HARD-FAILED at import rather than silently serving
+# true-node charts under a mean-node banner. Under 4.8.7 it no longer hard-fails
+# -- measured: it serves 101.187424 deg, the real mean node. The guard did not
+# weaken so much as its reason expired: the banner-vs-reality contradiction it
+# detected cannot arise now that the serving path honours the declaration. What
+# has NOT changed is the friction that keeps the model from moving on a one-word
+# edit: switching model still means re-recording the Swiss goldens (both shadow
+# grahas move ~1 deg) and re-recording the declaration's own tripwire in
+# tests/test_lunar_node_model.py, in the same reviewed change.
 #
 # Changing LUNAR_NODE_MODEL is an astrological model decision, not an
 # implementation detail: it invalidates every previously served chart.
@@ -216,12 +235,55 @@ apply_lunar_node_model()
 # builds at ITS import time from ``jhora.const.PLANET_POSITIONS_*`` module
 # globals. Measured 2026-07-31, this same repository on two dependency resolves:
 #
-#     frozen resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2)  PLANET_FLAGS = 66386
-#     one patch release later (pyjhora 4.8.7)              PLANET_FLAGS = 65810
+#     pyjhora 4.8.6, pyswisseph 2.10.3.2   PLANET_FLAGS = 66386
+#     pyjhora 4.8.7 (one patch release)    PLANET_FLAGS = 65810
 #
 # a difference of 576 = FLG_NOGDEFL (512) | FLG_NONUT (64), because 4.8.7 flipped
 # ``PLANET_POSITIONS_USE_DEFLECTION`` and ``PLANET_POSITIONS_USE_NUTATION`` from
 # False to True. No file here changed, and nothing in this repository went red.
+#
+# THAT BUMP HAS SINCE BEEN TAKEN, DELIBERATELY, and this declaration re-derived
+# with it (2026-08-21). The pin is now ``pyjhora==4.8.7`` and the declared word is
+# 65810. Re-measured on the 4.8.7 resolve, the five source globals now read
+# GEOCENTRIC=True, TRUE=True, USE_ABERRATION=True, USE_DEFLECTION=True,
+# USE_NUTATION=True, and the builder returns 65810. Upstream published no
+# substantive changelog for the release (the 4.8.7 release note reads, in full,
+# "See README.MD"), so the WHY below is measured here rather than quoted.
+#
+# WHY THE SERVED NUMBERS DID NOT MOVE -- the mechanism, read out of swisseph's
+# OWN retflag rather than inferred from magnitudes. Requesting each word for
+# Mercury at 2000-01-01 12:00 UT:
+#
+#     requested 66386 -> retflag 67410, swisseph adding back FLG_NOABERR
+#     requested 65810 -> retflag 67410, swisseph adding back
+#                                       FLG_NONUT|FLG_NOGDEFL|FLG_NOABERR
+#
+# The retflags are IDENTICAL. Under FLG_TRUEPOS the two requests converge on the
+# same effective word inside the library, so they are not merely close, they are
+# the same computation. Confirmed on output: over 72 graha-epoch pairs (8 grahas
+# x 9 epochs spanning 1800-01-01..2400-12-31, including the 2353-06-16 extreme)
+# the longitude AND the daily speed are BIT-IDENTICAL between the two words --
+# compared as packed IEEE-754 bits, not against a tolerance -- 56 of those pairs
+# answered by the real Swiss data files and 16 by the Moshier fallback, so the
+# result holds under both ephemeris runtimes.
+#
+# WHICH FLAG IS MASKED BY WHICH -- measured separately, because they are NOT both
+# masked by the same thing, and an earlier gloss that said so was imprecise:
+#
+#     FLG_NOGDEFL is masked by FLG_TRUEPOS. Clear TRUEPOS and swisseph stops
+#         adding it back: requested 66370 -> retflag 66370 (nothing added),
+#         requested 65794 -> retflag 65858. The two then serve DIFFERENT numbers.
+#     FLG_NONUT is masked by FLG_SIDEREAL, not by TRUEPOS. Even with TRUEPOS
+#         cleared, the 65794 request comes back with FLG_NONUT added (retflag
+#         65858): a sidereal request is referred to the mean equinox regardless.
+#
+# So dropping the 576 from the declaration is safe only while FLG_TRUEPOS and
+# FLG_SIDEREAL are both declared. That is not left to prose -- ``apply_position_
+# flags`` enforces it as an invariant below, which is the replacement for what
+# declaring the two inert flags used to buy: they could not become live silently.
+# Measured cost if the invariant were violated: with TRUEPOS cleared the two
+# words separate by up to 0.128869 arcsec across the same 72 pairs (worst Saturn,
+# 2400-12-31), and FLG_NOABERR would be worth 20.8557 arcsec.
 #
 # WHAT THE GOVERNING FLAGS ARE WORTH. Measured with the frozen resolve against
 # the real Swiss ephemeris data files, scanning 1800-01-01..2400-12-31 (the
@@ -247,21 +309,37 @@ apply_lunar_node_model()
 # FLG_TRUEPOS and FLG_NOGDEFL is worth 0.0711 arcsec and FLG_NOABERR 20.8557
 # arcsec (measured at century steps over the same span). Three coupled defaults,
 # one of which decides whether the other two matter, is not a frame anyone chose.
+# That is now an ENFORCED invariant rather than an observation -- see (0b) in
+# ``apply_position_flags``.
 #
 # WHY THIS FRAME. It is the frame the engine already served, so declaring it
 # moves no number any caller has been given -- deliberately, exactly as with the
-# lunar node model above. FLG_TRUEPOS (geometric, i.e. light-time and aberration
-# not applied) is the classical Vedic convention: BPHS positions are the graha's
-# true place on the ecliptic, and the ~60 arcsec of light-time and aberration
-# that separate it from the apparent place are an observational correction with
-# no BPHS meaning. Every limb of a chart -- nakshatra, pada, varga, dasha balance
-# -- is then derived from one consistent frame. FLG_SIDEREAL with the Lahiri
-# ayanamsa follows from the engine being sidereal at all; FLG_SPEED is required
-# because ``drik.planets_in_retrograde`` reads the sign of the returned daily
-# motion; FLG_NOGDEFL and FLG_NONUT are inert under FLG_TRUEPOS today and are
-# declared so that they cannot become live silently. FLG_TOPOCTR is deliberately
-# NOT taken: this service receives no observer altitude, and a topocentric frame
+# lunar node model above, and that remained true across the 4.8.6 -> 4.8.7 bump
+# precisely because of the bit-identity measured above. FLG_TRUEPOS (geometric,
+# i.e. light-time and aberration not applied) is the classical Vedic convention:
+# BPHS positions are the graha's true place on the ecliptic, and the ~60 arcsec
+# of light-time and aberration that separate it from the apparent place are an
+# observational correction with no BPHS meaning. Every limb of a chart --
+# nakshatra, pada, varga, dasha balance -- is then derived from one consistent
+# frame. FLG_SIDEREAL with the Lahiri ayanamsa follows from the engine being
+# sidereal at all; FLG_SPEED is required because ``drik.planets_in_retrograde``
+# reads the sign of the returned daily motion. FLG_TOPOCTR is deliberately NOT
+# taken: this service receives no observer altitude, and a topocentric frame
 # would make every position depend on one.
+#
+# FLG_NOGDEFL and FLG_NONUT are deliberately NOT taken either, and that is the
+# one line of this declaration that CHANGED at 4.8.7 rather than being restated.
+# They used to be taken, for a stated reason: they are inert under FLG_TRUEPOS,
+# and declaring them meant they could not become live silently. Requesting them
+# is now redundant -- measured above, swisseph adds both back of its own accord
+# and returns the identical retflag either way -- so continuing to declare them
+# would mean declaring a frame the library no longer builds, and the tripwire at
+# (1) below is an EQUALITY against the library's word by design: absorbing a
+# disagreement instead of resolving it is the exact failure this block exists to
+# end. The protection they bought is therefore re-created directly, as the
+# masking invariant at (0b), which fails closed if a future edit ever clears
+# FLG_TRUEPOS or FLG_SIDEREAL while these two are absent. Never reason about one
+# of these flags without the others.
 #
 # THREE LEVERS, measured rather than read from documentation:
 #
@@ -278,24 +356,29 @@ apply_lunar_node_model()
 #      ``FLG_SWIEPH + FLG_SPEED``, i.e. tropical, ~24 deg away. A pinned word
 #      that is bypassed is not a pin.
 #
-# ``apply_position_flags`` below compares (1) against this declaration and
-# refuses to start on any disagreement, PINS (2) and reads it back, and verifies
-# (3). The comparison against (1) is the dependency-bump tripwire: pinning alone
-# would silently absorb a library that changed its mind, which is the failure
-# this block exists to end.
+# ``apply_position_flags`` below checks the declaration against its own
+# decomposition (0) and against the masking invariant (0b), compares (1) against
+# this declaration and refuses to start on any disagreement, PINS (2) and reads
+# it back, and verifies (3). The comparison against (1) is the dependency-bump
+# tripwire: pinning alone would silently absorb a library that changed its mind,
+# which is the failure this block exists to end. It has now fired in anger once
+# -- on the 4.8.7 bump, where it was the ONLY thing in this repository that went
+# red (measured: 41 collection errors, every one this RuntimeError, while every
+# golden stayed green because the served numbers did not move).
 #
 # SCOPE, stated rather than left to be discovered. This is the PLANETARY POSITION
 # word only. The ascendant and Bhava-Chalit cusps come from
 # ``swe.houses(jd_utc, lat, lon, b"P")`` in chart.py, which takes no flag word at
 # all; sunrise/sunset use pyjhora's separate ``drik.RISE_FLAGS`` /
-# ``drik.SET_FLAGS`` (measured 897 / 898, identical in 4.8.6 and 4.8.7, so they
-# have not moved -- but they are equally undeclared).
+# ``drik.SET_FLAGS`` (measured 897 / 898 on 4.8.6 and re-measured 897 / 898 on
+# the 4.8.7 resolve, so they did not move on this bump -- and they are declared
+# in their own right below).
 #
 # Contract: tests/test_position_flags.py. Extend it, never weaken it. The
 # dependency that supplies all three levers is pinned to an exact version in
 # pyproject.toml for the same reason the lunar node model needs it to be.
 # ---------------------------------------------------------------------------
-POSITION_FLAGS = 66386
+POSITION_FLAGS = 65810
 
 # The same word, longhand. Kept alongside the literal rather than deriving one
 # from the other on purpose: the literal is the number a measurement can be
@@ -307,9 +390,23 @@ POSITION_FLAG_COMPONENTS: dict[str, int] = {
     "FLG_SWIEPH": swe.FLG_SWIEPH,        #     2  Swiss ephemeris data files
     "FLG_SIDEREAL": swe.FLG_SIDEREAL,    # 65536  sidereal zodiac (Lahiri, set per thread)
     "FLG_TRUEPOS": swe.FLG_TRUEPOS,      #    16  geometric, not apparent, position
-    "FLG_NONUT": swe.FLG_NONUT,          #    64  no nutation
-    "FLG_NOGDEFL": swe.FLG_NOGDEFL,      #   512  no gravitational deflection
     "FLG_SPEED": swe.FLG_SPEED,          #   256  daily motion (retrogression needs it)
+}
+
+# The two flags this declaration relies on being applied WITHOUT asking, mapped
+# to the declared flag that makes each one redundant. Both entries are measured
+# from swisseph's own retflag, not from documentation (see the block above):
+# requesting 65810 comes back as 67410, with FLG_NONUT and FLG_NOGDEFL added.
+#
+# This is what replaces declaring the two flags outright. Their value was never
+# the bits -- swisseph sets those either way -- it was that a later edit could
+# not quietly make them live. Checked by ``apply_position_flags`` step (0b): if a
+# masking flag ever leaves the declared word while its dependent flag is absent,
+# the engine refuses to start rather than serving deflected or nutated positions
+# under a declaration that does not mention either.
+_IMPLIED_BY: dict[str, str] = {
+    "FLG_NOGDEFL": "FLG_TRUEPOS",   # geometric positions suppress deflection
+    "FLG_NONUT": "FLG_SIDEREAL",    # sidereal positions refer to the mean equinox
 }
 
 # Every distinct swisseph position flag, for rendering a word by name in an error
@@ -376,6 +473,37 @@ def apply_position_flags() -> None:
             "still reads correctly while the reference frame moved underneath it. "
             "Refusing to serve positions in a frame this engine cannot name."
         )
+
+    # (0b) the masking invariant -- what replaces declaring FLG_NOGDEFL/FLG_NONUT
+    #
+    # Those two are omitted from the declared word because swisseph applies them
+    # unasked under flags that ARE declared (measured: requesting 65810 returns
+    # retflag 67410, with both added back). The omission is therefore safe only
+    # while the masking flag is still declared. Checked before the library
+    # comparison below on purpose: step (1) happens to reject some of these cases
+    # too, but for the WRONG reason -- it reports a dependency bump and tells the
+    # reader to revert it, which is not what a cleared FLG_TRUEPOS is -- and it
+    # would not fire at all if the library ever built the same reduced word.
+    for omitted, masking in _IMPLIED_BY.items():
+        omitted_bit = getattr(swe, omitted, 0)
+        masking_bit = getattr(swe, masking, 0)
+        if POSITION_FLAGS & omitted_bit:
+            continue  # taken explicitly; nothing is being relied on
+        if not POSITION_FLAGS & masking_bit:
+            raise RuntimeError(
+                f"the declared position-flag word omits {omitted}, which is only "
+                f"safe while {masking} is declared -- and {masking} is not in "
+                f"{describe_position_flags(POSITION_FLAGS)}. swisseph applies "
+                f"{omitted} of its own accord under {masking} (measured: a request "
+                "of 65810 returns retflag 67410, carrying FLG_NONUT and "
+                "FLG_NOGDEFL nobody asked for), which is why this engine stopped "
+                f"requesting it at the pyjhora 4.8.7 bump. With {masking} gone "
+                f"that mask lifts and {omitted} becomes LIVE -- gravitational "
+                "deflection is worth 0.0711 arcsec and the two words separate by "
+                "up to 0.128869 arcsec once FLG_TRUEPOS is cleared. Refusing to "
+                "serve positions in a frame this engine no longer describes: "
+                f"either re-declare {omitted} explicitly, or keep {masking}."
+            )
 
     # (1) the library's own inherited word -- the dependency-bump tripwire
     builder = getattr(jhora_utils, "set_flags_for_planet_positions", None)
@@ -452,15 +580,28 @@ apply_position_flags()
 # Until this block existed the engine stated that word nowhere. It inherited
 # ``drik.RISE_FLAGS`` / ``drik.SET_FLAGS``, which the astronomy library builds at
 # ITS import time from ``jhora.utils.set_flags_for_rise_set()``, which in turn
-# reads three ``jhora.const.RISE_SET_*`` module globals. Measured with the frozen
-# resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2): RISE_FLAGS = 897, SET_FLAGS = 898,
-# identical in 4.8.6 and 4.8.7 -- so unlike the position-flag word (which moved
-# 66386 -> 65810 on that same bump) this one has not moved. But "has not moved"
-# is not "declared": the same three ``const`` globals that build it are exactly
-# the shape of default that pyjhora 4.8.7 flipped for the position word, and a
-# release that flips ``RISE_SET_USE_REFRACTION`` or
+# reads three ``jhora.const.RISE_SET_*`` module globals. Measured on pyjhora
+# 4.8.6 and RE-measured on the now-pinned 4.8.7 (pyswisseph 2.10.3.2 throughout):
+# RISE_FLAGS = 897, SET_FLAGS = 898 on both -- so unlike the position-flag word
+# (which moved 66386 -> 65810 on that same bump) this one has not moved. But "has
+# not moved" is not "declared": the same three ``const`` globals that build it
+# are exactly the shape of default that pyjhora 4.8.7 flipped for the position
+# word, and a release that flips ``RISE_SET_USE_REFRACTION`` or
 # ``RISE_SET_USE_DISC_CENTER_FOR_RISING`` would move every served sunrise with no
 # change in this repository and nothing here to notice it.
+#
+# ONE NEW WAY THE PIN COULD BE UNDONE, found while reading the 4.8.7 diff and
+# recorded because it is not visible from this file. In 4.8.6
+# ``drik.refresh_planet_flags(longitude, latitude, elevation)`` took three
+# REQUIRED arguments and rebuilt only ``PLANET_FLAGS``. In 4.8.7 all three became
+# optional and it now also rebuilds ``RISE_FLAGS`` and ``SET_FLAGS`` from the
+# ``const`` globals -- i.e. one no-argument call would silently revert BOTH pins
+# applied here. Measured on the installed 4.8.7: the only callers are a
+# ``if __name__ == "__main__"`` demo block in drik.py (never executed on import)
+# and ``jhora/ui/horo_chart_tabs.py``, a PyQt module this service never imports.
+# So nothing on the served path calls it today. If a future release calls it from
+# a served entry point, these pins become per-call state rather than import-time
+# state, and both appliers would have to move to the call boundary.
 #
 # THE CONVENTION THIS ENGINE DECLARES: swisseph's BIT_HINDU_RISING (896), which
 # is the composite the Vedic (BPHS / Surya-Siddhanta) tradition wants -- the Sun's
@@ -850,9 +991,29 @@ PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn", "Rahu
 # was reporting both shadow grahas as permanently DIRECT: the exact inverse of
 # the classical reading, on every chart it had ever served.
 #
-# That zero is structural, not a sampling artefact and not an
-# ephemeris-runtime artefact: it reproduces identically against the real Swiss
+# That zero was structural, not a sampling artefact and not an
+# ephemeris-runtime artefact: it reproduced identically against the real Swiss
 # data files and against the built-in Moshier fallback.
+#
+# THE LIBRARY CHANGED THAT IN 4.8.7, and the declaration is what absorbed it.
+# The exclusion line above now reads ``if p not in [const._SUN, const._MOON]``,
+# so ``drik.planets_in_retrograde`` reports the nodes' COMPUTED direction
+# instead of omitting them (the 4.8.7 changelog, which lives only in drik.py's
+# module docstring, calls this "Handling Rahu/Ketu retrograde/stationary/
+# speed-info for true/mean nodes revised"; its new docstring adds "Rahu/Ketu as
+# True nodes - retrograde, stationary or even direct"). Sun and Moon took their
+# place in the filter, which changes nothing -- neither ever has negative
+# longitude speed, so neither was ever appended.
+#
+# Measured on the 4.8.7 resolve over 400 instants from 1990-01-01 at 37-day
+# steps: the library now reports Rahu retrograde on 72.25% and DIRECT on 27.75%,
+# while this engine serves retrograde on 100% of charts. Nothing served moved on
+# the bump -- because the flag is declared here and applied by NAME through
+# ``graha_is_retrograde``, which ignores ``computed`` for these two. Had it been
+# inherited, 4.8.7 would have flipped Rahu/Ketu retrogression on roughly a
+# quarter of all charts with nothing in the diff to say so. The override is
+# therefore MORE load-bearing than when it was written: it used to turn an
+# absence into True, and now overrules a live, contrary answer.
 #
 # Why this is DECLARED rather than derived from the ephemeris, which is the
 # obvious-looking alternative: under the declared TRUE (osculating) node the

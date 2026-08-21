@@ -58,9 +58,12 @@ def _raise(*_a, **_k):
     raise RuntimeError("ephemeris unavailable")
 
 
-# Several ``drik`` entry points call one another INTERNALLY — measured on
-# pyjhora 4.8.6: ``drik.karana`` calls ``drik.tithi`` (drik.py:984) and
-# ``drik.varjyam`` calls ``drik.nakshatra`` (drik.py:3300). A permanently
+# Several ``drik`` entry points call one another INTERNALLY — re-measured on the
+# pinned pyjhora 4.8.7: ``drik.karana`` calls ``drik.tithi`` (drik.py:1038) and
+# ``drik.varjyam`` calls ``drik.nakshatra`` (drik.py:3375). The relationship is
+# unchanged from 4.8.6; only the line numbers moved (they were 984 and 3300
+# there), which is exactly why they are re-read on a bump rather than carried
+# forward. A permanently
 # patched function therefore does not simulate "this limb failed"; it simulates
 # "the library is broken", and the failure surfaces on a DIFFERENT limb than the
 # one under test (patching ``nakshatra`` to raise forever fails ``varjyam``,
