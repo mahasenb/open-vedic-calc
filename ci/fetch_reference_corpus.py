@@ -82,11 +82,20 @@ disabled itself — documented, and inert. So:
   * ``--check`` is never gated. It writes nothing, so running it in CI as a drift
     detector is exactly the right use of this script there.
 
-Mirrors ``UPDATE_SWISS_GOLDENS`` (``tests/test_swiss_ephemeris.py``) with one
-deliberate difference: that guard reads ``os.environ.get("CI")`` for TRUTHINESS, so
-an empty-string ``CI`` slips past it. This one reads for PRESENCE. The asymmetry is
-intentional and fails in the safe direction — a false refusal costs one ``unset
-CI``; a false permit costs the corpus.
+Mirrors ``UPDATE_SWISS_GOLDENS`` (``tests/test_swiss_ephemeris.py``), and now with
+the SAME ``CI`` semantics: both read the variable for PRESENCE, not truthiness.
+
+That was not always so. This guard read for presence from the day it landed while
+the goldens guard read ``os.environ.get("CI")`` for truthiness, so an empty-string
+``CI`` slipped past the goldens and not past this. The asymmetry was recorded here
+as deliberate — a lost regression signal was judged survivable where a destroyed
+independent corpus was not — but "survivable" is not the same as "intended", and a
+guard that reads correctly to a human while not firing is the shape of a control
+that has quietly disabled itself. The goldens guard now reads for presence too
+(``tests/test_swiss_ephemeris.py::golden_recording_refusal``), and
+``test_the_two_recorders_agree_on_how_ci_is_read`` there pins the two together, so
+a drift back to truthiness in EITHER reds. Presence fails in the safe direction: a
+false refusal costs one ``unset CI``; a false permit costs the evidence.
 """
 from __future__ import annotations
 
