@@ -59,11 +59,12 @@ def _raise(*_a, **_k):
 
 
 # Several ``drik`` entry points call one another INTERNALLY — re-measured on the
-# pinned pyjhora 4.8.7: ``drik.karana`` calls ``drik.tithi`` (drik.py:1038) and
-# ``drik.varjyam`` calls ``drik.nakshatra`` (drik.py:3375). The relationship is
-# unchanged from 4.8.6; only the line numbers moved (they were 984 and 3300
-# there), which is exactly why they are re-read on a bump rather than carried
-# forward. A permanently
+# pinned pyjhora 4.8.7: the body of ``drik.karana`` calls ``drik.tithi``, and the
+# body of ``drik.varjyam`` calls ``drik.nakshatra``. The relationship is unchanged
+# from 4.8.6. It is recorded as a caller/callee pair rather than as a location in
+# the vendored file, because on that bump the relationship held while the
+# locations moved — so the pair is what survives a bump, and the pair is what is
+# re-read on the next one. A permanently
 # patched function therefore does not simulate "this limb failed"; it simulates
 # "the library is broken", and the failure surfaces on a DIFFERENT limb than the
 # one under test (patching ``nakshatra`` to raise forever fails ``varjyam``,

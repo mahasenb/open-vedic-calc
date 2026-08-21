@@ -158,7 +158,10 @@ def _library_sunrise_sunset_hours():
 
 class TestPureHelpers:
     def test_get_karana_name_fixed(self):
-        """Fixed-karana indices map to their special names (line 85-86)."""
+        """Fixed-karana indices map to their special names.
+
+        Covers the ``FIXED_KARANAS`` lookup branch of ``get_karana_name``.
+        """
         assert m.get_karana_name(1) == "Kimstughna"
         assert m.get_karana_name(58) == "Shakuni"
         assert m.get_karana_name(59) == "Chatushpada"

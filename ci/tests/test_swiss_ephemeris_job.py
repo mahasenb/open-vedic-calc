@@ -1353,7 +1353,8 @@ def test_step_enablement_parser_discriminates() -> None:
     assert _runs_for_event({}, "push") is True
     assert _runs_for_event({}, "pull_request") is True
 
-    # The real workflow's own legitimate spelling (test.yml:65, :72) must not
+    # The real workflow's own legitimate spelling -- the `if:` on the `test`
+    # job's "Run tests" and "Run CI gate regression suite" steps -- must not
     # be false-rejected by the step-level evaluator either.
     legitimate = {"if": "github.event_name != 'schedule'"}
     assert _runs_for_event(legitimate, "push") is True
@@ -1366,7 +1367,8 @@ def test_swiss_job_suite_step_is_not_conditionally_skipped() -> None:
     test_swiss_job_runs_the_suite_with_the_fail_closed_flag and
     test_swiss_job_is_actually_enabled_on_its_real_triggers -- inspects the
     JOB's `if:` but never looks at the STEP's own `if:`. Add a disabling
-    `if:` to ONLY the suite step (`.github/workflows/test.yml:140-145`): the
+    `if:` to ONLY the suite step (the `swiss-ephemeris` job's "Run the full
+    suite against real Swiss data" step in `.github/workflows/test.yml`): the
     job has no job-level `if:` blocking it, every other step still runs, and
     GitHub Actions marks that one step `skipped` while the JOB still reports
     `success`. Every other test in this file would still pass -- the exact
@@ -1378,8 +1380,8 @@ def test_swiss_job_suite_step_is_not_conditionally_skipped() -> None:
     already iterates steps for the sibling `continue-on-error` vector, and
     this file's own module
     docstring already frames "correctly written but never RUNS" as the
-    invariant to defend. `test.yml:65` and `:72` use step-level `if:`
-    legitimately (on the *other* job, `test`) -- see
+    invariant to defend. The `test` job's own "Run tests" and "Run CI gate
+    regression suite" steps use step-level `if:` legitimately -- see
     test_legitimate_step_level_if_in_the_test_job_is_not_false_rejected for
     the concrete proof this guard does not false-reject that spelling.
     """
@@ -1411,9 +1413,9 @@ def test_swiss_job_suite_step_is_not_conditionally_skipped() -> None:
 
 
 def test_legitimate_step_level_if_in_the_test_job_is_not_false_rejected() -> None:
-    """`.github/workflows/test.yml:65` and `:72` use step-level
-    `if: github.event_name != 'schedule'` legitimately, on the `test` job's
-    own steps ("Run tests" and "Run CI gate regression suite") -- skipping
+    """In `.github/workflows/test.yml`, the `test` job's own "Run tests" and
+    "Run CI gate regression suite" steps use step-level
+    `if: github.event_name != 'schedule'` legitimately -- skipping
     pytest on the weekly schedule-only run, exactly like the job-level
     condition on `swiss-ephemeris`. The step-level evaluator introduced for
     round 4, finding 1 must not mistake these for a disabling condition."""

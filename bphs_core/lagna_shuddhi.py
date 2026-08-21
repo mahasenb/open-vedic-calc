@@ -1074,7 +1074,9 @@ def compute_balam_at_jd(
 ) -> tuple[str, str]:
     """Return (tara_label, chandra_str) for the Moon's position at *jd*.
 
-    Uses the same formula as muhurat.py lines 255-283.  tara_label is the
+    Uses the same formula as the personal-balam block of
+    ``compute_muhurat_for_day`` in muhurat.py — the ``_TARA_BALA_LEVELS``
+    lookup and the chandra-bala banding beside it.  tara_label is the
     bare label string (e.g. "Vipat") without the parenthesised description.
     chandra_str is one of "Good", "Neutral", or "Inauspicious (Avoid)".
 
