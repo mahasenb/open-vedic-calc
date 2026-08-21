@@ -76,7 +76,17 @@ that differs from another tool can be explained rather than guessed at:
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
 | Sunrise / sunset | **Disc centre at the true (geometric) horizon** — the classical Hindu convention; `rsmi` words `897` / `898` | `bphs_core/utils.py`, `RISE_FLAGS` / `SET_FLAGS` |
-| Ephemeris | Swiss Ephemeris data files (AD 1800–2400) | baked into the images |
+| Ephemeris | Swiss Ephemeris data files; served birth-date range **1800-01-02 … 2400-01-09** | baked into the images; bound in `app/schemas.py` |
+
+The birth-date range is the **measured** span of the shipped data files, not the
+"AD 1800–2400" label on them. The files stop answering on 2400-01-11, and
+swisseph does not error when they do — it silently substitutes its built-in
+Moshier ephemeris and returns a plausible result anyway. Rather than serve the
+tail off the fallback at HTTP 200 with nothing saying so, dates outside the
+measured span are refused with a 422. The bound holds one further day of margin
+at each end because a local date spans UTC instants a day either side once
+`timezone_offset_hours` is applied. See `EPHEMERIS_LICENSE.md` for the
+measurement.
 
 The node model is the choice most likely to explain a visible discrepancy.
 Measured over 1800–2400 at one-day steps against the real Swiss data files, the
