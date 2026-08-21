@@ -56,8 +56,14 @@ Moon positions INSIDE the C library. They never re-enter the Python binding, so 
 spy that wraps ``swe.calc_ut`` records **zero** calls for the whole of
 ``_is_eclipse_day`` — measured, at 2400-01-09, 1800-01-02 and 2026-05-26 alike.
 Any Moshier tally such a spy reports for a muhurat scan therefore belongs to
-OTHER limbs (``drik.tithi``'s next-day search, ``_is_adhik_maasa``'s lunar-month
-search), never to the eclipse probe.
+OTHER limbs, never to the eclipse probe. Which limbs, re-measured per call site
+over 702 probes and expressed as days from the scanned date's 00:00 UT:
+``drik.lunar_month`` (via ``_is_adhik_maasa``) +31.834 d, ``drik.yogam``
++24.859 d, ``drik.nakshatra``/``varjyam``/``amrita_gadiya``/``panchaka_rahitha``
++2.543 d, ``drik.tithi``/``karana`` +1.998 d. Note the correction: ``drik.tithi``
+was named here as a principal cause and is in fact the SMALLEST of them, while
+``drik.yogam`` — which no note in this repository mentioned — is second largest.
+See ``tests/test_scanned_day_ephemeris_reach.py``.
 ``test_a_calc_ut_spy_is_blind_to_the_eclipse_finders`` pins that, because the
 predecessor of this module attributed a scan's Moshier count to ``_is_eclipse_day``
 on exactly that reasoning and the attribution was wrong.
@@ -148,6 +154,95 @@ def test_eclipse_probe_leaves_the_scanned_day_on_swiss_data(
         "lookup on it must still come from Swiss data. The eclipse search reads "
         "past the end of the files by design (the next eclipse is not on this "
         "day); it must restore the ephemeris state on the way out."
+    )
+
+
+_ADHIK_BACKWARD_REACH_DATES = (
+    datetime.date(1800, 1, 2),
+    datetime.date(1800, 7, 21),
+    datetime.date(1805, 10, 3),
+)
+
+
+@pytest.mark.parametrize("target", _ADHIK_BACKWARD_REACH_DATES,
+                         ids=lambda d: d.isoformat())
+def test_adhik_maasa_probe_leaves_the_scanned_day_on_swiss_data(
+    swiss_ephemeris: int, restored_engine, target: datetime.date
+) -> None:
+    """``_is_adhik_maasa`` searches outside the day too — BACKWARD, and far.
+
+    This test PASSES on base. It is here because it is the evidence for a
+    decision NOT to change something, and that evidence needs to be falsifiable:
+    the scanned-day LOWER bound (app/schemas.py, ``MIN_SCANNED_DATE``) is
+    deliberately not narrowed, and this is what makes that safe.
+
+    Measured with a signature-agnostic ``swe.calc_ut`` spy over 702 probes,
+    ``drik.lunar_month`` reaches back to an ANCHOR rather than through a window:
+    from 1800-01-02 it reads -540.974 d, landing on 1798-07-10, and the distance
+    grows day by day while the anchor stays put, then resets — a sawtooth
+    reaching -1605.399 d at 1805-10-03 across 1800-01-02..1806-07-30. Everything
+    before 1800-01-01 is outside the shipped files, so those reads are answered
+    from Moshier; legitimately, there is no data there.
+
+    The question that decides the bound is whether the engine STAYS on the
+    fallback afterwards, as it does for a read past the END of the files.
+    Measured, it does not: an in-span lookup after this limb still answers from
+    Swiss data on every one of these dates. The stickiness the eclipse probe had
+    to restore around is not symmetric, so bounding the backward reach away —
+    which would cost roughly four and a half years of served range — would buy
+    nothing. The three dates are the measured extremes of the backward sawtooth.
+
+    If this ever fails, the asymmetry has gone and the lower bound has to be
+    re-derived; do not "fix" it by relaxing the assertion.
+    """
+    jd = _day_noon_jd(target)
+
+    before = {name: _engine(jd, body)
+              for name, body in (("Sun", swe.SUN), ("Moon", swe.MOON))}
+    assert before == {"Sun": "SWISS", "Moon": "SWISS"}, (
+        f"precondition failed: {target} is supposed to be inside the shipped "
+        f"Swiss files, but the engine reports {before} before the probe runs."
+    )
+
+    muhurat._is_adhik_maasa(
+        swe.julday(target.year, target.month, target.day, 12.0), PLACE, target
+    )
+
+    after = {name: _engine(jd, body)
+             for name, body in (("Sun", swe.SUN), ("Moon", swe.MOON))}
+    assert after == {"Sun": "SWISS", "Moon": "SWISS"}, (
+        f"_is_adhik_maasa({target}) left swisseph on the Moshier fallback: "
+        f"{after}. Its lunar-month search reads before the start of the files by "
+        "design (the anchor it measures from is simply earlier than the data); "
+        "it must restore the ephemeris state on the way out, exactly as "
+        "_is_eclipse_day does — otherwise every later lookup on this thread, at "
+        "ANY date, silently answers from the fallback."
+    )
+
+
+def test_a_scan_day_after_a_deep_backward_search_is_still_swiss(
+    swiss_ephemeris: int, restored_engine
+) -> None:
+    """The same decision, asserted where it would actually cost something.
+
+    Also passes on base, and for the same reason. The test above pins the limb in
+    isolation; this pins the consequence its caller cares about — after a FULL
+    low-edge day compute, a lookup at a modern in-span date (the shape of the
+    very next request a shared worker thread might serve) still comes from Swiss
+    data. Together they are why ``MIN_SCANNED_DATE`` equals
+    ``MIN_EPHEMERIS_DATE`` rather than being pulled ~4.5 years inward.
+    """
+    low_edge = datetime.date(1800, 1, 2)
+    muhurat.compute_muhurat_for_day(PLACE, low_edge)
+
+    jd = _day_noon_jd(_INTERIOR_DATE)
+    after = {name: _engine(jd, body)
+             for name, body in (("Sun", swe.SUN), ("Moon", swe.MOON))}
+    assert after == {"Sun": "SWISS", "Moon": "SWISS"}, (
+        f"after scanning {low_edge}, a lookup at {_INTERIOR_DATE} — squarely "
+        f"inside the shipped files — answered {after}. A single scan at the low "
+        "edge of the served range degrades every subsequent computation on this "
+        "thread, whatever date it asks about."
     )
 
 
