@@ -351,28 +351,53 @@ def _is_eclipse_day(target_date: date_type, place: drik.Place) -> bool:
     unverifiable finder silently DELETED candidate days from the recommendation
     while the response stayed well formed. An eclipse veto that cannot be
     verified is a failure, not a result.
+
+    SEARCHES OUTSIDE THE SCANNED DAY, AND RESTORES THE ENGINE AFTERWARDS.
+    Answering "is there an eclipse today" means finding the NEXT eclipse, which
+    is almost never today: measured from a day scanned at 2400-01-09, the lunar
+    finder returns 2400-01-12 and the solar 2403-05-21, both past the end of the
+    shipped files (~2400-01-10). Two consequences, and they are different:
+
+    * The VERDICT is unaffected — it is a coarse `day_start <= t_max < day_end`
+      comparison, and the two engines agree far too closely to move an eclipse
+      across a local midnight (measured: worst drift 2.714 s against a closest
+      approach of 185 s, a 68x margin, 0 disagreements over 132 days).
+    * The ENGINE STATE was affected, and that was a real defect. swisseph keeps
+      the fallback after an out-of-range read, so the scanned day's OWN Sun and
+      Moon — well inside the files — then answered from Moshier with nothing
+      saying so. ``utils.restore_ephemeris_state()`` in the ``finally`` is what
+      closes that; it must cover the ``return True`` and the raising paths too,
+      which is why it is a ``try``/``finally`` and not a trailing call.
+
+    Both are pinned by tests/test_muhurat_edge_probe_engine.py.
     """
     tz = place.timezone
     day_start = swe.julday(
         target_date.year, target_date.month, target_date.day, 0.0 - tz
     )
     day_end = day_start + 1.0
-    for finder in (drik.next_solar_eclipse, drik.next_lunar_eclipse):
-        with _require(
-            "eclipse", target_date, "muhurat_eclipse_check_failed",
-            "the grahana (eclipse) veto could not be verified for this day",
-        ):
-            res = finder(day_start - 2.0, place)
-            t_max = res[1][0]
-            guard = 0
-            # Advance past any eclipse that falls before this day.
-            while t_max < day_start and guard < 60:
-                res = finder(t_max + 0.05, place)
+    try:
+        for finder in (drik.next_solar_eclipse, drik.next_lunar_eclipse):
+            with _require(
+                "eclipse", target_date, "muhurat_eclipse_check_failed",
+                "the grahana (eclipse) veto could not be verified for this day",
+            ):
+                res = finder(day_start - 2.0, place)
                 t_max = res[1][0]
-                guard += 1
-            if day_start <= t_max < day_end:
-                return True
-    return False
+                guard = 0
+                # Advance past any eclipse that falls before this day.
+                while t_max < day_start and guard < 60:
+                    res = finder(t_max + 0.05, place)
+                    t_max = res[1][0]
+                    guard += 1
+                if day_start <= t_max < day_end:
+                    return True
+        return False
+    finally:
+        # The searches above deliberately read past the end of the shipped data.
+        # Leaving swisseph on the fallback would silently degrade every LATER
+        # lookup on this day — and on the next day of a range scan.
+        utils.restore_ephemeris_state()
 
 
 def _is_adhik_maasa(jd: float, place: drik.Place, target_date: date_type) -> bool:
