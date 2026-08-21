@@ -107,20 +107,20 @@ class TestVarna:
 
 class TestVasya:
     def test_same_group(self):
-        # Aries & Taurus both chatushpada (line 175)
+        # Aries & Taurus both chatushpada -> _vasya: `ga == gb` same-group tier (2.0)
         score, interp = compat._vasya("Aries", "Taurus")
         assert score == 2.0
         assert "same vasya group" in interp
 
     def test_a_controlled_by_b(self):
         # _VASYA_CONTROLS["Leo"] == {"Aries"} -> sign_a=Aries controlled by b=Leo
-        score, interp = compat._vasya("Aries", "Leo")  # line 178
+        score, interp = compat._vasya("Aries", "Leo")  # _vasya: `sign_a in controlled_by_b` tier (1.0)
         assert score == 1.0
         assert "supportive power dynamic" in interp
 
     def test_b_controlled_by_a(self):
         # _VASYA_CONTROLS["Leo"] == {"Aries"} -> sign_b=Aries controlled by a=Leo
-        score, interp = compat._vasya("Leo", "Aries")  # line 181
+        score, interp = compat._vasya("Leo", "Aries")  # _vasya: `sign_b in controlled_by_a` tier (0.5)
         assert score == 0.5
         assert "Partial vasya relationship" in interp
 
@@ -154,7 +154,7 @@ class TestTara:
             if favorable_pair:
                 break
         assert favorable_pair is not None
-        score, interp = compat._tara(*favorable_pair)  # line 197
+        score, interp = compat._tara(*favorable_pair)  # _tara: `fav_ab and fav_ba` tier (3.0)
         assert score == 3.0
         assert "strong karmic resonance" in interp
 
@@ -174,7 +174,7 @@ class TestTara:
             if mixed:
                 break
         assert mixed is not None
-        score, interp = compat._tara(*mixed)  # line 199
+        score, interp = compat._tara(*mixed)  # _tara: `fav_ab or fav_ba` tier (1.5)
         assert score == 1.5
         assert "mixed star compatibility" in interp
 
@@ -203,13 +203,13 @@ class TestTara:
 
 class TestYoni:
     def test_same_animal(self):
-        # Ashwini & Shatabhisha are both 'horse' (line 211)
+        # Ashwini & Shatabhisha are both 'horse' -> _yoni: `animal_a == animal_b` tier (4.0)
         score, interp = compat._yoni("Ashwini", "Shatabhisha")
         assert score == 4.0
         assert "horse yoni" in interp
 
     def test_enemy_animals(self):
-        # Ashwini=horse, Swati=buffalo -> enemies (line 214)
+        # Ashwini=horse, Swati=buffalo -> _yoni: `pair in _YONI_ENEMIES` tier (0.0)
         score, interp = compat._yoni("Ashwini", "Swati")
         assert score == 0.0
         assert "natural enemies" in interp
@@ -221,7 +221,8 @@ class TestYoni:
         assert "neutral toward each other" in interp
 
     def test_missing_yoni_data(self):
-        # Unknown nakshatra -> NAKSHATRA_YONI.get returns None (line 207)
+        # Unknown nakshatra -> NAKSHATRA_YONI.get returns None
+        # -> _yoni: `not ya or not yb` missing-data guard (2.0)
         score, interp = compat._yoni("Ashwini", "Bogus")
         assert score == 2.0
         assert "moderate" in interp
@@ -247,25 +248,25 @@ class TestGrahaMaitri:
     def test_friendly_neutral(self):
         # Find a pair whose maitri score is exactly 4.0 (friend/neutral).
         pair = _find_maitri_pair(4.0)
-        score, interp = compat._graha_maitri(*pair)  # line 225-226
+        score, interp = compat._graha_maitri(*pair)  # _graha_maitri: `score >= 4.0` friendly-neutral tier
         assert score == 4.0
         assert "friendly-neutral bond" in interp
 
     def test_neutral(self):
         pair = _find_maitri_pair(3.0)
-        score, interp = compat._graha_maitri(*pair)  # line 227-228
+        score, interp = compat._graha_maitri(*pair)  # _graha_maitri: `score >= 3.0` neutral tier
         assert score == 3.0
         assert "neutral to each other" in interp
 
     def test_mixed_tense(self):
         pair = _find_maitri_pair(1.0)
-        score, interp = compat._graha_maitri(*pair)  # line 229-230
+        score, interp = compat._graha_maitri(*pair)  # _graha_maitri: `score >= 1.0` mixed/mildly-tense tier
         assert score == 1.0
         assert "mixed or mildly tense" in interp
 
     def test_enemies(self):
         pair = _find_maitri_pair(0.0)
-        score, interp = compat._graha_maitri(*pair)  # line 231-232
+        score, interp = compat._graha_maitri(*pair)  # _graha_maitri: else natural-enemies tier
         assert score == 0.0
         assert "natural enemies" in interp
 
@@ -290,7 +291,7 @@ def _find_maitri_pair(target: float):
 
 class TestGana:
     def test_same_gana(self):
-        # Ashwini & Mrigashira both deva (line 240)
+        # Ashwini & Mrigashira both deva -> _gana: `ga == gb` same-gana tier (6.0)
         score, interp = compat._gana("Ashwini", "Mrigashira")
         assert score == 6.0
         assert "deva gana" in interp
@@ -308,7 +309,7 @@ class TestGana:
         assert "deep mutual respect" in interp
 
     def test_deva_rakshasa(self):
-        # Ashwini(deva) & Krittika(rakshasa) -> else branch (line 247)
+        # Ashwini(deva) & Krittika(rakshasa) -> _gana: deva+rakshasa fall-through return (0.0)
         score, interp = compat._gana("Ashwini", "Krittika")
         assert score == 0.0
         assert "fundamentally mismatched" in interp
@@ -326,7 +327,7 @@ class TestBhakoot:
         assert "bhakoot dosha" in interp
 
     def test_no_dosha(self):
-        # Aries & Aries: count 1-1, not in dosha set -> 7.0 (line 261)
+        # Aries & Aries: count 1-1, not in dosha_pairs -> _bhakoot: no-dosha return (7.0)
         score, interp = compat._bhakoot("Aries", "Aries")
         assert score == 7.0
         assert "free of bhakoot dosha" in interp
@@ -344,7 +345,8 @@ class TestNadi:
         assert "nadi dosha" in interp
 
     def test_different_nadi(self):
-        # Ashwini(Aadi) & Bharani(Madhya): different -> 8.0 (line 275)
+        # Ashwini(Aadi) & Bharani(Madhya): different nadi -> _nadi: fall-through
+        # past the `na == nb` dosha branch (8.0)
         score, interp = compat._nadi("Ashwini", "Bharani")
         assert score == 8.0
         assert "fully compatible" in interp
@@ -356,7 +358,7 @@ class TestNadi:
 
 class TestMangalDosha:
     def test_no_mars_no_dosha(self):
-        # Chart with no Mars -> (False, none, []) (line 296)
+        # Chart with no Mars -> _mangal_dosha_raw: `mars is None` guard -> (False, none, [])
         has, sev, reasons = compat._mangal_dosha_raw(_mock_chart({"Sun": {}}))
         assert has is False
         assert sev == "none"
@@ -376,8 +378,9 @@ class TestMangalDosha:
         assert sev == "strong"
 
     def test_dosha_without_lagna_or_moon_cancellation(self):
-        """Branch 309->311: a dosha chart whose lagna and Moon are neither Aries
-        nor Scorpio skips the Mars-ruled-sign cancellation and falls through."""
+        """False arc of _mangal_dosha_raw's Mars-ruled lagna-or-Moon cancellation
+        check: a dosha chart whose lagna and Moon are neither Aries nor Scorpio
+        skips that cancellation and falls through to the 2nd-house check."""
         snap = _mock_chart(
             {
                 "Mars": {"sign": "Gemini", "house": 7},   # mild dosha, no own-sign
@@ -415,7 +418,8 @@ class TestMangalDosha:
         assert any("lagna or Moon sign" in r for r in reasons)
 
     def test_second_house_gemini_cancellation(self):
-        # Mars in 2nd house in Gemini -> special cancellation (line 312)
+        # Mars in 2nd house in Gemini -> _mangal_dosha_raw: `mars.house == 2`
+        # Gemini/Virgo cancellation branch
         snap = _mock_chart({"Mars": {"sign": "Gemini", "house": 2}})
         _, _, reasons = compat._mangal_dosha_raw(snap)
         assert any("2nd house" in r for r in reasons)
@@ -443,7 +447,8 @@ class TestMangalDosha:
 
 class TestNakshatraProse:
     def test_same_gana_friend_lords_high_tara(self):
-        # Same gana (line 411), mutual-friend lords (line 418-419), tara>=2.5 (426)
+        # nakshatra_compatibility_prose: `ga == gb` gana sentence, mutual-friend
+        # rashi-lord sentence, `tara_sc >= 2.5` sentence.
         # Leo(Sun) & Cancer(Moon): Sun & Moon mutual friends.
         prose = compat.nakshatra_compatibility_prose(
             "Ashwini", "Mrigashira", "Leo", "Cancer", 3.0
@@ -453,7 +458,8 @@ class TestNakshatraProse:
         assert "karmic ease" in prose
 
     def test_deva_manushya_enemy_lords_partial_tara(self):
-        # deva+manushya gana, enemy lords (line 420-421), 0<tara<2.5
+        # nakshatra_compatibility_prose: deva+manushya gana sentence, enemy
+        # rashi-lord sentence, `tara_sc > 0` (sub-2.5) sentence.
         # Venus & Sun are enemies (Sun's enemies include Venus).
         prose = compat.nakshatra_compatibility_prose(
             "Ashwini", "Bharani", "Taurus", "Leo", 1.5
@@ -463,7 +469,8 @@ class TestNakshatraProse:
         assert "partially favorable" in prose
 
     def test_mismatched_gana_neutral_lords_zero_tara(self):
-        # deva+rakshasa gana (else, line 415), neutral lords (line 422-423), tara 0
+        # nakshatra_compatibility_prose: gana else-branch sentence (deva+rakshasa),
+        # neutral rashi-lord sentence, tara else-branch sentence (tara_sc not > 0).
         # Saturn & Jupiter are neutral to each other.
         prose = compat.nakshatra_compatibility_prose(
             "Ashwini", "Krittika", "Capricorn", "Sagittarius", 0.0
@@ -555,31 +562,36 @@ class TestCompositeStrength:
         self._patch_ranks(monkeypatch, "strong", "average")
         a, b = self._snaps()
         note = compat.composite_strength_notes(a, b)
-        assert "Person A's 7th-house bhavabala is strong" in note  # line 453-455
+        # composite_strength_notes: `ra == "strong"` branch
+        assert "Person A's 7th-house bhavabala is strong" in note
 
     def test_b_strong_only(self, monkeypatch):
         self._patch_ranks(monkeypatch, "average", "strong")
         a, b = self._snaps()
         note = compat.composite_strength_notes(a, b)
-        assert "Person B's 7th-house bhavabala is strong" in note  # line 456-458
+        # composite_strength_notes: `rb == "strong"` branch
+        assert "Person B's 7th-house bhavabala is strong" in note
 
     def test_both_same_non_strong(self, monkeypatch):
         self._patch_ranks(monkeypatch, "weak", "weak")
         a, b = self._snaps()
         note = compat.composite_strength_notes(a, b)
-        assert "Both charts show weak 7th-house" in note  # line 459-461
+        # composite_strength_notes: `ra == rb` non-strong branch
+        assert "Both charts show weak 7th-house" in note
 
     def test_differ_neither_strong(self, monkeypatch):
         self._patch_ranks(monkeypatch, "weak", "average")
         a, b = self._snaps()
         note = compat.composite_strength_notes(a, b)
-        assert "complementary partnership strengths" in note  # line 462-463
+        # composite_strength_notes: differing-ranks fall-through return
+        assert "complementary partnership strengths" in note
 
     def test_incomplete_data(self, monkeypatch):
         self._patch_ranks(monkeypatch, None, "strong")
         a, b = self._snaps()
         note = compat.composite_strength_notes(a, b)
-        assert "incomplete" in note  # line 465-466
+        # composite_strength_notes: false arc of `if h7a and h7b` -> incomplete-data return
+        assert "incomplete" in note
 
 
 # ---------------------------------------------------------------------------
