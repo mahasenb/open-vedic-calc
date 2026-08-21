@@ -56,27 +56,66 @@ the corpus does and does not establish about it.
 
 USAGE
 -----
-    python ci/fetch_reference_corpus.py            # re-record from Horizons
     python ci/fetch_reference_corpus.py --check    # fetch and diff, write nothing
+    UPDATE_INDEPENDENT_CORPUS=1 python ci/fetch_reference_corpus.py   # deliberate re-record
 
 Network access is required to RE-RECORD. The committed corpus is read offline by
 ``tests/test_independent_reference_corpus.py``; the test never calls the network.
+
+RE-RECORDING IS REFUSED BY DEFAULT
+----------------------------------
+``CLAUDE.md`` states the rule this file must obey: **never re-record this corpus to
+make a failure go away.** A red ``test_independent_reference_corpus.py`` is an
+accuracy defect measured against an outside authority — re-recording it does not
+lose a regression signal the way re-recording the engine-authored Swiss goldens
+does, it destroys the only externally-sourced check in the repository.
+
+Until now that rule was enforced by nothing at all: a bare
+``python ci/fetch_reference_corpus.py`` truncated and rewrote the committed file
+with no ceremony, which is precisely the shape of a control that has quietly
+disabled itself — documented, and inert. So:
+
+  * overwriting an EXISTING corpus requires ``UPDATE_INDEPENDENT_CORPUS=1``;
+  * recording is refused whenever ``CI`` is set, **even with that flag** — a CI run
+    must never write the evidence it is checking, and a corpus recorded by CI would
+    agree with whatever the engine said that day, unreviewed;
+  * ``--check`` is never gated. It writes nothing, so running it in CI as a drift
+    detector is exactly the right use of this script there.
+
+Mirrors ``UPDATE_SWISS_GOLDENS`` (``tests/test_swiss_ephemeris.py``) with one
+deliberate difference: that guard reads ``os.environ.get("CI")`` for TRUTHINESS, so
+an empty-string ``CI`` slips past it. This one reads for PRESENCE. The asymmetry is
+intentional and fails in the safe direction — a false refusal costs one ``unset
+CI``; a false permit costs the corpus.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import json
+import os
 import pathlib
 import re
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 
 HORIZONS_API = "https://ssd.jpl.nasa.gov/api/horizons.api"
 GEOCENTRE = "500@399"
 
 CORPUS_PATH = pathlib.Path(__file__).resolve().parent.parent / "tests" / "goldens" / "independent_reference_corpus.json"
+
+# The explicit opt-in for a deliberate re-record, and the variable whose mere
+# PRESENCE refuses one outright. Named as module constants so
+# ci/tests/test_reference_corpus_fetcher.py asserts against these rather than
+# against its own copy of the strings.
+UPDATE_ENV = "UPDATE_INDEPENDENT_CORPUS"
+CI_ENV = "CI"
+
+# Distinct from the drift exit (1) so an operator — or a wrapper script — can tell
+# "Horizons disagrees with the committed corpus" apart from "I refused to write".
+REFUSED_EXIT_CODE = 2
 
 # Horizons target ids. These are BODY CENTRES (199/299/499/599/699), never the
 # system barycentres (1/2/4/5/6) — swisseph returns body centres, and mixing the
@@ -383,6 +422,63 @@ def canonical(document: dict) -> str:
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
+def refusal_reason(
+    environ: Mapping[str, str],
+    *,
+    corpus_exists: bool,
+    check_only: bool = False,
+) -> str | None:
+    """Why recording is refused right now, or ``None`` when it may proceed.
+
+    A pure function of the environment and one filesystem fact, so the policy can
+    be asserted directly instead of inferred from what the script did to a file.
+    See the module docstring for the rule and for why the ``CI`` reading is
+    presence-based rather than truthy.
+    """
+    if check_only:
+        # --check writes nothing. Gating it would push an operator toward the
+        # recording path to answer the same question.
+        return None
+
+    if CI_ENV in environ:
+        return (
+            f"REFUSED: recording the independent reference corpus is not permitted "
+            f"when {CI_ENV} is set (value {environ[CI_ENV]!r}).\n"
+            f"\n"
+            f"This corpus is the only externally-sourced (NASA/JPL Horizons) check in "
+            f"this repository. A CI run that rewrites it would replace an outside "
+            f"authority's numbers with whatever the engine said that day, unreviewed — "
+            f"so {UPDATE_ENV}=1 does NOT buy a way through this.\n"
+            f"\n"
+            f"If a red tests/test_independent_reference_corpus.py sent you here: that "
+            f"is an accuracy defect measured against JPL, not a golden that drifted. "
+            f"Re-record only when a deliberate dependency or data bump explains the "
+            f"move, do it locally, and say so in the PR.\n"
+            f"\n"
+            f"To DIFF against Horizons without writing anything (allowed everywhere):\n"
+            f"    python ci/fetch_reference_corpus.py --check"
+        )
+
+    if corpus_exists and environ.get(UPDATE_ENV) != "1":
+        return (
+            f"REFUSED: {CORPUS_PATH} already exists and {UPDATE_ENV} is not set to 1.\n"
+            f"\n"
+            f"CLAUDE.md: NEVER re-record the JPL corpus to make a failure go away — "
+            f"that is the one thing it exists to prevent. Re-recording the Swiss "
+            f"goldens loses a regression signal; re-recording THIS destroys the only "
+            f"independent check in the repository.\n"
+            f"\n"
+            f"To see whether Horizons actually disagrees, without writing anything:\n"
+            f"    python ci/fetch_reference_corpus.py --check\n"
+            f"\n"
+            f"If a deliberate dependency or data bump genuinely explains the move, "
+            f"re-record it on purpose and say why in the PR:\n"
+            f"    {UPDATE_ENV}=1 python ci/fetch_reference_corpus.py"
+        )
+
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -391,6 +487,18 @@ def main() -> int:
         help="fetch and report drift against the committed corpus; write nothing",
     )
     arguments = parser.parse_args()
+
+    # BEFORE the network call, deliberately. A refusal downstream of the fetch
+    # would spend a Horizons round trip to reach a decision that needed none, and
+    # would leave the write guarded by statement ordering rather than by a check.
+    refusal = refusal_reason(
+        os.environ,
+        corpus_exists=CORPUS_PATH.is_file(),
+        check_only=arguments.check,
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return REFUSED_EXIT_CODE
 
     print(f"fetching the independent reference corpus from {HORIZONS_API}")
     document = build()
