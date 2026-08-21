@@ -30,6 +30,23 @@ The optional positional argument is a git commit range (as produced by, e.g.,
 event). When omitted, or when the range is invalid (e.g. the ``before`` SHA is
 the all-zero sentinel git uses for a branch's first push), the gate falls back
 to scanning just the current HEAD commit message.
+
+Text encoding is pinned at BOTH ends of the pipe, and neither half is optional:
+
+- Producer: ``git -c i18n.logOutputEncoding=UTF-8``. Git transcodes each commit
+  message from its declared encoding into that one, so a contributor carrying a
+  legacy codepage in their own git config cannot change what this gate reads.
+- Consumer: the raw bytes are decoded here, as UTF-8, STRICTLY. Decoding inside
+  ``subprocess`` (``text=True``) would use the *locale* codepage — cp1252 on a
+  Windows checkout — and, worse, would raise on a reader thread where this code
+  cannot catch it, handing back ``stdout=None``.
+
+A decode failure is a REFUSAL (loud, non-zero exit), never a lossy scan. Lossy
+decoding is unsafe *specifically for this gate* because it scans for tokens: a
+brand token spelled with a non-ASCII character does not survive replacement
+characters, so a lossy read could report "clean" on a real leak. Refusing is the
+fail-closed answer; being unable to read a commit message is not evidence of
+absence.
 """
 from __future__ import annotations
 
@@ -46,6 +63,21 @@ _LEGACY_PATTERN = re.compile(r"(?i)\bastro\b(?!\.com)")
 # Git's all-zero "before" sentinel for events with no real prior commit (e.g. a
 # branch's first push, or a non-push CI event) — never a resolvable range.
 _NULL_SHA = "0" * 40
+
+# The encoding this gate reads commit messages in, pinned at both ends of the
+# pipe. `-c` beats repository config, so this holds whatever the contributor's
+# own git is configured to emit.
+_COMMIT_ENCODING = "utf-8"
+_LOG_OUTPUT_ENCODING_PIN = "i18n.logOutputEncoding=UTF-8"
+
+
+class CommitMessageDecodeError(RuntimeError):
+    """git produced commit-message bytes that are not valid UTF-8.
+
+    Deliberately NOT an OSError subclass: main() absorbs OSError so a missing
+    git degrades quietly, and this must not take that exit — being unable to
+    read a commit message is the one thing this gate may never treat as a pass.
+    """
 
 
 def _build_brand_patterns(env: dict[str, str] | None = None) -> list[re.Pattern[str]]:
@@ -110,27 +142,64 @@ def _scan_text(
                 break
 
 
+def _run_git_log(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    """Run ``git log`` with its output encoding pinned, returning RAW BYTES.
+
+    The single place this gate speaks to git, so the pin cannot be applied to
+    one invocation and forgotten on the other.
+
+    Bytes, not text: with ``text=True`` the decode happens inside subprocess, on
+    a reader thread on Windows, where a ``UnicodeDecodeError`` kills the thread
+    and leaves ``stdout`` as ``None`` instead of propagating. Decoding here
+    keeps the failure catchable on every platform.
+    """
+    return subprocess.run(
+        ["git", "-c", _LOG_OUTPUT_ENCODING_PIN, "log", *args],
+        capture_output=True, check=False, cwd=cwd,
+    )
+
+
+def _decode(raw: bytes, source: str) -> str:
+    """Decode git output as UTF-8, strictly — or refuse.
+
+    ``errors="replace"`` is the wrong policy *here* (though it is the right one
+    for a caller that is not scanning for tokens): an ASCII token would survive
+    replacement, but a token carrying a non-ASCII character would not, so a
+    lossy read could report "clean" on a real leak.
+    """
+    try:
+        return raw.decode(_COMMIT_ENCODING)
+    except UnicodeDecodeError as exc:
+        raise CommitMessageDecodeError(
+            f"{source} is not valid {_COMMIT_ENCODING} ({exc.reason} at byte "
+            f"{exc.start}), so it cannot be scanned for forbidden tokens"
+        ) from exc
+
+
 def _get_commit_messages(commit_range: str | None, cwd: Path = _REPO_ROOT) -> list[str]:
     """Return the list of commit messages covered by commit_range (a
     'before..after' git range). Falls back to just HEAD's message when
     commit_range is None, empty, contains the null-SHA sentinel (first push /
     non-push event), or otherwise fails to resolve (e.g. shallow clone missing
     the 'before' commit) — a gate that crashes on an edge case is worse than one
-    that silently degrades to single-commit scanning."""
+    that silently degrades to single-commit scanning.
+
+    Raises CommitMessageDecodeError when git's output cannot be decoded. That is
+    a different thing from an unresolvable range, and it is deliberately NOT
+    degraded to the fallback: the fallback exists for "there is no such range",
+    not for "there is a message here I could not read".
+    """
     if commit_range and _NULL_SHA not in commit_range:
-        result = subprocess.run(
-            ["git", "log", commit_range, "--format=%B%x00"],
-            capture_output=True, text=True, check=False, cwd=cwd,
-        )
+        result = _run_git_log([commit_range, "--format=%B%x00"], cwd)
         if result.returncode == 0 and result.stdout.strip():
-            return [m for m in result.stdout.split("\x00") if m.strip()]
+            text = _decode(result.stdout, f"a commit message in {commit_range}")
+            return [m for m in text.split("\x00") if m.strip()]
 
     # Fallback: legacy single-commit behaviour.
-    result = subprocess.run(
-        ["git", "log", "-1", "--format=%B"],
-        capture_output=True, text=True, check=False, cwd=cwd,
-    )
-    return [result.stdout] if result.stdout else []
+    result = _run_git_log(["-1", "--format=%B"], cwd)
+    if not result.stdout:
+        return []
+    return [_decode(result.stdout, "HEAD's commit message")]
 
 
 def main(commit_range: str | None = None) -> int:
@@ -156,11 +225,34 @@ def main(commit_range: str | None = None) -> int:
 
     # Commit message(s) in the pushed range (cheap guard against a leak buried
     # in an intermediate commit of a multi-commit push, not just HEAD).
+    refusals: list[str] = []
     try:
-        for msg in _get_commit_messages(commit_range):
-            _scan_text("<commit message>", msg, violations, _BRAND_PATTERNS)
+        messages = _get_commit_messages(commit_range)
+    except CommitMessageDecodeError as exc:
+        # Ordered before OSError deliberately, and kept off that class entirely:
+        # absorbing this would restore exactly the silent pass it replaces.
+        messages = []
+        refusals.append(str(exc))
     except OSError:
-        pass
+        messages = []
+
+    for msg in messages:
+        _scan_text("<commit message>", msg, violations, _BRAND_PATTERNS)
+
+    if refusals:
+        sys.stderr.write(
+            "ERROR: the commit-message scan could not be performed, so this gate "
+            "refuses rather than reporting a clean result:\n"
+        )
+        for refusal in refusals:
+            sys.stderr.write(f"  {refusal}\n")
+        sys.stderr.write(
+            "\nThis gate decodes commit messages as utf-8 strictly. A lossy decode "
+            "substitutes U+FFFD for the offending bytes, and a brand token spelled "
+            "with a non-ASCII character would not survive that substitution, so "
+            "scanning a lossy decode could report 'clean' on a real leak. Rewrite "
+            "the offending commit message(s) as UTF-8.\n"
+        )
 
     if violations:
         sys.stderr.write(
@@ -172,6 +264,8 @@ def main(commit_range: str | None = None) -> int:
             '\nThis repo must not name the proprietary consumer. Use generic terms '
             '("the caller", "the HTTP client", "the consumer").\n'
         )
+
+    if violations or refusals:
         return 1
 
     print("OK: no proprietary consumer references found.")
