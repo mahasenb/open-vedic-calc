@@ -25,7 +25,10 @@ script, which does not put the CWD on sys.path (see CLAUDE.md).
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
+import subprocess
+import sys
 
 import pytest
 
@@ -84,7 +87,7 @@ _CLEAN = (
 @pytest.mark.parametrize("tail", _NARROWING)
 def test_narrowing_addopts_is_refused(tmp_path: pathlib.Path, tail: str) -> None:
     checker = _load_checker()
-    found = checker.problems(_tree(tmp_path, tail))
+    found = checker.problems(_tree(tmp_path, tail), environ={})
     assert found, f"narrowing addopts was permitted: {tail!r}"
     assert "addopts" in found[0]
 
@@ -94,7 +97,7 @@ def test_legitimate_configuration_is_not_refused(
     tmp_path: pathlib.Path, tail: str
 ) -> None:
     checker = _load_checker()
-    assert checker.problems(_tree(tmp_path, tail)) == [], (
+    assert checker.problems(_tree(tmp_path, tail), environ={}) == [], (
         f"legitimate configuration was refused: {tail!r}"
     )
 
@@ -112,7 +115,7 @@ def test_a_config_file_this_checker_does_not_parse_is_refused(
     checker = _load_checker()
     root = _tree(tmp_path)
     (root / name).write_text("[pytest]\naddopts = -k not_corpus\n", encoding="utf-8")
-    found = checker.problems(root)
+    found = checker.problems(root, environ={})
     assert found, f"{name} was ignored entirely"
     assert name in found[0]
 
@@ -120,7 +123,7 @@ def test_a_config_file_this_checker_does_not_parse_is_refused(
 def test_the_real_repository_configuration_is_clean() -> None:
     """The check this repo's CI actually performs, performed here too."""
     checker = _load_checker()
-    assert checker.problems(_REPO) == []
+    assert checker.problems(_REPO, environ={}) == []
 
 
 def test_main_exit_codes(monkeypatch, tmp_path: pathlib.Path) -> None:
@@ -128,14 +131,14 @@ def test_main_exit_codes(monkeypatch, tmp_path: pathlib.Path) -> None:
     checker = _load_checker()
 
     monkeypatch.setattr(checker, "REPO_ROOT", _tree(tmp_path))
-    assert checker.main([]) == 0
+    assert checker.main([], environ={}) == 0
 
     monkeypatch.setattr(
         checker,
         "REPO_ROOT",
         _tree(tmp_path, '\n[tool.pytest.ini_options]\naddopts = "--collect-only"\n'),
     )
-    assert checker.main([]) == 1
+    assert checker.main([], environ={}) == 1
 
 
 def test_self_test_discriminates_and_passes() -> None:
@@ -159,3 +162,268 @@ def test_self_test_fails_when_the_detector_stops_discriminating(monkeypatch) -> 
     checker = _load_checker()
     monkeypatch.setattr(checker, "NARROWING_FLAGS", ())
     assert checker.main(["--self-test"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# PYTEST_ADDOPTS — the arm round 1 left inside pytest (PR #66 review, blocking)
+# ---------------------------------------------------------------------------
+#
+# Round 1 moved the pyproject arm out of pytest on the argument that "a pytest test
+# cannot police a pytest setting that stops pytest running tests" — and then left
+# the PYTEST_ADDOPTS detector as a pytest test. The same measurement defeats it.
+# Reproduced on this branch before the fix:
+#
+#   PYTEST_ADDOPTS='--collect-only' pytest ci/tests/ -q
+#       -> exit 0, 119 tests collected, 0 executed
+#          (test_swiss_job_does_not_inject_pytest_addopts, the guard for this exact
+#           vector, is among the tests collected and never run)
+#   PYTEST_ADDOPTS='--collect-only' pytest tests/ -q   (REQUIRE_SWISS_EPHEMERIS=1)
+#       -> exit 0, 912 tests collected, 0 executed
+#          (the fail-closed flag never evaluates — fixtures do not run during
+#           collection, so the accuracy gate asserts nothing and reports success)
+#   PYTEST_ADDOPTS='--collect-only' python ci/check_pytest_collection.py
+#       -> "OK", exit 0   <- the checker never read its own environment
+#
+# One `env:` block in test.yml, whole workflow green, nothing asserted anywhere.
+#
+# TWO ARMS, because neither alone is enough:
+#   * the RUNTIME read catches a workflow- or job-level injection, because those
+#     land in the checker step's own environment — read what the engine applies;
+#   * the WORKFLOW-FILE parse catches a placement the runtime read cannot see, e.g.
+#     a step-level `env:` on a *sibling* pytest step, which never reaches this
+#     process at all.
+
+_ADDOPTS_NARROWING_VALUES = (
+    "--collect-only",
+    "--co",
+    "-k not_corpus",
+    "-k 'not corpus'",
+    "-m 'not accuracy'",
+    "--ignore=tests/test_swiss_ephemeris.py",
+    "--deselect tests/test_swiss_ephemeris.py::test_x",
+    "-q --collect-only",
+)
+
+_ADDOPTS_CLEAN_VALUES = ("", "-q", "--color=no", "-q --strict-markers", "--maxfail=1")
+
+
+@pytest.mark.parametrize("value", _ADDOPTS_NARROWING_VALUES)
+def test_narrowing_pytest_addopts_in_the_runtime_environment_is_refused(
+    tmp_path: pathlib.Path, value: str
+) -> None:
+    """An injected narrowing PYTEST_ADDOPTS must kill the checker step, loudly.
+
+    This is the arm that makes a workflow- or job-level `env:` injection fatal: the
+    checker runs as a plain python step in the same job, so the injected variable is
+    in *its* environment too. It cannot be deselected — it is not a test.
+    """
+    checker = _load_checker()
+    found = checker.problems(_tree(tmp_path), environ={"PYTEST_ADDOPTS": value})
+    assert found, f"a narrowing PYTEST_ADDOPTS={value!r} was permitted at runtime"
+    assert "PYTEST_ADDOPTS" in found[0]
+
+
+@pytest.mark.parametrize("value", _ADDOPTS_CLEAN_VALUES)
+def test_non_narrowing_pytest_addopts_in_the_environment_is_not_refused(
+    tmp_path: pathlib.Path, value: str
+) -> None:
+    """A developer's ordinary PYTEST_ADDOPTS must not red the checker.
+
+    The runtime arm is deliberately NARROWING-only, unlike the workflow-declaration
+    arm below which refuses on presence. A local shell may legitimately carry `-q`;
+    a workflow file has no legitimate reason to declare the variable at all. Refusing
+    presence at runtime would red this check on contributors' machines, and a checker
+    that reds on ordinary input is one the next person deletes.
+    """
+    checker = _load_checker()
+    assert checker.problems(_tree(tmp_path), environ={"PYTEST_ADDOPTS": value}) == [], (
+        f"a harmless PYTEST_ADDOPTS={value!r} was refused"
+    )
+
+
+def test_problems_reads_the_real_environment_when_none_is_passed(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """The default must be os.environ, never an empty mapping.
+
+    Every other test here passes `environ=` explicitly so it is deterministic. That
+    makes the DEFAULT the dangerous part: if it silently became `{}`, all of those
+    tests would still pass while the real CI step read nothing. This pins the
+    default by monkeypatching the process environment and calling with no `environ`.
+    """
+    checker = _load_checker()
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--collect-only")
+    found = checker.problems(_tree(tmp_path))
+    assert found, (
+        "problems() ignored a narrowing PYTEST_ADDOPTS in the real process "
+        "environment — the default environ is not os.environ"
+    )
+
+
+def _workflow(root: pathlib.Path, body: str, name: str = "test.yml") -> pathlib.Path:
+    directory = root / ".github" / "workflows"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(body, encoding="utf-8", newline="\n")
+    return root
+
+
+# The three `env:` levels GitHub Actions resolves into a step's environment, plus
+# the inline shell assignment. A step-level declaration on a SIBLING pytest step is
+# the case the runtime read cannot see: it never enters the checker's own process.
+_WORKFLOW_DECLARATIONS = (
+    'env:\n  PYTEST_ADDOPTS: "--collect-only"\njobs:\n  test:\n    steps:\n      - run: pytest tests/ -q\n',
+    'jobs:\n  test:\n    env:\n      PYTEST_ADDOPTS: "--collect-only"\n    steps:\n      - run: pytest tests/ -q\n',
+    'jobs:\n  test:\n    steps:\n      - env:\n          PYTEST_ADDOPTS: "--collect-only"\n        run: pytest tests/ -q\n',
+    'jobs:\n  test:\n    steps:\n      - run: PYTEST_ADDOPTS="--collect-only" pytest tests/ -q\n',
+    'jobs:\n  test:\n    steps:\n      - run: export PYTEST_ADDOPTS="-k nothing"\n',
+    # A non-narrowing VALUE is still refused here: presence is the rule for a
+    # workflow declaration, because deciding narrowing-ness of an arbitrary value
+    # means reimplementing pytest's argument parser.
+    'jobs:\n  test:\n    env:\n      PYTEST_ADDOPTS: "-q"\n    steps:\n      - run: pytest tests/ -q\n',
+    # Declared in a DIFFERENT workflow file, and in a job that is not `test`.
+    'jobs:\n  anything:\n    env:\n      PYTEST_ADDOPTS: "--co"\n    steps:\n      - run: pytest tests/ -q\n',
+)
+
+_WORKFLOW_CLEAN = (
+    'jobs:\n  test:\n    steps:\n      - run: pytest tests/ -q\n',
+    # Only in a COMMENT — invisible to a parser, which is why this parses.
+    'jobs:\n  test:\n    steps:\n      # env:\n      #   PYTEST_ADDOPTS: "--collect-only"\n      - run: pytest tests/ -q\n',
+    # ECHOED, not assigned. Position discriminates, not the presence of the string.
+    'jobs:\n  test:\n    steps:\n      - run: echo "PYTEST_ADDOPTS=--collect-only"\n',
+    # A similarly-named variable is not this one.
+    'jobs:\n  test:\n    env:\n      PYTEST_ADDOPTS_NOTES: "see docs"\n    steps:\n      - run: pytest tests/ -q\n',
+)
+
+
+@pytest.mark.parametrize("body", _WORKFLOW_DECLARATIONS)
+def test_pytest_addopts_declared_in_a_workflow_is_refused(
+    tmp_path: pathlib.Path, body: str
+) -> None:
+    """Declared at ANY level, in ANY job, in ANY workflow file — refused.
+
+    A step-level `env:` on a sibling pytest step never reaches this process, so the
+    runtime arm above cannot see it. This arm reads the workflow files themselves,
+    as plain python, so a narrowing declaration cannot hide behind the pytest run it
+    is narrowing.
+    """
+    checker = _load_checker()
+    found = checker.problems(_workflow(_tree(tmp_path), body), environ={})
+    assert found, f"a workflow PYTEST_ADDOPTS declaration was permitted:\n{body}"
+    assert any("PYTEST_ADDOPTS" in problem for problem in found)
+
+
+@pytest.mark.parametrize("body", _WORKFLOW_CLEAN)
+def test_a_workflow_without_an_addopts_declaration_is_clean(
+    tmp_path: pathlib.Path, body: str
+) -> None:
+    checker = _load_checker()
+    assert checker.problems(_workflow(_tree(tmp_path), body), environ={}) == [], (
+        f"a clean workflow was refused:\n{body}"
+    )
+
+
+def test_workflow_scan_fails_closed_when_a_workflow_cannot_be_parsed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Unparseable YAML must refuse, not be skipped.
+
+    Silently ignoring a file this checker cannot read is how a declaration hides in
+    it. The whole point of this arm is that no workflow goes unexamined.
+    """
+    checker = _load_checker()
+    root = _workflow(_tree(tmp_path), "jobs:\n  test:\n    steps:\n  - bad: [indent\n")
+    found = checker.problems(root, environ={})
+    assert found, "an unparseable workflow file was silently skipped"
+
+
+def test_the_real_repository_workflows_declare_no_addopts() -> None:
+    """The repo as committed must be clean on this arm too."""
+    checker = _load_checker()
+    assert checker.workflow_addopts_declarations(_REPO) == []
+
+
+def test_main_refuses_under_an_injected_environment(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """End-to-end through main(), the way the CI step invokes it."""
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "REPO_ROOT", _tree(tmp_path))
+    assert checker.main([], environ={"PYTEST_ADDOPTS": "--collect-only"}) == 1
+    assert checker.main([], environ={}) == 0
+
+
+def test_self_test_covers_the_env_and_workflow_arms(monkeypatch) -> None:
+    """`--self-test` must exercise the NEW arms too, not just the pyproject one.
+
+    The CI step runs `--self-test` before the real check precisely so a detector
+    that has stopped discriminating cannot certify the repository. That argument
+    only holds if the self-test covers every arm: with the env detector neutered,
+    or the workflow detector neutered, `--self-test` must go non-zero.
+    """
+    checker = _load_checker()
+    assert checker.main(["--self-test"]) == 0
+
+    monkeypatch.setattr(checker, "narrowing_env_addopts", lambda environ: [])
+    assert checker.main(["--self-test"]) == 1, (
+        "the self-test passed with the runtime-env detector neutered — it does not "
+        "cover that arm, so the CI step's self-test proves nothing about it"
+    )
+
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "sets_env_inline", lambda tokens, name: False)
+    assert checker.main(["--self-test"]) == 1, (
+        "the self-test passed with the inline-assignment detector neutered"
+    )
+
+
+def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> None:
+    """The reviewer's repro, run as a subprocess against the REAL repository.
+
+    Measured on this branch before the fix, and quoted verbatim in the review:
+
+        PYTEST_ADDOPTS='--collect-only' python ci/check_pytest_collection.py
+            -> "OK", exit 0
+
+    A subprocess is the honest form: it proves the SCRIPT refuses as CI invokes it,
+    not merely that a function inside it would have. The environment is built
+    explicitly so the assertion is about the injected variable and nothing ambient.
+    """
+    environment = {
+        # SYSTEMROOT is required for a Python subprocess to start on Windows.
+        key: os.environ[key]
+        for key in ("PATH", "SYSTEMROOT")
+        if key in os.environ
+    }
+    injected = dict(environment, PYTEST_ADDOPTS="--collect-only")
+
+    refused = subprocess.run(
+        [sys.executable, str(_CHECKER)],
+        cwd=str(_REPO), env=injected, capture_output=True, text=True, timeout=120,
+    )
+    assert refused.returncode != 0, (
+        "the real script exited 0 with a narrowing PYTEST_ADDOPTS injected — this is "
+        f"the blocking finding.\nstdout:\n{refused.stdout}\nstderr:\n{refused.stderr}"
+    )
+    assert "PYTEST_ADDOPTS" in (refused.stdout + refused.stderr)
+
+    # ...and the self-test must fail under the same injection too, so the CI step
+    # cannot get as far as certifying anything.
+    self_tested = subprocess.run(
+        [sys.executable, str(_CHECKER), "--self-test"],
+        cwd=str(_REPO), env=injected, capture_output=True, text=True, timeout=120,
+    )
+    assert self_tested.returncode != 0, (
+        "`--self-test` exited 0 with a narrowing PYTEST_ADDOPTS injected. The CI step "
+        "runs the self-test FIRST; if the injection does not stop it there, the "
+        "injection has already survived the check that runs before the real one."
+    )
+
+    # The same script, uninjected, must still pass — or this proves nothing but that
+    # the checker refuses everything.
+    clean = subprocess.run(
+        [sys.executable, str(_CHECKER)],
+        cwd=str(_REPO), env=environment, capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, (
+        f"the real repository was refused with a clean environment:\n{clean.stderr}"
+    )
