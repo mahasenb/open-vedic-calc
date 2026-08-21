@@ -110,11 +110,21 @@ Two caveats worth knowing, both measured:
   because a fallback answer was measured behind them. The cost is that a
   late-born chart can no longer request a timeline running past 2400-01-09.
 - The bound does **not** make every muhurat scan Swiss-backed at the very edges
-  of the span. `bphs_core/muhurat.py::_is_eclipse_day` searches for an eclipse
-  *outside* the scanned day, so a day scanned near either end probes past the
-  files. Measured, the residue is roughly 1800-01-02…1801-06-30 and
-  2399-12-28…2400-01-09; the interior of the range is clean. That is an engine
-  defect at the data edges, tracked separately from these schema bounds.
+  of the span. Several limbs legitimately look outside the scanned day — the
+  eclipse veto must find the *next* eclipse, and the Adhika-Maasa check reads the
+  bracketing new moons — so a day scanned near either end reads past the files.
+  Reading past them is not itself the defect; no data exists there. The defect is
+  that swisseph *keeps* the fallback afterwards, so a later lookup at a date the
+  files **do** cover can answer analytically too. `_is_eclipse_day` now restores
+  the ephemeris state on the way out, which closes its share of that.
+  Measured after the fix: the low end loses no accuracy at all (zero in-span
+  fallback across 58 dates sampled 1800-01-02…1801-07-14, despite most of those
+  scans' calls answering from the fallback at dates with no data); the interior
+  is clean, including multi-day range scans at every timezone; and a residue
+  remains over roughly the final fortnight of the range, timezone-dependent,
+  caused by the tithi and lunar-month searches running past the data end inside a
+  single library call. That remainder is an engine defect at the data edge,
+  tracked separately from these schema bounds.
 
 The node model is the choice most likely to explain a visible discrepancy.
 Measured over 1800–2400 at one-day steps against the real Swiss data files, the
