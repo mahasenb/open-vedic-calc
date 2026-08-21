@@ -56,13 +56,16 @@ A "Swiss-backed" spy assertion on those fields would pass by construction while
 measuring nothing, which is worse than no test. They are bounded for the crash
 and for a uniform served contract; what is asserted here is the crash closing.
 
-The muhurat/lagna-shuddhi scanned-day fields are asserted to be REFUSED outside
-the span and ACCEPTED at the bounds, but are likewise not asserted Swiss-backed
-at the bounds — because measured, they are not. See the final section of this
-module (``test_the_interior_of_the_span_loses_no_accuracy_to_the_fallback`` and
-``test_the_edge_residual_stays_at_the_edge``), which pins that separately-tracked
-engine defect so it cannot widen silently. That section also records why the
-predecessor's attribution of the residual to the eclipse probe was wrong.
+The muhurat/lagna-shuddhi scanned-day fields ARE now asserted Swiss-backed at
+their bound, which they previously were not. They are bound to a NARROWER span
+than the point-lookup fields — ``MIN_SCANNED_DATE``..``MAX_SCANNED_DATE`` rather
+than ``MIN_EPHEMERIS_DATE``..``MAX_EPHEMERIS_DATE`` — because a scanned day is
+not a point lookup: measured per limb, ``compute_muhurat_for_day`` reaches up to
++31.835 d past the day it is scanning, so the same date bound that is correct
+for ``birth_date`` let an accepted scan run off the end of the shipped files.
+Every assertion here about "the bound" therefore names the bound that binds THAT
+field; see ``tests/test_scanned_day_ephemeris_reach.py`` for the per-limb
+measurement and the derivation.
 """
 import datetime
 import os
@@ -82,7 +85,12 @@ from fastapi.testclient import TestClient
 from bphs_core import utils
 from app import schemas as app_schemas
 from app.main import app
-from app.schemas import MAX_EPHEMERIS_DATE, MIN_EPHEMERIS_DATE
+from app.schemas import (
+    MAX_EPHEMERIS_DATE,
+    MAX_SCANNED_DATE,
+    MIN_EPHEMERIS_DATE,
+    MIN_SCANNED_DATE,
+)
 from tests.conftest import SAMPLE_A, SAMPLE_B
 
 _ONE_DAY = datetime.timedelta(days=1)
@@ -90,6 +98,19 @@ MIN_S = MIN_EPHEMERIS_DATE.isoformat()
 MAX_S = MAX_EPHEMERIS_DATE.isoformat()
 BELOW_MIN = (MIN_EPHEMERIS_DATE - _ONE_DAY).isoformat()
 ABOVE_MAX = (MAX_EPHEMERIS_DATE + _ONE_DAY).isoformat()
+
+# The three electional start_date/end_date pairs are bound MORE TIGHTLY than the
+# point-lookup fields, because a scanned day reaches up to +31.8 d past itself
+# (see tests/test_scanned_day_ephemeris_reach.py for the per-limb measurement).
+# Every assertion below that names "the bound" therefore has to name the bound
+# that actually binds THAT field — a test carrying one span for all ten fields
+# would pass only by accident once the two spans differ.
+SCAN_MIN_S = MIN_SCANNED_DATE.isoformat()
+SCAN_MAX_S = MAX_SCANNED_DATE.isoformat()
+
+# (lo, hi) as ISO strings, per field class.
+_POINT_BOUNDS = (MIN_S, MAX_S)
+_SCAN_BOUNDS = (SCAN_MIN_S, SCAN_MAX_S)
 
 client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
@@ -142,29 +163,32 @@ def _compat(d):
 
 
 # (label, endpoint, field name, builder for an OUT-OF-SPAN probe, builder for an
-# otherwise-entirely-valid probe). The two builders differ only for /v1/dashas,
-# where the birth-relative cap and the ordering guard would otherwise answer
-# instead of the bound — see _dashas_valid_at.
+# otherwise-entirely-valid probe, the (lo, hi) span that binds THIS field). The
+# two builders differ only for /v1/dashas, where the birth-relative cap and the
+# ordering guard would otherwise answer instead of the bound — see
+# _dashas_valid_at. The span is carried per case because the six scanned-day
+# fields are bound more tightly than the four point-lookup ones.
 _SINGLE_DATE_CASES = [
     ("at_date", "/v1/transits", "at_date",
-     lambda d: _transits(d), lambda d: _transits(d)),
+     lambda d: _transits(d), lambda d: _transits(d), _POINT_BOUNDS),
     ("from_date", "/v1/dashas", "from_date",
-     lambda d: _dashas(d, "1970-01-01"), _dashas_valid_at),
+     lambda d: _dashas(d, "1970-01-01"), _dashas_valid_at, _POINT_BOUNDS),
     ("to_date", "/v1/dashas", "to_date",
-     lambda d: _dashas("1960-01-01", d), _dashas_valid_at),
+     lambda d: _dashas("1960-01-01", d), _dashas_valid_at, _POINT_BOUNDS),
     ("muhurat.start_date", "/v1/muhurat", "start_date",
-     lambda d: _muhurat(d, d), lambda d: _muhurat(d, d)),
+     lambda d: _muhurat(d, d), lambda d: _muhurat(d, d), _SCAN_BOUNDS),
     ("muhurat.end_date", "/v1/muhurat", "end_date",
-     lambda d: _muhurat(d, d), lambda d: _muhurat(d, d)),
+     lambda d: _muhurat(d, d), lambda d: _muhurat(d, d), _SCAN_BOUNDS),
     ("lagna.start_date", "/v1/muhurat/lagna-shuddhi", "start_date",
-     lambda d: _lagna(d, d), lambda d: _lagna(d, d)),
+     lambda d: _lagna(d, d), lambda d: _lagna(d, d), _SCAN_BOUNDS),
     ("lagna.end_date", "/v1/muhurat/lagna-shuddhi", "end_date",
-     lambda d: _lagna(d, d), lambda d: _lagna(d, d)),
+     lambda d: _lagna(d, d), lambda d: _lagna(d, d), _SCAN_BOUNDS),
     ("family.start_date", "/v1/muhurat/family-lagna-shuddhi", "start_date",
-     lambda d: _family(d, d), lambda d: _family(d, d)),
+     lambda d: _family(d, d), lambda d: _family(d, d), _SCAN_BOUNDS),
     ("family.end_date", "/v1/muhurat/family-lagna-shuddhi", "end_date",
-     lambda d: _family(d, d), lambda d: _family(d, d)),
-    ("reference_date", "/v1/compat", "reference_date", _compat, _compat),
+     lambda d: _family(d, d), lambda d: _family(d, d), _SCAN_BOUNDS),
+    ("reference_date", "/v1/compat", "reference_date", _compat, _compat,
+     _POINT_BOUNDS),
 ]
 
 _IDS = [c[0] for c in _SINGLE_DATE_CASES]
@@ -284,7 +308,7 @@ def test_the_non_birth_date_field_count_is_ten():
 def test_the_case_table_covers_every_non_birth_date_field():
     """_SINGLE_DATE_CASES must not silently stop covering a field."""
     declared = {f for (_m, f) in _request_model_date_fields() if f != "birth_date"}
-    covered = {field for (_l, _e, field, _bad, _ok) in _SINGLE_DATE_CASES}
+    covered = {field for (_l, _e, field, _bad, _ok, _bounds) in _SINGLE_DATE_CASES}
     assert declared == covered, (
         f"case table covers {sorted(covered)} but the request models declare "
         f"{sorted(declared)}; missing {sorted(declared - covered)}"
@@ -307,7 +331,7 @@ def test_out_of_span_date_is_422(case, bad):
     inputs, they are dates the service used to ANSWER at 200 with numbers from
     the Moshier fallback. 9999-01-01 and 0001-01-01 are the two that faulted.
     """
-    label, endpoint, _field, build_bad, _build_ok = case
+    label, endpoint, _field, build_bad, _build_ok, _bounds = case
     r = client.post(endpoint, json=build_bad(bad))
     assert r.status_code == 422, (
         f"{label}={bad} was not refused at the schema boundary. "
@@ -317,35 +341,54 @@ def test_out_of_span_date_is_422(case, bad):
 
 @pytest.mark.parametrize("case", _SINGLE_DATE_CASES, ids=_IDS)
 def test_the_422_names_the_field_and_the_real_bound(case):
-    """A caller must be told which field and which span, in dates not years."""
-    label, endpoint, field, build_bad, _build_ok = case
+    """A caller must be told which field and which span, in dates not years.
+
+    "The real bound" is the one that binds THIS field. A scanned-day field whose
+    422 quoted the point-lookup span would send the caller looking for a bug in
+    a request that the service had in fact refused for a different, narrower
+    reason — so the span asserted here is the per-case one.
+    """
+    label, endpoint, field, build_bad, _build_ok, (lo, hi) = case
     r = client.post(endpoint, json=build_bad("2500-01-01"))
     assert r.status_code == 422
     body = r.text
     assert field in body, f"{label}: the 422 does not name the field. Got: {body[:400]}"
-    assert MIN_S in body, f"{label}: the 422 does not name the lower bound. Got: {body[:400]}"
-    assert MAX_S in body, f"{label}: the 422 does not name the upper bound. Got: {body[:400]}"
-
-
-@pytest.mark.parametrize("case", _SINGLE_DATE_CASES, ids=_IDS)
-@pytest.mark.parametrize("edge", [BELOW_MIN, ABOVE_MAX])
-def test_one_day_outside_each_bound_is_422(case, edge):
-    label, endpoint, _field, build_bad, _build_ok = case
-    r = client.post(endpoint, json=build_bad(edge))
-    assert r.status_code == 422, (
-        f"{label}={edge} is one day outside the span and must be refused. "
-        f"Got {r.status_code}: {r.text[:200]}"
+    assert lo in body, (
+        f"{label}: the 422 does not name this field's lower bound ({lo}). "
+        f"Got: {body[:400]}"
+    )
+    assert hi in body, (
+        f"{label}: the 422 does not name this field's upper bound ({hi}). "
+        f"Got: {body[:400]}"
     )
 
 
 @pytest.mark.parametrize("case", _SINGLE_DATE_CASES, ids=_IDS)
-@pytest.mark.parametrize("edge", [MIN_S, MAX_S])
-def test_the_bounds_themselves_are_accepted(case, edge):
+@pytest.mark.parametrize("end", ["lower", "upper"])
+def test_one_day_outside_each_bound_is_422(case, end):
+    label, endpoint, _field, build_bad, _build_ok, (lo, hi) = case
+    edge = (
+        (datetime.date.fromisoformat(lo) - _ONE_DAY).isoformat()
+        if end == "lower"
+        else (datetime.date.fromisoformat(hi) + _ONE_DAY).isoformat()
+    )
+    r = client.post(endpoint, json=build_bad(edge))
+    assert r.status_code == 422, (
+        f"{label}={edge} is one day outside this field's span ({lo}..{hi}) and "
+        f"must be refused. Got {r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.parametrize("case", _SINGLE_DATE_CASES, ids=_IDS)
+@pytest.mark.parametrize("end", ["lower", "upper"])
+def test_the_bounds_themselves_are_accepted(case, end):
     """The bound is inclusive: neither end may be refused."""
-    label, endpoint, _field, _build_bad, build_ok = case
+    label, endpoint, _field, _build_bad, build_ok, (lo, hi) = case
+    edge = lo if end == "lower" else hi
     r = client.post(endpoint, json=build_ok(edge))
     assert r.status_code != 422, (
-        f"{label}={edge} is ON the bound and must be accepted. Got 422: {r.text[:300]}"
+        f"{label}={edge} is ON this field's bound ({lo}..{hi}) and must be "
+        f"accepted. Got 422: {r.text[:300]}"
     )
 
 
@@ -414,9 +457,9 @@ def test_reversed_in_bounds_range_is_422_naming_the_order(endpoint, body, names)
 
 
 @pytest.mark.parametrize("endpoint,body", [
-    ("/v1/muhurat", _muhurat(MAX_S, MIN_S)),
-    ("/v1/muhurat/lagna-shuddhi", _lagna(MAX_S, MIN_S)),
-    ("/v1/muhurat/family-lagna-shuddhi", _family(MAX_S, MIN_S)),
+    ("/v1/muhurat", _muhurat(SCAN_MAX_S, SCAN_MIN_S)),
+    ("/v1/muhurat/lagna-shuddhi", _lagna(SCAN_MAX_S, SCAN_MIN_S)),
+    ("/v1/muhurat/family-lagna-shuddhi", _family(SCAN_MAX_S, SCAN_MIN_S)),
 ])
 def test_reversed_range_exactly_on_both_bounds_is_still_422(endpoint, body):
     """The widest legal-but-reversed range. Both ends pass the span check, so
@@ -441,7 +484,9 @@ def test_muhurat_day_cap_still_fires_for_an_in_bounds_range():
     import app.main as main_mod
     start = datetime.date(2026, 1, 1)
     end = start + datetime.timedelta(days=main_mod.MAX_MUHURAT_DAYS + 1)
-    assert MIN_EPHEMERIS_DATE <= start and end <= MAX_EPHEMERIS_DATE
+    assert MIN_SCANNED_DATE <= start and end <= MAX_SCANNED_DATE, (
+        "this test must exercise the CAP, not the scanned-day span bound"
+    )
     r = client.post("/v1/muhurat", json=_muhurat(start.isoformat(), end.isoformat()))
     assert r.status_code == 422
     assert "exceeds" in r.text.lower(), (
@@ -453,7 +498,9 @@ def test_lagna_shuddhi_day_cap_still_fires_for_an_in_bounds_range():
     import app.main as main_mod
     start = datetime.date(2026, 1, 1)
     end = start + datetime.timedelta(days=main_mod.MAX_LAGNA_SHUDDHI_DAYS + 1)
-    assert MIN_EPHEMERIS_DATE <= start and end <= MAX_EPHEMERIS_DATE
+    assert MIN_SCANNED_DATE <= start and end <= MAX_SCANNED_DATE, (
+        "this test must exercise the CAP, not the scanned-day span bound"
+    )
     r = client.post("/v1/muhurat/lagna-shuddhi", json=_lagna(start.isoformat(), end.isoformat()))
     assert r.status_code == 422
     assert "exceeds" in r.text.lower(), r.text[:300]
@@ -506,6 +553,47 @@ def test_async_submit_refuses_an_out_of_span_range(endpoint, body):
     )
 
 
+# The band that is inside the POINT-lookup span but outside the SCANNED-DAY span
+# is exactly what the narrower bound added, so it is the band worth probing on
+# every path that accepts a scan. Without this, the async submit could keep the
+# wider bound and nothing would say so.
+_BETWEEN_THE_TWO_SPANS = (MAX_SCANNED_DATE + _ONE_DAY).isoformat()
+
+
+@pytest.mark.parametrize("endpoint,build", [
+    ("/v1/muhurat", _muhurat),
+    ("/v1/muhurat/lagna-shuddhi", _lagna),
+    ("/v1/muhurat/family-lagna-shuddhi", _family),
+    ("/v1/muhurat/lagna-shuddhi/async", _lagna),
+    ("/v1/muhurat/family-lagna-shuddhi/async", _family),
+])
+def test_a_scan_day_inside_the_point_span_but_past_the_scan_bound_is_422(
+    endpoint, build
+):
+    """The narrower scanned-day bound binds every scan path, sync and async.
+
+    ``MAX_SCANNED_DATE + 1`` is still comfortably inside ``MAX_EPHEMERIS_DATE``,
+    so a field that had kept the point-lookup span would answer 200 here — and
+    would answer it off the Moshier fallback for part of the compute, which is
+    the defect the narrower bound exists to close.
+    """
+    assert MAX_SCANNED_DATE < MAX_EPHEMERIS_DATE, (
+        "this probe only means something while the two spans differ"
+    )
+    r = client.post(endpoint, json=build(_BETWEEN_THE_TWO_SPANS,
+                                         _BETWEEN_THE_TWO_SPANS))
+    assert r.status_code == 422, (
+        f"{endpoint} accepted {_BETWEEN_THE_TWO_SPANS} as a scanned day. That is "
+        f"past MAX_SCANNED_DATE ({MAX_SCANNED_DATE}), so part of the scan's "
+        f"compute reads past the end of the shipped files. Got {r.status_code}: "
+        f"{r.text[:200]}"
+    )
+    assert SCAN_MAX_S in r.text, (
+        f"{endpoint}: the refusal does not quote the scanned-day bound. "
+        f"Got: {r.text[:300]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # at_date is Swiss-backed at both bounds — re-measured, not restated
 # ---------------------------------------------------------------------------
@@ -519,8 +607,14 @@ def _moshier_calls_during(endpoint: str, body: dict) -> tuple[int, int]:
     lock = threading.Lock()
     real_calc_ut = swe.calc_ut
 
-    def spy(jd, planet, flags, *args, **kwargs):
-        values, retflag = real_calc_ut(jd, planet, flags, *args, **kwargs)
+    # *args/**kwargs, not a fixed positional signature: pyjhora calls
+    # swe.calc_ut(jd, planet, flags=flags) by KEYWORD on the sidereal_longitude
+    # path, so a spy declared (jd, planet, flags, ...) survives only because its
+    # third parameter happens to be spelled `flags`. Rename it and every probe
+    # through that path raises TypeError and records nothing — a zero that means
+    # "blind instrument", not "no Moshier calls".
+    def spy(*args, **kwargs):
+        values, retflag = real_calc_ut(*args, **kwargs)
         with lock:
             records.append(retflag)
         return values, retflag
@@ -593,9 +687,31 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 
 
 # ---------------------------------------------------------------------------
-# KNOWN, SEPARATELY-TRACKED: the scanned-day endpoints still consult data
-# outside the files at the very edges of the span.
+# CLOSED: the scanned-day endpoints no longer consult data outside the files.
 # ---------------------------------------------------------------------------
+#
+# This section used to read "KNOWN, SEPARATELY-TRACKED", because the bound could
+# not stop the searches described below from crossing the end of the data — the
+# fallback happens INSIDE one pyjhora call, where no restore can intercept it.
+# The separate tracking is now discharged: the scanned-day fields carry their own
+# narrower bound (``MAX_SCANNED_DATE``, app/schemas.py), derived from the reach
+# measured per limb, so an ACCEPTED scanned day never reaches outside the shipped
+# files in the first place. ``test_no_accepted_scanned_day_loses_accuracy_to_the_
+# fallback`` below asserts the consequence, and
+# ``tests/test_scanned_day_ephemeris_reach.py`` asserts the cause.
+#
+# TWO THINGS THE ACCOUNT BELOW GOT WRONG, corrected in place rather than deleted,
+# because the reasoning is what makes the numbers checkable:
+#   * ``drik.tithi`` is named below as the leading contributor among the day's
+#     own panchanga limbs. Re-measured per call site with an instrument that is
+#     not blind to pyjhora's keyword call spelling, ``drik.tithi`` has the
+#     SMALLEST out-of-day reach of any limb (+1.998 d). The second-furthest limb
+#     is ``drik.yogam`` at +24.859 d, which nothing here had mentioned; the
+#     furthest is ``drik.lunar_month`` at +31.834 d.
+#   * the earlier spy was declared ``def spy(jd, planet, flags, *a, **k)`` and
+#     survives pyjhora's ``swe.calc_ut(jd, planet, flags=flags)`` only because
+#     its third parameter happens to be spelled ``flags``. Rename it and the
+#     probe raises TypeError and silently records nothing.
 #
 # WHAT THE PREDECESSOR OF THIS SECTION GOT WRONG
 # ----------------------------------------------
@@ -666,11 +782,16 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 #     4 calls); it becomes dense over the final week (up to 303 calls).
 #   * interior — zero, including 10-day and 30-day RANGE scans at every corner.
 #
-# The remaining high-edge residual is ``drik.tithi``'s next-day search and
-# ``_is_adhik_maasa``'s lunar-month search running past the data end, which no
-# restore inside this repo can prevent (the fallback happens *within* one
-# pyjhora call). Closing it means narrowing the scanned-day bound; measured cost
-# and options are reported upward rather than decided here.
+# That high-edge residual was ``drik.yogam``'s and ``_is_adhik_maasa``'s searches
+# running past the data end (NOT principally ``drik.tithi``'s — see the
+# correction at the head of this section), which no restore inside this repo can
+# prevent, because the fallback happens *within* one pyjhora call. It is closed
+# by narrowing the scanned-day bound so those searches have nothing to run off:
+# ``MAX_SCANNED_DATE`` = 2399-12-01 leaves a 40.853 d budget to the end of the
+# data against a 31.835 d worst measured reach. Re-measured after the narrowing,
+# the walk below over the last accepted days finds ZERO in-span loss at every
+# timezone corner, where the same walk at ``MAX_EPHEMERIS_DATE`` lost 122-226
+# calls per request.
 
 # The measured extent of the shipped Sun/Moon data (sepl_18 / semo_18), at
 # one-day steps with utils.probe_ephemeris_source. Wider than the SERVED span on
@@ -692,8 +813,10 @@ def _in_span_fallback_during(endpoint: str, body: dict) -> tuple[int, int, int]:
     lock = threading.Lock()
     real_calc_ut = swe.calc_ut
 
-    def spy(jd, planet, flags, *args, **kwargs):
-        values, retflag = real_calc_ut(jd, planet, flags, *args, **kwargs)
+    # See the note on the sibling spy above: signature-agnostic on purpose.
+    def spy(*args, **kwargs):
+        jd = args[0] if args else kwargs["jd"]
+        values, retflag = real_calc_ut(*args, **kwargs)
         with lock:
             records.append((jd, retflag))
         return values, retflag
@@ -727,9 +850,14 @@ def test_the_interior_of_the_span_loses_no_accuracy_to_the_fallback(
     moves with the timezone (so one offset is not a measurement of the field).
     """
     failures: list[str] = []
+    # These sit BELOW MAX_SCANNED_DATE, not below MAX_EPHEMERIS_DATE. The
+    # predecessor's range started on 2399-12-01 and ran ten days past it, which
+    # the scanned-day bound now refuses outright — a 422 the probe would report
+    # as a failed request rather than as a clean scan, so the dates move with the
+    # bound they are meant to sit inside.
     cases = [
-        ("single day", "2399-12-01", "2399-12-01"),
-        ("10-day range", "2399-12-01", "2399-12-10"),
+        ("single day", "2399-11-01", "2399-11-01"),
+        ("10-day range", "2399-11-01", "2399-11-10"),
         ("10-day range, modern", "2026-05-20", "2026-05-29"),
     ]
     for label, start, end in cases:
@@ -749,34 +877,43 @@ def test_the_interior_of_the_span_loses_no_accuracy_to_the_fallback(
     )
 
 
-def test_the_edge_residual_stays_at_the_edge(swiss_ephemeris: int) -> None:
-    """The known high-edge residual must not creep further into the range.
+def test_no_accepted_scanned_day_loses_accuracy_to_the_fallback(
+    swiss_ephemeris: int,
+) -> None:
+    """The end-of-range residual is CLOSED, at the last day the service accepts.
 
-    This is the falsifiable half of the documentation above. The earliest
-    scanned day measured losing ANY in-span accuracy is 2399-12-24 at tz=-12 —
-    sixteen days below MAX_EPHEMERIS_DATE. This asserts a scanned day a clear
-    month below the bound is still clean at every timezone corner, so the
-    residual cannot grow by weeks without reddening something.
+    THIS REPLACES ``test_the_edge_residual_stays_at_the_edge``, and the
+    replacement is the point. That test asserted only that the residual did not
+    spread INWARD, and deliberately refused to assert the final days were clean
+    "because they are not". They are now: the scanned-day fields are bound to
+    ``MAX_SCANNED_DATE``, derived so a scanned day's furthest measured reach
+    (+31.835 d) still lands inside the shipped files.
 
-    It deliberately does NOT assert the final days are clean, because they are
-    not, and a test claiming otherwise would be false.
+    So the assertion inverts. Instead of requiring a clear month of margin below
+    the bound, this walks the last days the service will ACCEPT — the ones whose
+    predecessors leaked — and requires every one of them to be clean at every
+    timezone corner. Measured before the bound moved, the same walk at
+    ``MAX_EPHEMERIS_DATE`` lost 122-226 in-span calls per request depending on
+    the offset, and 53 of 64 (day, tz) combinations read past the end of the
+    data outright.
     """
     failures: list[str] = []
-    for days_below in (30, 60, 180):
-        day = (MAX_EPHEMERIS_DATE - datetime.timedelta(days=days_below)).isoformat()
+    for days_below in (0, 1, 3, 7, 15, 30, 180):
+        day = (MAX_SCANNED_DATE - datetime.timedelta(days=days_below)).isoformat()
         for tz in _TZ_CORNERS:
             body = _muhurat(day, day, timezone_offset_hours=tz)
             in_span, moshier, total = _in_span_fallback_during("/v1/muhurat", body)
             if in_span:
                 failures.append(
-                    f"{day} (MAX-{days_below}d) tz={tz:+g}: {in_span} of "
+                    f"{day} (SCAN_MAX-{days_below}d) tz={tz:+g}: {in_span} of "
                     f"{moshier}/{total} Moshier calls were at a JD INSIDE the "
                     "shipped files"
                 )
     assert not failures, (
-        "a muhurat scan a full month or more below MAX_EPHEMERIS_DATE lost "
-        "accuracy to the fallback on a Julian Day the files DO cover:\n"
+        "a muhurat scan on a day the service ACCEPTS lost accuracy to the "
+        "fallback on a Julian Day the shipped files DO cover:\n"
         + "\n".join(f"  - {f}" for f in failures)
-        + "\n\nThe end-of-range residual has spread. Re-measure where it starts "
-        "before adjusting this bound."
+        + "\n\nMAX_SCANNED_DATE is supposed to make this impossible. Re-measure "
+        "the scan's forward reach (tests/test_scanned_day_ephemeris_reach.py) "
+        "and narrow the bound; do not relax this test."
     )
