@@ -1732,12 +1732,29 @@ _COLLECTION_ONLY_FLAGS = _COLLECTION_CHECKER.COLLECTION_ONLY_FLAGS
 _NARROWING_FLAGS = _COLLECTION_CHECKER.NARROWING_FLAGS
 
 
-def _swiss_gated_modules() -> list[str]:
-    """Repo-relative paths of test modules with at least one `swiss_ephemeris`-gated test."""
+def _swiss_gated_modules(root: Path = _REPO_ROOT) -> list[str]:
+    """Repo-relative paths of test modules with at least one `swiss_ephemeris`-gated test.
+
+    ``tests/**/*.py``, not ``tests/*.py``. The flat glob matched the layout exactly
+    as it stands — every test module is directly in ``tests/`` today — and would
+    have gone on matching it silently on the day that stopped being true. An
+    accuracy module added at ``tests/accuracy/test_something.py`` would simply not
+    join the protected set, so narrowing the job's target past it would raise no
+    objection from the check whose entire purpose is to object. Deriving scope from
+    a pattern that cannot see part of the tree is the same defect as deriving it
+    from a hardcoded list, one level less obvious.
+
+    Verified to be a no-op for the layout as committed: the set derived by both
+    globs is byte-identical today (see the PR that introduced the recursive form).
+
+    ``root`` is a parameter so the subdirectory case can be proved against a
+    synthetic tree — the real repo is flat, so a test that only looked at it would
+    be asserting the very blind spot it is meant to remove.
+    """
     import ast
 
     gated: list[str] = []
-    for path in sorted((_REPO_ROOT / "tests").glob("*.py")):
+    for path in sorted((root / "tests").glob("**/*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - a broken test file fails elsewhere
@@ -1748,7 +1765,7 @@ def _swiss_gated_modules() -> list[str]:
             args = node.args
             names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
             if _FIXTURE in names and node.name.startswith("test_"):
-                gated.append(path.relative_to(_REPO_ROOT).as_posix())
+                gated.append(path.relative_to(root).as_posix())
                 break
     return gated
 
@@ -1805,13 +1822,23 @@ def _narrowing_flags(run: str) -> list[str]:
 
 
 def _target_reaches(target: str, module: str) -> bool:
-    """True when a pytest positional argument would collect ``module``."""
-    normalised = target.replace("\\", "/").rstrip("/")
-    # `pytest tests` / `pytest tests/` — the whole tree, and anything under it.
-    if normalised in {"tests", "."}:
+    """True when a pytest positional argument would collect ``module``.
+
+    A DIRECTORY target collects everything beneath it, at any depth — `pytest tests`
+    reaches `tests/accuracy/test_x.py` exactly as it reaches `tests/test_y.py`. That
+    is written as a prefix test rather than a special case for the literal string
+    `tests`, so that once a gated module can live in a subdirectory (see
+    `_swiss_gated_modules`) a legitimate `pytest tests/accuracy` target is not
+    false-rejected. A guard that reds on correct input is a guard the next person
+    weakens.
+    """
+    normalised = target.replace("\\", "/").rstrip("/").split("::", 1)[0]
+    if normalised == ".":
         return True
     # An explicit file, with or without a `::node` selector.
-    return normalised.split("::", 1)[0] == module
+    if normalised == module:
+        return True
+    return module.startswith(f"{normalised}/")
 
 
 def _job_reaches(job: dict, module: str) -> bool:
@@ -1989,6 +2016,14 @@ def test_reachability_parser_discriminates() -> None:
         "pytest tests/ --ignore tests/test_independent_reference_corpus.py -q"
     )
 
+    # A directory target reaches modules at any depth beneath it, and does not
+    # reach a sibling directory that merely shares a prefix.
+    assert _target_reaches("tests", "tests/accuracy/test_deep.py")
+    assert _target_reaches("tests/", "tests/accuracy/test_deep.py")
+    assert _target_reaches("tests/accuracy", "tests/accuracy/test_deep.py")
+    assert not _target_reaches("tests/accuracy", "tests/test_flat.py")
+    assert not _target_reaches("tests", "tests_helpers/test_x.py")
+
     # And the module-discovery half must actually discover something, or every
     # assertion below is vacuous on an empty set.
     discovered = _swiss_gated_modules()
@@ -1997,6 +2032,59 @@ def test_reachability_parser_discriminates() -> None:
         f"broken and the real assertion would be vacuous. Found: {discovered}"
     )
     assert "tests/test_swiss_ephemeris.py" in discovered, discovered
+
+
+def test_gated_module_discovery_reaches_subdirectories(tmp_path: Path) -> None:
+    """A gated module in a `tests/` SUBDIRECTORY must join the protected set.
+
+    Proved against a synthetic tree, deliberately. The real `tests/` tree is flat,
+    so a test that only inspected it would pass under the old `tests/*.py` glob and
+    under the new `tests/**/*.py` one alike — it would be asserting the blind spot
+    rather than removing it. The layout being flat TODAY is exactly why the flat
+    glob looked correct and would have failed silently the day it stopped being.
+
+    The negative cases matter as much: discovery must still key on a `swiss_ephemeris`
+    PARAMETER of a `test_`-prefixed function, at any depth, and not on the string
+    appearing in a docstring, a comment, or a non-test helper's signature.
+    """
+    tests_dir = tmp_path / "tests"
+    (tests_dir / "accuracy").mkdir(parents=True)
+    (tests_dir / "helpers").mkdir(parents=True)
+
+    (tests_dir / "test_flat.py").write_text(
+        "def test_flat_case(swiss_ephemeris):\n    pass\n", encoding="utf-8"
+    )
+    (tests_dir / "accuracy" / "test_deep.py").write_text(
+        "def test_deep_case(swiss_ephemeris):\n    pass\n", encoding="utf-8"
+    )
+    (tests_dir / "accuracy" / "test_deeper.py").write_text(
+        "async def test_async_case(swiss_ephemeris):\n    pass\n", encoding="utf-8"
+    )
+    # Decoys, at depth, that must NOT be picked up.
+    (tests_dir / "helpers" / "test_mentions_only.py").write_text(
+        '"""Talks about swiss_ephemeris in a docstring."""\n'
+        "# and in a comment: swiss_ephemeris\n"
+        "def helper(swiss_ephemeris):\n    pass\n"  # not a test_ function
+        "def test_not_gated():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "helpers" / "conftest.py").write_text(
+        "def swiss_ephemeris():\n    pass\n", encoding="utf-8"
+    )
+
+    discovered = _swiss_gated_modules(tmp_path)
+
+    assert "tests/accuracy/test_deep.py" in discovered, (
+        "a swiss-gated module in a tests/ subdirectory was not discovered, so "
+        "narrowing the accuracy job past it would raise no objection"
+    )
+    assert "tests/accuracy/test_deeper.py" in discovered, "async gated test missed"
+    assert "tests/test_flat.py" in discovered, "the flat case regressed"
+    assert "tests/helpers/test_mentions_only.py" not in discovered, (
+        "discovery matched a mention rather than a fixture parameter — it must "
+        "parse signatures, not scan text"
+    )
+    assert "tests/helpers/conftest.py" not in discovered
 
 
 def test_swiss_job_reaches_every_swiss_gated_module() -> None:
