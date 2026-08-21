@@ -8,9 +8,11 @@ ephemeris-range guard. Confirmed on the unfixed models:
   - an oversized name ("x" * 100000) passed validation (200, not 422) -- a
     request/log-inflation vector;
   - birth_date=9999-01-01 reached swe.julday() unguarded and raised an uncaught
-    swisseph.Error (a raw 500) rather than a clean 422, because 9999 is outside
-    the shipped ephemeris data's supported range (EPHEMERIS_LICENSE.md: AD
-    1800-2400).
+    swisseph.Error (a raw 500) rather than a clean 422, because 9999 is far
+    outside the shipped data files' label range (EPHEMERIS_LICENSE.md: AD
+    1800-2400 — and the files stop measurably earlier than that label, which is
+    why the served bound is MIN_EPHEMERIS_DATE/MAX_EPHEMERIS_DATE in
+    app/schemas.py rather than the label itself).
 
 Both models now inherit BoundedPersonFields (app/schemas.py), so these are
 rejected as a 422 at the schema boundary before the ephemeris is reached. Mirrors

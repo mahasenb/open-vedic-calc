@@ -9,8 +9,10 @@ by a lot. Measured in this repo with the then-frozen dependency set (pyswisseph
 2.10.3.2, pyjhora 4.8.6 — these are properties of swisseph's two node bodies, so
 the later 4.8.7 bump left them untouched and pyswisseph is unmoved at 2.10.3.2)
 against the real Swiss ephemeris data files, scanning
-1800-01-01..2400-12-31 (the engine's supported birth-date span, app/schemas.py)
-one day at a time and refining the worst day at one-hour steps:
+1800-01-01..2400-12-31 (the data files' full label span — WIDER than the served
+birth-date bound, which is narrower and measured; see MIN_EPHEMERIS_DATE /
+MAX_EPHEMERIS_DATE in app/schemas.py) one day at a time and refining the worst
+day at one-hour steps:
 
     max |true - mean| = 1.981465100 deg = 118.8879 arcmin = 7133.2744 arcsec
     at JD 2417129.4166666595 (1905-10-10 22:00 UT)
@@ -116,8 +118,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _UV_LOCK = _REPO_ROOT / "uv.lock"
 
-# The epoch of maximum true-vs-mean disagreement in the supported span, from the
-# scan quoted in the module docstring. Chosen deliberately: the two models cross
+# The epoch of maximum true-vs-mean disagreement in the SCANNED span, from the
+# scan quoted in the module docstring. (It also falls inside the narrower served
+# birth-date bound, so it remains the worst case for what the service answers.) Chosen deliberately: the two models cross
 # (agree exactly) twice per ~173-day eclipse half-year, so a test that picked an
 # arbitrary instant could accidentally sample a crossing and pass on either model.
 _MAX_DIVERGENCE_UT = (1905, 10, 10, 22, 0)
