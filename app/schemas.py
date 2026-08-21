@@ -142,8 +142,9 @@ BoundedBirthDate = Annotated[
 # The NON-birth date inputs, bounded to the SAME measured span.
 #
 # birth_date was bounded first (see above) because it was the one that faulted
-# loudest. It was never the only date on the wire: eight further IsoDateStr
-# fields and one optional `date` carried no range check at all. Measured on the
+# loudest. It was never the only date on the wire: NINE further IsoDateStr
+# fields (at_date, from_date, to_date, and THREE start_date/end_date pairs) and
+# one optional `date` carried no range check at all — TEN in all. Measured on the
 # commit that introduced these constants, with the real Swiss files present and
 # a spy on every swe.calc_ut a served request makes:
 #
@@ -162,9 +163,16 @@ BoundedBirthDate = Annotated[
 #
 # NOT every one of these fields consults the ephemeris at the bounded date, and
 # the bound is not claimed to be an accuracy fix for the ones that do not:
-# measured, /v1/dashas answers from arithmetic projected off the natal Moon (its
-# swe.calc_ut count is 15 — the natal chart — whether to_date is 2026-12-31 or
-# 2999-12-31), and /v1/compat's reference_date drives no calls either. Those two
+# measured, /v1/dashas answers from arithmetic projected off the natal Moon: on a
+# SERVABLE pair (birth 2390-06-15, from_date 2395-01-01 — late enough that the
+# birth-relative MAX_DASHA_DAYS cap stays satisfied) to_date at 2400-01-09,
+# 2450-01-01 and 2500-01-01 all served 200 with the swe.calc_ut count pinned at
+# exactly 15, the natal chart, though the last runs ~100 years past the span.
+# (A normal birth cannot show this: birth 1950-06-15 with to_date 2999-12-31 is
+# refused 422 by the cap having made ZERO calls, so no such request is servable
+# and the count there is 0, not 15.) /v1/compat's reference_date likewise drives
+# no calls: 30 — its two natal charts — at 2026-05-26, 2400-01-09, 2500-01-01
+# and 3000-01-01 alike. Those two
 # are bounded to close the OverflowError and to keep one span across the served
 # contract, not because a Moshier answer was measured behind them. The cost is
 # real and deliberate: a late-born chart can no longer request a dasha timeline
@@ -699,7 +707,7 @@ class FamilyLagnaShuddhiJobStatus(BaseModel):
 class CompatRequest(BaseModel):
     person_a: PersonalDataIn
     person_b: PersonalDataIn
-    # The ninth date input, and the one the IsoDateStr sweep missed: it is a
+    # The TENTH date input, and the one the IsoDateStr sweep missed: it is a
     # `date`, so it never matched that grep. Unbounded it reached
     # compute_dasha_overlaps, where `window_start + timedelta(days=25*365.25)`
     # runs past year 9999 and raised an uncaught OverflowError (a raw 500).

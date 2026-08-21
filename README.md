@@ -88,7 +88,7 @@ at each end because a local date spans UTC instants a day either side once
 `timezone_offset_hours` is applied. See `EPHEMERIS_LICENSE.md` for the
 measurement.
 
-**Every** date a caller can send is bounded to that one span, not just
+**Every** date a caller can send is bounded to that one span — all ten beyond
 `birth_date`: `at_date` (`/v1/transits`), `from_date` / `to_date` (`/v1/dashas`),
 the `start_date` / `end_date` pair on `/v1/muhurat`,
 `/v1/muhurat/lagna-shuddhi` and `/v1/muhurat/family-lagna-shuddhi` (including
@@ -102,10 +102,13 @@ to serve dates past the files at 200 off the fallback. All are 422 now, and each
 Two caveats worth knowing, both measured:
 
 - `from_date` / `to_date` and `reference_date` drive **no** ephemeris lookups —
-  dasha timelines are projected arithmetically from the natal Moon. They are
-  bounded for the crash and for one consistent served span, not because a
-  fallback answer was measured behind them. The cost is that a late-born chart
-  can no longer request a timeline running past 2400-01-09.
+  dasha timelines are projected arithmetically from the natal Moon. Measured on
+  a servable request (birth 2390-06-15, `from_date` 2395-01-01), `to_date` at
+  2400-01-09, 2450-01-01 and 2500-01-01 all answered 200 with the same 15
+  ephemeris calls, the natal chart, though the last runs a century past the
+  span. They are bounded for the crash and for one consistent served span, not
+  because a fallback answer was measured behind them. The cost is that a
+  late-born chart can no longer request a timeline running past 2400-01-09.
 - The bound does **not** make every muhurat scan Swiss-backed at the very edges
   of the span. `bphs_core/muhurat.py::_is_eclipse_day` searches for an eclipse
   *outside* the scanned day, so a day scanned near either end probes past the
