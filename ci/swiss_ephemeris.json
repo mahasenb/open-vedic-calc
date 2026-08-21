@@ -32,9 +32,11 @@
     "SOURCE: the upstream Swiss Ephemeris distribution repository (aloistr/swisseph),",
     "pinned to a COMMIT sha rather than a branch, so the path itself is",
     "content-addressed and cannot move under us. EPHEMERIS_LICENSE.md used to point at",
-    "https://www.astro.com/ftp/ephe/ ; every astro.com path we probed now returns 404",
-    "(checked 2026-07-25: /ftp/ephe/, /ftp/swisseph/ephe/, /swisseph/ephe/), which is",
-    "why that doc now points here too.",
+    "https://www.astro.com/ftp/ephe/, which is dead; the paths actually probed are",
+    "recorded structurally in 'known_dead_sources' below rather than in this prose,",
+    "so ci/tests/test_ephemeris_license_doc.py can fail if that doc ever presents one",
+    "of them as a live instruction again. This manifest is the source of truth for",
+    "where the data comes from, and that doc must agree with it.",
     "",
     "sha256 is trust-on-first-use, exactly like a lockfile entry: recorded from the",
     "first verified download and pinned thereafter, so a later silent change to a",
@@ -42,6 +44,26 @@
     "Updating one is a reviewable diff, never an automatic refresh. A null sha256 is",
     "NOT 'skip the check' — the fetcher fails closed and prints the value to record."
   ],
+  "known_dead_sources": {
+    "_comment": [
+      "Ephemeris-DATA directory paths EPHEMERIS_LICENSE.md used to send readers to.",
+      "Each measured 404 on probed_date. Recorded as data, not prose, so a guard can",
+      "read it: ci/tests/test_ephemeris_license_doc.py fails if any of these appears",
+      "in that document outside its 'Dead links' section.",
+      "",
+      "SCOPE, STATED HONESTLY: these three paths were probed. That is NOT a finding",
+      "about astro.com as a whole, and the doc must not generalise it into one -- it",
+      "used to say 'every astro.com variant of it' while, two paragraphs earlier,",
+      "still sending readers to an astro.com URL for the Professional Licence. A",
+      "claim wider than its measurement is how a doc starts contradicting itself."
+    ],
+    "probed_date": "2026-07-25",
+    "urls": [
+      "https://www.astro.com/ftp/ephe/",
+      "https://www.astro.com/ftp/swisseph/ephe/",
+      "https://www.astro.com/swisseph/ephe/"
+    ]
+  },
   "upstream_repo": "https://github.com/aloistr/swisseph",
   "upstream_commit": "59ac051b5a5812c684973ca0fcedb1c8c3e9c5dc",
   "base_url": "https://raw.githubusercontent.com/aloistr/swisseph/59ac051b5a5812c684973ca0fcedb1c8c3e9c5dc/ephe/",
