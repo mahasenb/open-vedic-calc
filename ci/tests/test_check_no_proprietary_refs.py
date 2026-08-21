@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -196,7 +197,8 @@ class TestCommitRangeScanning:
             ["git", "commit", "-q", "-m", "first commit"], cwd=repo, check=True
         )
         first_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", check=True,
         ).stdout.strip()
 
         (repo / "a.txt").write_text("two")
@@ -207,7 +209,8 @@ class TestCommitRangeScanning:
             check=True,
         )
         second_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", check=True,
         ).stdout.strip()
 
         # Range scan must see the second (non-HEAD-only) commit's message.
@@ -348,18 +351,19 @@ def _commit_with_raw_message(repo: Path, message: bytes) -> str:
     """
     head_ref = subprocess.run(
         ["git", "symbolic-ref", "HEAD"], cwd=repo,
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, encoding="utf-8", errors="replace",
     ).stdout.strip()
     parent = subprocess.run(
         ["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=repo,
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, encoding="utf-8", errors="replace",
     ).stdout.strip()
 
     marker = repo / "file.txt"
     marker.write_bytes(b"content " + str(len(message)).encode("ascii") + b"\n")
     subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
     tree = subprocess.run(
-        ["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True
+        ["git", "write-tree"], cwd=repo, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", check=True,
     ).stdout.strip()
 
     header = f"tree {tree}\n"
@@ -424,12 +428,12 @@ class TestCommitMessageDecodingIsPinned:
         _commit_with_raw_message(repo, b"chore: base commit\n")
         base = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repo,
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, encoding="utf-8", errors="replace",
         ).stdout.strip()
         _commit_with_raw_message(repo, _UNDECODABLE_MESSAGE)
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=repo,
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, encoding="utf-8", errors="replace",
         ).stdout.strip()
 
         with pytest.raises(module.CommitMessageDecodeError):
@@ -650,4 +654,135 @@ class TestSubprocessDecodingIsPinnedStructurally:
             f"subprocess.run call(s) at line(s) {stray} bypass _run_git_log without "
             f"naming an explicit encoding -- route git access through the helper so "
             f"the output-encoding pin and the strict decode apply to it too"
+        )
+
+
+# A synthetic brand token spelled with a non-ASCII character. Obviously fake, as
+# the standing rule requires -- but non-ASCII, which is the property that makes
+# the masking below possible at all.
+_NON_ASCII_SYNTHETIC_TOKEN = "zzzcafébrand"
+
+
+class TestFileScanDecoding:
+    """The FILE scan decodes strictly and refuses, for the same reason the
+    commit-message scan does.
+
+    PR #75 pinned the commit-message read and deliberately left this one alone
+    rather than widen its scope, recording it upward as an open question: the
+    file scan's encoding was already pinned (``encoding="utf-8"``), so it was
+    never locale-dependent -- but it carried ``errors="replace"``, and the
+    masking argument that decided the commit-message policy applies here
+    unchanged. A replacement character cannot hide an ASCII token, because UTF-8
+    is self-synchronising and U+FFFD is not a word character; it destroys a
+    token spelled with a non-ASCII character, which is exactly what the brand
+    tokens arriving from a secret this repo cannot read might be.
+    """
+
+    def _tree_with(self, root, name: str, payload: bytes):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(payload)
+        return root
+
+    def test_the_masking_this_closes_is_real_not_hypothetical(self):
+        """Measure the hole before asserting it is shut.
+
+        Without this, the refusal below could be defending against nothing.
+        """
+        raw = f"leak: {_NON_ASCII_SYNTHETIC_TOKEN}".encode("latin-1")
+        pattern = re.compile(re.escape(_NON_ASCII_SYNTHETIC_TOKEN), re.IGNORECASE)
+
+        # The old policy: lossy, and the token does not survive it.
+        lossy = raw.decode("utf-8", "replace")
+        assert not pattern.search(lossy), (
+            "the premise of this whole class is wrong: the non-ASCII token "
+            f"survived a lossy decode as {lossy!r}"
+        )
+        # The bytes really are undecodable, so strict really does refuse.
+        with pytest.raises(UnicodeDecodeError):
+            raw.decode("utf-8")
+        # And an ASCII token in the same bytes WOULD have survived -- which is
+        # why this is about non-ASCII tokens specifically.
+        assert "leak:" in lossy
+
+    def test_a_file_that_is_not_utf8_is_refused_rather_than_scanned_lossily(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """An unreadable file is possible concealment, never absence."""
+        module = gate_with_synthetic_token
+        root = self._tree_with(
+            tmp_path / "filescan",
+            "notes.md",
+            f"leak: {_NON_ASCII_SYNTHETIC_TOKEN}".encode("latin-1"),
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "a file that could not be decoded was scanned lossily and the gate "
+            "reported success -- this is the silent pass the commit-message "
+            "half already refuses"
+        )
+        assert "OK:" not in captured.out
+        assert "notes.md" in captured.err, (
+            f"the refusal must name the file it could not read: {captured.err}"
+        )
+        assert "utf-8" in captured.err.lower()
+
+    def test_a_readable_tree_still_passes(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """The don't-over-refuse control: strictness must not redden clean trees."""
+        module = gate_with_synthetic_token
+        root = self._tree_with(
+            tmp_path / "clean", "notes.md", "nothing to see here\n".encode("utf-8")
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        assert module.main() == 0
+        assert "OK:" in capsys.readouterr().out
+
+    def test_one_unreadable_file_does_not_abort_the_rest_of_the_scan(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """A refusal on one file must not stop the others being scanned.
+
+        Otherwise a single undecodable file becomes a way to hide a leak sitting
+        in a perfectly readable one later in the walk.
+        """
+        module = gate_with_synthetic_token
+        root = tmp_path / "mixed"
+        self._tree_with(root, "aaa_unreadable.md", b"\xff\xfe\x80 bad bytes\n")
+        (root / "zzz_readable.md").write_bytes(
+            f"leak: {_SYNTHETIC_TOKEN}".encode("utf-8")
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "aaa_unreadable.md" in captured.err, "the refusal was not reported"
+        assert "zzz_readable.md" in captured.err, (
+            "the scan stopped at the unreadable file and never reached the "
+            f"readable one holding the token: {captured.err}"
+        )
+
+    def test_the_file_refusal_is_not_swallowed_by_the_oserror_handler(
+        self, gate_with_synthetic_token
+    ):
+        """``main``'s file loop absorbs OSError so an unreadable file is skipped.
+
+        A decode refusal must not ride that arm, for the same reason its
+        commit-message sibling must not: absorbing it restores the silent pass.
+        """
+        module = gate_with_synthetic_token
+        assert hasattr(module, "FileDecodeError")
+        assert not issubclass(module.FileDecodeError, OSError), (
+            "FileDecodeError must not be an OSError subclass, or main's file "
+            "loop would swallow the refusal and continue"
         )

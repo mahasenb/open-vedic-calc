@@ -561,7 +561,8 @@ def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> Non
 
     refused = subprocess.run(
         [sys.executable, str(_CHECKER)],
-        cwd=str(_REPO), env=injected, capture_output=True, text=True, timeout=120,
+        cwd=str(_REPO), env=injected, capture_output=True, timeout=120,
+        text=True, encoding="utf-8", errors="replace",
     )
     assert refused.returncode != 0, (
         "the real script exited 0 with a narrowing PYTEST_ADDOPTS injected — this is "
@@ -573,7 +574,8 @@ def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> Non
     # cannot get as far as certifying anything.
     self_tested = subprocess.run(
         [sys.executable, str(_CHECKER), "--self-test"],
-        cwd=str(_REPO), env=injected, capture_output=True, text=True, timeout=120,
+        cwd=str(_REPO), env=injected, capture_output=True, timeout=120,
+        text=True, encoding="utf-8", errors="replace",
     )
     assert self_tested.returncode != 0, (
         "`--self-test` exited 0 with a narrowing PYTEST_ADDOPTS injected. The CI step "
@@ -585,8 +587,118 @@ def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> Non
     # the checker refuses everything.
     clean = subprocess.run(
         [sys.executable, str(_CHECKER)],
-        cwd=str(_REPO), env=environment, capture_output=True, text=True, timeout=120,
+        cwd=str(_REPO), env=environment, capture_output=True, timeout=120,
+        text=True, encoding="utf-8", errors="replace",
     )
     assert clean.returncode == 0, (
         f"the real repository was refused with a clean environment:\n{clean.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The working-tree enumeration: what git actually hands back, and how it is read
+# ---------------------------------------------------------------------------
+def _git_fixture_repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A real git checkout, so the git arm of the enumeration is the one used."""
+    root = _tree(tmp_path)
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
+    return root
+
+
+def test_a_narrowing_config_under_a_non_ascii_directory_is_found(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A non-ASCII path component must not hide a config file from this checker.
+
+    MEASURED on the commit before this arm existed, against a fixture repo
+    holding ``caf<e-acute><s-caron>/pytest.ini`` with ``addopts =
+    --collect-only``::
+
+        _git_working_tree_paths(root)
+            -> ['"caf/303/251/305/241/pytest.ini"', 'plain.txt']
+        unparsed_config_files(root)  -> []
+
+    Two independent faults compounded. ``git ls-files`` quotes a path holding
+    non-ASCII bytes (``core.quotePath`` defaults on), wrapping it in literal
+    double quotes and rendering each byte as a backslash-octal escape -- so the
+    basename read back was ``pytest.ini"``, with a trailing quote, matching
+    nothing. And the enumeration's ``.replace("\\\\", "/")`` -- there to
+    normalise Windows separators -- rewrote those octal escapes into fabricated
+    directory separators, inventing a ``caf/303/251/305/241/`` tree that does
+    not exist.
+
+    The result was the exact fail-open this checker exists to close: a
+    ``--collect-only`` sitting in a config file, reported clean.
+
+    ``-z`` is the fix, and it is the shape already used by
+    ``ci/tests/test_dockerfile_image_pins.py::tracked_dockerfiles``: it disables
+    quoting altogether and NUL-separates the records, so a path is handed over
+    verbatim whatever bytes it holds and whatever ``core.quotePath`` says.
+    """
+    checker = _load_checker()
+    root = _git_fixture_repo(tmp_path)
+    directory = root / "caféš"
+    directory.mkdir()
+    (directory / "pytest.ini").write_text(
+        "[pytest]\naddopts = --collect-only\n", encoding="utf-8", newline="\n"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True, check=True)
+
+    # The git arm must be the one answering, or this test would be proving only
+    # that the directory-walk fallback works.
+    enumerated = checker._git_working_tree_paths(root)
+    assert enumerated is not None, (
+        "git did not answer for this fixture, so the walk fallback would have "
+        "been used and this test would say nothing about the git arm"
+    )
+    assert any(path.endswith("caféš/pytest.ini") for path in enumerated), (
+        "the non-ASCII path was not handed back verbatim -- it is still being "
+        f"quoted or escaped: {enumerated}"
+    )
+
+    found = checker.problems(root, environ={})
+    assert any("pytest.ini" in problem for problem in found), (
+        "a narrowing pytest.ini under a non-ASCII directory was not detected: "
+        f"{found}"
+    )
+
+
+def test_the_working_tree_enumeration_refuses_undecodable_output(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    """Undecodable bytes from git mean "git cannot answer", never a silent empty scan.
+
+    A filename need not be valid UTF-8 on a POSIX filesystem, so ``git ls-files``
+    can legitimately emit bytes this checker cannot decode. Monkeypatching is
+    used here to simulate that FAILURE shape -- not to invent a success shape --
+    because the real trigger cannot be constructed on an NTFS checkout.
+
+    Before the fix this call ran in text mode, where the decode happens on a
+    subprocess reader thread: measured, the thread dies and the caller is handed
+    ``stdout=None`` with ``returncode=0``, so the very next ``.splitlines()``
+    raised ``AttributeError`` out of a checker whose whole contract is to reach
+    a verdict.
+
+    ``None`` is the honest answer, and it is not a silent pass: the caller falls
+    back to ``_walked_paths`` and the tree still gets scanned.
+    """
+    checker = _load_checker()
+    root = _git_fixture_repo(tmp_path)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0] if args else [],
+            returncode=0,
+            stdout=b"ok.txt\x00\xff\xfe\x80/pytest.ini\x00",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
+    assert checker._git_working_tree_paths(root) is None, (
+        "undecodable git output was not reported as 'git cannot answer'"
     )

@@ -328,7 +328,7 @@ def test_the_committed_corpus_is_not_overwritten_by_a_default_invocation(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=120, encoding="utf-8", errors="replace",
     )
     assert completed.returncode != 0, (
         f"the unflagged recorder exited 0.\nstdout:\n{completed.stdout}\n"

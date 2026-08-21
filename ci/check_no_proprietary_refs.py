@@ -71,12 +71,37 @@ _COMMIT_ENCODING = "utf-8"
 _LOG_OUTPUT_ENCODING_PIN = "i18n.logOutputEncoding=UTF-8"
 
 
-class CommitMessageDecodeError(RuntimeError):
-    """git produced commit-message bytes that are not valid UTF-8.
+class ScanDecodeError(RuntimeError):
+    """Something this gate must scan could not be decoded, so it will not pass.
 
-    Deliberately NOT an OSError subclass: main() absorbs OSError so a missing
-    git degrades quietly, and this must not take that exit — being unable to
-    read a commit message is the one thing this gate may never treat as a pass.
+    Deliberately NOT an OSError subclass, and neither is either subclass:
+    main() absorbs OSError in two places — so a missing git degrades quietly,
+    and an unreadable file is skipped — and a decode refusal must take neither
+    of those exits. Being unable to READ something is the one thing this gate
+    may never treat as absence of a token.
+    """
+
+
+class CommitMessageDecodeError(ScanDecodeError):
+    """git produced commit-message bytes that are not valid UTF-8."""
+
+
+class FileDecodeError(ScanDecodeError):
+    """A file in the scan set holds bytes that are not valid UTF-8.
+
+    The file scan used to take ``errors="replace"``. Its encoding was already
+    pinned, so it was never locale-dependent — but lossy is not the same as
+    safe, and the argument that decided the commit-message policy applies here
+    unchanged: replacement cannot hide an ASCII token (UTF-8 is
+    self-synchronising, and U+FFFD is not a word character), but it destroys a
+    token spelled with a non-ASCII character, which is exactly what a brand
+    token arriving from a secret this repo cannot read may be. Measured: the
+    latin-1 bytes of a non-ASCII synthetic token decode with U+FFFD mid-word and
+    stop matching their own pattern.
+
+    Measured before the switch: of the 104 files in this gate's scan set, 0
+    failed a strict UTF-8 decode — so strictness costs nothing on a healthy
+    tree, and a failure is genuinely a signal rather than routine noise.
     """
 
 
@@ -159,18 +184,25 @@ def _run_git_log(args: list[str], cwd: Path) -> subprocess.CompletedProcess[byte
     )
 
 
-def _decode(raw: bytes, source: str) -> str:
-    """Decode git output as UTF-8, strictly — or refuse.
+def _decode(
+    raw: bytes,
+    source: str,
+    error_class: type[ScanDecodeError] = CommitMessageDecodeError,
+) -> str:
+    """Decode scanned bytes as UTF-8, strictly — or refuse.
 
-    ``errors="replace"`` is the wrong policy *here* (though it is the right one
-    for a caller that is not scanning for tokens): an ASCII token would survive
-    replacement, but a token carrying a non-ASCII character would not, so a
-    lossy read could report "clean" on a real leak.
+    ``errors="replace"`` is the wrong policy for anything this gate SCANS
+    (though it is the right one for a caller that is not looking for tokens):
+    an ASCII token would survive replacement, but a token carrying a non-ASCII
+    character would not, so a lossy read could report "clean" on a real leak.
+
+    Both scanned inputs — commit messages and file contents — come through
+    here, so the policy cannot be applied to one and forgotten on the other.
     """
     try:
         return raw.decode(_COMMIT_ENCODING)
     except UnicodeDecodeError as exc:
-        raise CommitMessageDecodeError(
+        raise error_class(
             f"{source} is not valid {_COMMIT_ENCODING} ({exc.reason} at byte "
             f"{exc.start}), so it cannot be scanned for forbidden tokens"
         ) from exc
@@ -207,6 +239,7 @@ def main(commit_range: str | None = None) -> int:
         commit_range = sys.argv[1]
 
     violations: list[str] = []
+    refusals: list[str] = []
 
     for path in _REPO_ROOT.rglob("*"):
         if any(part in _SKIP_DIRS for part in path.parts):
@@ -217,15 +250,25 @@ def main(commit_range: str | None = None) -> int:
             continue  # don't scan the gate's own description of the legacy token
         if path.suffix.lower() not in _SCAN_EXT and path.name.lower() != "dockerfile":
             continue
+        label = str(path.relative_to(_REPO_ROOT))
         try:
-            label = str(path.relative_to(_REPO_ROOT))
-            _scan_text(label, path.read_text(encoding="utf-8", errors="replace"), violations)
+            raw = path.read_bytes()
         except OSError:
             continue
+        # The decode is deliberately OUTSIDE the OSError arm above. An
+        # unreadable file is skipped; an UNDECODABLE one is refused, and
+        # collecting the refusal rather than raising keeps the remaining files
+        # scanned — otherwise one undecodable file would become a way to hide a
+        # leak sitting in a readable one later in the walk.
+        try:
+            text = _decode(raw, label, FileDecodeError)
+        except FileDecodeError as exc:
+            refusals.append(str(exc))
+            continue
+        _scan_text(label, text, violations)
 
     # Commit message(s) in the pushed range (cheap guard against a leak buried
     # in an intermediate commit of a multi-commit push, not just HEAD).
-    refusals: list[str] = []
     try:
         messages = _get_commit_messages(commit_range)
     except CommitMessageDecodeError as exc:
@@ -241,17 +284,18 @@ def main(commit_range: str | None = None) -> int:
 
     if refusals:
         sys.stderr.write(
-            "ERROR: the commit-message scan could not be performed, so this gate "
+            "ERROR: part of this gate's scan could not be performed, so it "
             "refuses rather than reporting a clean result:\n"
         )
         for refusal in refusals:
             sys.stderr.write(f"  {refusal}\n")
         sys.stderr.write(
-            "\nThis gate decodes commit messages as utf-8 strictly. A lossy decode "
-            "substitutes U+FFFD for the offending bytes, and a brand token spelled "
-            "with a non-ASCII character would not survive that substitution, so "
-            "scanning a lossy decode could report 'clean' on a real leak. Rewrite "
-            "the offending commit message(s) as UTF-8.\n"
+            "\nThis gate decodes everything it scans — file contents and commit "
+            "messages alike — as utf-8 strictly. A lossy decode substitutes "
+            "U+FFFD for the offending bytes, and a brand token spelled with a "
+            "non-ASCII character would not survive that substitution, so "
+            "scanning a lossy decode could report 'clean' on a real leak. "
+            "Rewrite the offending file(s) or commit message(s) as UTF-8.\n"
         )
 
     if violations:

@@ -532,7 +532,7 @@ def test_the_recording_arm_itself_refuses_under_an_empty_ci(swiss_ephemeris: int
         env=environ,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=600, encoding="utf-8", errors="replace",
     )
     output = completed.stdout + completed.stderr
 
