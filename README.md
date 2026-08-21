@@ -76,9 +76,9 @@ that differs from another tool can be explained rather than guessed at:
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
 | Sunrise / sunset | **Disc centre at the true (geometric) horizon** — the classical Hindu convention; `rsmi` words `897` / `898` | `bphs_core/utils.py`, `RISE_FLAGS` / `SET_FLAGS` |
-| Ephemeris | Swiss Ephemeris data files; served birth-date range **1800-01-02 … 2400-01-09** | baked into the images; bound in `app/schemas.py` |
+| Ephemeris | Swiss Ephemeris data files; served date range **1800-01-02 … 2400-01-09** for **every** date field | baked into the images; bound in `app/schemas.py` |
 
-The birth-date range is the **measured** span of the shipped data files, not the
+That range is the **measured** span of the shipped data files, not the
 "AD 1800–2400" label on them. The files stop answering on 2400-01-11, and
 swisseph does not error when they do — it silently substitutes its built-in
 Moshier ephemeris and returns a plausible result anyway. Rather than serve the
@@ -87,6 +87,31 @@ measured span are refused with a 422. The bound holds one further day of margin
 at each end because a local date spans UTC instants a day either side once
 `timezone_offset_hours` is applied. See `EPHEMERIS_LICENSE.md` for the
 measurement.
+
+**Every** date a caller can send is bounded to that one span, not just
+`birth_date`: `at_date` (`/v1/transits`), `from_date` / `to_date` (`/v1/dashas`),
+the `start_date` / `end_date` pair on `/v1/muhurat`,
+`/v1/muhurat/lagna-shuddhi` and `/v1/muhurat/family-lagna-shuddhi` (including
+their `/async` submit forms), and the optional `reference_date` on `/v1/compat`.
+Two of those used to fault rather than answer — `at_date=9999-01-01` raised an
+uncaught `swisseph.Error` and `reference_date=9999-01-01` an uncaught
+`OverflowError`, both surfacing as a bare 500 — and the muhurat scan range used
+to serve dates past the files at 200 off the fallback. All are 422 now, and each
+422 names the offending field and both bounds.
+
+Two caveats worth knowing, both measured:
+
+- `from_date` / `to_date` and `reference_date` drive **no** ephemeris lookups —
+  dasha timelines are projected arithmetically from the natal Moon. They are
+  bounded for the crash and for one consistent served span, not because a
+  fallback answer was measured behind them. The cost is that a late-born chart
+  can no longer request a timeline running past 2400-01-09.
+- The bound does **not** make every muhurat scan Swiss-backed at the very edges
+  of the span. `bphs_core/muhurat.py::_is_eclipse_day` searches for an eclipse
+  *outside* the scanned day, so a day scanned near either end probes past the
+  files. Measured, the residue is roughly 1800-01-02…1801-06-30 and
+  2399-12-28…2400-01-09; the interior of the range is clean. That is an engine
+  defect at the data edges, tracked separately from these schema bounds.
 
 The node model is the choice most likely to explain a visible discrepancy.
 Measured over 1800–2400 at one-day steps against the real Swiss data files, the
