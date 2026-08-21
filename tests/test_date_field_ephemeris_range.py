@@ -58,10 +58,11 @@ and for a uniform served contract; what is asserted here is the crash closing.
 
 The muhurat/lagna-shuddhi scanned-day fields are asserted to be REFUSED outside
 the span and ACCEPTED at the bounds, but are likewise not asserted Swiss-backed
-at the bounds — because measured, they are not. See
-``test_scanned_day_edges_still_reach_outside_the_files`` at the end of this
-module, which pins that separately-tracked engine defect so it cannot widen
-silently.
+at the bounds — because measured, they are not. See the final section of this
+module (``test_the_interior_of_the_span_loses_no_accuracy_to_the_fallback`` and
+``test_the_edge_residual_stays_at_the_edge``), which pins that separately-tracked
+engine defect so it cannot widen silently. That section also records why the
+predecessor's attribution of the residual to the eclipse probe was wrong.
 """
 import datetime
 import os
@@ -595,31 +596,163 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 # KNOWN, SEPARATELY-TRACKED: the scanned-day endpoints still consult data
 # outside the files at the very edges of the span.
 # ---------------------------------------------------------------------------
+#
+# WHAT THE PREDECESSOR OF THIS SECTION GOT WRONG
+# ----------------------------------------------
+# It attributed the whole residual to ``muhurat.py::_is_eclipse_day`` calling
+# ``drik.next_solar_eclipse`` / ``next_lunar_eclipse``, on the strength of the
+# ``_moshier_calls_during`` spy below. That attribution cannot have come from
+# that instrument: ``swe.sol_eclipse_when_loc`` and ``swe.lun_eclipse_when``
+# compute their positions INSIDE the C library and never re-enter the Python
+# binding, so the spy records **zero** calls for the whole of ``_is_eclipse_day``
+# (measured at 2400-01-09, 1800-01-02 and 2026-05-26 alike, and now pinned by
+# ``tests/test_muhurat_edge_probe_engine.py``).
+#
+# Re-measured, attributing each Moshier call to its call site:
+#
+#   scanned 1800-01-02  1500/1864 on Moshier, ALL of them ``_is_adhik_maasa``
+#                       (``drik.lunar_month``) searching back to 1798-07-10.
+#   scanned 2400-01-09   342/2800 on Moshier — 48 from ``_is_adhik_maasa``
+#                       reaching forward to 2400-01-29, and 294 from the day's
+#                       OWN panchanga limbs (``drik.tithi`` at muhurat.py:492
+#                       first) at 2400-01-08..2400-01-10.
+#
+# THE PART THAT ACTUALLY COSTS ACCURACY
+# -------------------------------------
+# Reading past the files is not itself a defect — the next eclipse and the
+# bracketing new moons genuinely are outside the scanned day, and no data exists
+# there to read. What IS a defect is that swisseph KEEPS the fallback afterwards,
+# so a later lookup at an IN-span JD answers analytically too. Measured on base
+# in a fresh process::
+#
+#     probe Moon at 2400-01-09       -> SWISS   (retflag 65602)
+#     read  Moon at 2400-01-29       -> MOSHIER (retflag 65604)
+#     probe Moon at 2400-01-09 again -> MOSHIER (retflag 65604)   # still in span
+#
+# So the number worth tracking is not "Moshier calls" (a scan at 1800-01-02 makes
+# 1500 of them and loses nothing — every one is at a JD with no data) but
+# "Moshier calls at a JD that IS inside the files". ``_in_span_fallback_during``
+# below counts exactly that, and the two tests that follow pin it.
+#
+# Measured after ``_is_eclipse_day`` began restoring the ephemeris state:
+#   * low edge  1800-01-02..1801-07-14 — ZERO in-span loss on all 58 dates
+#     sampled, despite up to 1600/3300 calls answering on Moshier.
+#   * high edge — the residual is real and timezone-dependent. Earliest scanned
+#     day showing any in-span loss across the tz corners is 2399-12-24 (tz=-12,
+#     4 calls); it becomes dense over the final week (up to 303 calls).
+#   * interior — zero, including 10-day and 30-day RANGE scans at every corner.
+#
+# The remaining high-edge residual is ``drik.tithi``'s next-day search and
+# ``_is_adhik_maasa``'s lunar-month search running past the data end, which no
+# restore inside this repo can prevent (the fallback happens *within* one
+# pyjhora call). Closing it means narrowing the scanned-day bound; measured cost
+# and options are reported upward rather than decided here.
 
-def test_scanned_day_edges_still_reach_outside_the_files(swiss_ephemeris: int) -> None:
-    """This bound does NOT make every muhurat scan Swiss-backed, and says so.
+# The measured extent of the shipped Sun/Moon data (sepl_18 / semo_18), at
+# one-day steps with utils.probe_ephemeris_source. Wider than the SERVED span on
+# purpose: MAX_EPHEMERIS_DATE is 2400-01-09 and the files reach 2400-01-10, so a
+# scanned day's next-day lookups are legitimately inside the data.
+_FILES_FIRST_JD = swe.julday(1800, 1, 1, 0.0)
+_FILES_LAST_JD = swe.julday(2400, 1, 10, 24.0)
 
-    ``bphs_core/muhurat.py::_is_eclipse_day`` calls ``drik.next_solar_eclipse``
-    / ``next_lunar_eclipse``, which search for an eclipse OUTSIDE the scanned
-    day. Measured on base and unchanged by this PR: a day scanned at
-    2400-01-09 drives Sun/Moon probes out to 2400-01-29, and one scanned at
-    1800-01-02 drives them back to 1798-07-10 — both outside sepl_18/semo_18,
-    so they answer on Moshier. The leak window is roughly 1800-01-02..1801-06-30
-    at the low end and 2399-12-28..2400-01-09 at the high end; the interior of
-    the span is clean (measured 0/344 at 2026-05-26, 0/2728 at 2399-12-01).
 
-    That is an ENGINE defect at the data edges, not a schema one — this PR
-    shrinks the exposure enormously (2400-06-01 went from 200 with 1450/6353
-    Moshier to a 422) but does not close it. Reported upward as a follow-up.
+def _in_span_fallback_during(endpoint: str, body: dict) -> tuple[int, int, int]:
+    """(in_span_fallback, moshier, total) over every swe.calc_ut of a request.
 
-    This test exists so the residual cannot widen unnoticed: it asserts the
-    INTERIOR is clean. It deliberately does not assert the edges are clean,
-    because they are not, and a test claiming otherwise would be false.
+    ``in_span_fallback`` is the count that means "accuracy was lost": a call at a
+    Julian Day the shipped files DO cover, which nonetheless answered from the
+    Moshier engine. A Moshier answer outside the files is not a defect; there is
+    nothing else to answer with.
     """
-    interior = "2399-12-01"
-    moshier, total = _moshier_calls_during("/v1/muhurat", _muhurat(interior, interior))
-    assert moshier == 0, (
-        f"a muhurat scan at {interior} — well inside the span — now answers "
-        f"{moshier}/{total} calls on MOSHIER. The eclipse-finder edge leak has "
-        "widened into the interior of the served range; re-measure it."
+    records: list[tuple[float, int]] = []
+    lock = threading.Lock()
+    real_calc_ut = swe.calc_ut
+
+    def spy(jd, planet, flags, *args, **kwargs):
+        values, retflag = real_calc_ut(jd, planet, flags, *args, **kwargs)
+        with lock:
+            records.append((jd, retflag))
+        return values, retflag
+
+    swe.calc_ut = spy
+    try:
+        response = client.post(endpoint, json=body)
+    finally:
+        swe.calc_ut = real_calc_ut
+
+    assert response.status_code == 200, (
+        f"the probe request itself failed: {response.status_code} {response.text[:300]}"
+    )
+    with lock:
+        seen = list(records)
+    assert seen, "no swe.calc_ut calls were observed — the spy did not take effect"
+    moshier = [(jd, rf) for jd, rf in seen if rf & swe.FLG_MOSEPH]
+    in_span = [jd for jd, _rf in moshier if _FILES_FIRST_JD <= jd <= _FILES_LAST_JD]
+    return len(in_span), len(moshier), len(seen)
+
+
+def test_the_interior_of_the_span_loses_no_accuracy_to_the_fallback(
+    swiss_ephemeris: int,
+) -> None:
+    """Inside the served range, nothing answers from the fallback at all.
+
+    The predecessor asserted this for ONE mid-span day. That is too weak in two
+    ways, and both were measured before being fixed here: an out-of-range search
+    can leave the engine degraded for the NEXT day of the same scan (so a range
+    scan is a different question from a single day), and the local-day boundary
+    moves with the timezone (so one offset is not a measurement of the field).
+    """
+    failures: list[str] = []
+    cases = [
+        ("single day", "2399-12-01", "2399-12-01"),
+        ("10-day range", "2399-12-01", "2399-12-10"),
+        ("10-day range, modern", "2026-05-20", "2026-05-29"),
+    ]
+    for label, start, end in cases:
+        for tz in _TZ_CORNERS:
+            body = _muhurat(start, end, timezone_offset_hours=tz)
+            in_span, moshier, total = _in_span_fallback_during("/v1/muhurat", body)
+            if moshier:
+                failures.append(
+                    f"{label} {start}..{end} tz={tz:+g}: {moshier}/{total} calls on "
+                    f"MOSHIER ({in_span} of them at a JD the files DO cover)"
+                )
+    assert not failures, (
+        "a muhurat scan well inside the served span now answers on the Moshier "
+        "fallback:\n" + "\n".join(f"  - {f}" for f in failures)
+        + "\n\nThe edge residual has widened into the interior of the range. "
+        "Re-measure it; do not relax this test."
+    )
+
+
+def test_the_edge_residual_stays_at_the_edge(swiss_ephemeris: int) -> None:
+    """The known high-edge residual must not creep further into the range.
+
+    This is the falsifiable half of the documentation above. The earliest
+    scanned day measured losing ANY in-span accuracy is 2399-12-24 at tz=-12 —
+    sixteen days below MAX_EPHEMERIS_DATE. This asserts a scanned day a clear
+    month below the bound is still clean at every timezone corner, so the
+    residual cannot grow by weeks without reddening something.
+
+    It deliberately does NOT assert the final days are clean, because they are
+    not, and a test claiming otherwise would be false.
+    """
+    failures: list[str] = []
+    for days_below in (30, 60, 180):
+        day = (MAX_EPHEMERIS_DATE - datetime.timedelta(days=days_below)).isoformat()
+        for tz in _TZ_CORNERS:
+            body = _muhurat(day, day, timezone_offset_hours=tz)
+            in_span, moshier, total = _in_span_fallback_during("/v1/muhurat", body)
+            if in_span:
+                failures.append(
+                    f"{day} (MAX-{days_below}d) tz={tz:+g}: {in_span} of "
+                    f"{moshier}/{total} Moshier calls were at a JD INSIDE the "
+                    "shipped files"
+                )
+    assert not failures, (
+        "a muhurat scan a full month or more below MAX_EPHEMERIS_DATE lost "
+        "accuracy to the fallback on a Julian Day the files DO cover:\n"
+        + "\n".join(f"  - {f}" for f in failures)
+        + "\n\nThe end-of-range residual has spread. Re-measure where it starts "
+        "before adjusting this bound."
     )

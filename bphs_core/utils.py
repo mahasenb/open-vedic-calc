@@ -844,6 +844,17 @@ EPHE_PATH = os.path.join(os.path.dirname(__file__), "../data/ephe")
 _THREAD_EPHEMERIS_STATE = threading.local()
 
 
+def _apply_ephemeris_state() -> None:
+    """Point swisseph at the shipped data and select the Lahiri ayanamsa.
+
+    One definition of "the state this package computes in", so the once-per-thread
+    initialiser and the mid-computation restore below cannot drift apart.
+    """
+    swe.set_ephe_path(EPHE_PATH)
+    # Initialize pyjhora ayanamsa mode
+    drik.set_ayanamsa_mode('LAHIRI')
+
+
 def _ensure_thread_ephemeris_state() -> None:
     """Apply the ephemeris path + Lahiri ayanamsa to the CALLING thread, once.
 
@@ -852,10 +863,33 @@ def _ensure_thread_ephemeris_state() -> None:
     """
     if getattr(_THREAD_EPHEMERIS_STATE, "initialised", False):
         return
-    swe.set_ephe_path(EPHE_PATH)
-    # Initialize pyjhora ayanamsa mode
-    drik.set_ayanamsa_mode('LAHIRI')
+    _apply_ephemeris_state()
     _THREAD_EPHEMERIS_STATE.initialised = True
+
+
+def restore_ephemeris_state() -> None:
+    """Re-apply the ephemeris state after a deliberate read PAST the data files.
+
+    Reading outside the shipped span does not merely get answered from the
+    Moshier fallback for that one Julian Day — swisseph KEEPS the fallback, so a
+    subsequent lookup at an IN-span JD silently answers analytically too.
+    Measured on a fresh process at the scanned day's own noon::
+
+        probe Moon at 2400-01-09       -> SWISS   (retflag 65602)
+        read Moon at 2400-01-29        -> MOSHIER (retflag 65604)   # past the files
+        probe Moon at 2400-01-09 again -> MOSHIER (retflag 65604)   # still in span!
+
+    Re-applying the path clears it (the third probe returns 65602 again). That
+    matters because ``_ensure_thread_ephemeris_state`` deliberately caches
+    "initialised" per thread and so will NOT re-apply anything: nothing else in
+    this package restores the engine once a wide search has knocked it over.
+
+    Call this from any limb that searches OUTSIDE the day it was asked about —
+    the eclipse finders are the measured case. It costs one ``swe.set_ephe_path``
+    (~82 µs, against ~0.32 µs for a ``swe.calc_ut``), so it belongs at
+    once-per-limb granularity and never inside a position loop.
+    """
+    _apply_ephemeris_state()
 
 
 # Configure the importing thread eagerly, so a direct ``swe.*`` call made
