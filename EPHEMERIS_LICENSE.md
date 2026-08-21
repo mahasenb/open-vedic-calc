@@ -36,8 +36,9 @@ The files land in `data/ephe/` (git-ignored, and baked into the images) and are:
 `bphs_core.utils.probe_ephemeris_source()` at one-day steps, the last day the
 seven visible grahas answer from these files is **2400-01-10**; from 2400-01-11
 swisseph silently falls back to its built-in Moshier ephemeris and still returns
-a full, plausible result. The served birth-date range is bounded to the measured
-span rather than the label — see `MIN_EPHEMERIS_DATE` / `MAX_EPHEMERIS_DATE` in
+a full, plausible result. The served date range — for **every** date field a
+caller can send, not only `birth_date` — is bounded to the measured span rather
+than the label: see `MIN_EPHEMERIS_DATE` / `MAX_EPHEMERIS_DATE` in
 `app/schemas.py`, which additionally hold a day of margin at each end because a
 single local date spans UTC instants a day either side once
 `timezone_offset_hours` (\[-12, +14]) is applied.
