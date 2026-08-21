@@ -8,6 +8,12 @@ name: Boundary gate
 on:
   push:
   pull_request:
+    # `edited` is NOT in the default set (opened, synchronize, reopened), and
+    # its absence would leave a hole in the pr-text job below: a PR could be
+    # opened clean and the leak edited in afterwards, with the check still
+    # showing the green it earned on the original text. Title and body are
+    # editable forever, so the scan has to re-run when they change.
+    types: [opened, reopened, synchronize, edited]
 
 # Least-privilege GITHUB_TOKEN. With no explicit block a job inherits the
 # repository default token scope, which is read across EVERY scope (actions,
@@ -42,3 +48,38 @@ jobs:
         # and is absent entirely on non-push events (e.g. pull_request) — the
         # script falls back to scanning just HEAD's message in both cases.
         run: python ci/check_no_proprietary_refs.py "${{ github.event.before }}..${{ github.sha }}"
+
+  pr-text:
+    name: No proprietary references in PR text
+    # The boundary job above scans tracked files and commit messages. A pull
+    # request's TITLE and BODY are neither — they live only in GitHub's
+    # database and are editable after the fact — yet a PR page is as public as
+    # the code. This job is the only thing that reads them.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prove the detector still discriminates
+        # FIRST, deliberately. A detector that has stopped matching must stop
+        # the job rather than certify the PR text green — the same fail-closed
+        # ordering ci/check_pytest_collection.py's self-test uses.
+        run: python ci/check_pr_text.py --self-test
+      - name: Check PR title and body
+        env:
+          # PR text reaches the process through `env:`, NEVER interpolated into
+          # the `run:` body. A `${{ }}` expression is textual substitution
+          # performed before the shell parses the command, so a title carrying
+          # shell metacharacters would execute — and anyone can open a pull
+          # request against a public repository. Pinned by
+          # ci/tests/test_pr_text_check.py::test_pr_text_is_never_interpolated_into_a_run_body
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          # Forwarded as FACTS; the policy decision about whether the secret
+          # should exist is made in Python, where it is testable.
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          # Absent on forks and on Dependabot runs, by GitHub's design. The
+          # checker hard-fails when it should be present and degrades loudly
+          # when GitHub withholds it; see that script's module docstring.
+          PROPRIETARY_REF_TOKENS: ${{ secrets.PROPRIETARY_REF_TOKENS }}
+        run: python ci/check_pr_text.py
