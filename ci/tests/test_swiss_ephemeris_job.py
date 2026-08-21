@@ -172,6 +172,49 @@ def _runs(job: dict) -> list[str]:
     return [str(step["run"]) for step in _steps(job) if "run" in step]
 
 
+def _join_shell_continuations(run: str) -> list[str]:
+    """Split a ``run:`` body into LOGICAL lines, joining backslash-continuations.
+
+    A long pytest invocation is very often written across several physical lines
+    with a trailing backslash, and a shell reads those as one command. Tokenising
+    them line-by-line is wrong twice over: ``shlex.split`` RAISES on a line ending
+    in a lone backslash (``ValueError: No escaped character``), which ``_commands``
+    swallows as "opaque line, skip it", and the continuation lines that follow are
+    then read as commands in their own right.
+
+    Measured, on the legitimate form this guard is supposed to accept::
+
+        uv run --frozen python -m pytest tests/test_swiss_ephemeris.py \
+          tests/test_independent_reference_corpus.py -q
+
+    every consumer of ``_commands`` broke at once — ``_pytest_targets`` returned
+    ``[]``, so ``_job_reaches`` reported the corpus module unreachable and the
+    reachability guard REDDED on a correctly-wired workflow. Fail-closed, yes, but a
+    guard that reds on legitimate input is a guard the next person to hit it weakens
+    or deletes, which is how a fail-closed false positive turns into a fail-open real
+    one. (PR #65 review, non-blocking item 3.)
+
+    Only an ODD number of trailing backslashes continues a line: a trailing ``\\\\``
+    is an escaped backslash — a real final token, not a continuation.
+    """
+    logical: list[str] = []
+    pending = ""
+    for physical in run.splitlines():
+        line = physical.rstrip("\r")
+        trailing_backslashes = len(line) - len(line.rstrip("\\"))
+        if trailing_backslashes % 2 == 1:
+            pending += line[:-1]
+            continue
+        logical.append(pending + line)
+        pending = ""
+    if pending:
+        # A continuation with nothing after it (the body ended). Keep what was
+        # accumulated rather than dropping the command entirely — dropping it is
+        # the very failure mode this function exists to remove.
+        logical.append(pending)
+    return logical
+
+
 def _commands(run: str) -> list[list[str]]:
     """Tokenise a ``run:`` body into individual shell commands.
 
@@ -181,9 +224,13 @@ def _commands(run: str) -> list[list[str]]:
     puts the words in argv positions, so a quoted string collapses to ONE token and
     can no longer masquerade as a command. Commands are split on the shell operators
     that start a new one.
+
+    Line continuations are joined first (see ``_join_shell_continuations``), so a
+    command written across several physical lines is tokenised as the single command
+    a shell would run.
     """
     commands: list[list[str]] = []
-    for line in run.splitlines():
+    for line in _join_shell_continuations(run):
         try:
             tokens = shlex.split(line, comments=True)
         except ValueError:
@@ -705,6 +752,56 @@ jobs:
     # `uv sync --frozen` must be a consecutive argv sequence, not a substring.
     assert _has_token_sequence("uv sync --frozen --extra dev", "uv", "sync", "--frozen")
     assert not _has_token_sequence('echo "uv sync --frozen"', "uv", "sync", "--frozen")
+
+
+def test_commands_joins_shell_line_continuations() -> None:
+    """A backslash-continued command is ONE command, exactly as a shell reads it.
+
+    Without this, `shlex.split` raises "No escaped character" on the line ending in
+    a lone backslash, `_commands` treats that line as opaque and drops it, and the
+    continuation lines that follow are parsed as commands in their own right. Every
+    consumer of `_commands` is wrong at once: `_invokes` stops finding the fetcher,
+    `_has_token_sequence` stops finding `uv sync --frozen`, and `_pytest_targets`
+    returns [] so the reachability guard reds on a correctly-wired workflow.
+    """
+    continued = (
+        "uv run --frozen python -m pytest tests/test_swiss_ephemeris.py \\\n"
+        "  tests/test_independent_reference_corpus.py -q"
+    )
+    assert _commands(continued) == [
+        [
+            "uv", "run", "--frozen", "python", "-m", "pytest",
+            "tests/test_swiss_ephemeris.py",
+            "tests/test_independent_reference_corpus.py",
+            "-q",
+        ]
+    ]
+    assert _pytest_targets(continued) == [
+        "tests/test_swiss_ephemeris.py",
+        "tests/test_independent_reference_corpus.py",
+    ]
+
+    # The other consumers of `_commands`, on continued bodies of their own.
+    assert _invokes("python ci/fetch_swiss_ephemeris.py \\\n  --self-test", "python",
+                    _FETCHER, "--self-test")
+    assert _has_token_sequence("uv sync \\\n  --frozen --extra dev", "uv", "sync", "--frozen")
+
+    # A narrowing flag on the continuation line must still be found.
+    assert _deselecting_flags(
+        "pytest tests/ -q \\\n  --ignore=tests/test_independent_reference_corpus.py"
+    ) == ["--ignore"]
+
+    # An EVEN number of trailing backslashes is an escaped backslash, NOT a
+    # continuation: the two lines stay two separate commands.
+    not_continued = 'echo "a" \\\\\npytest tests/ -q'
+    assert len(_commands(not_continued)) == 2, _commands(not_continued)
+    assert _pytest_targets(not_continued) == ["tests/"]
+
+    # A dangling continuation at the very end must not swallow the command.
+    assert _commands("pytest tests/ -q \\\n") == [["pytest", "tests/", "-q"]]
+
+    # And joining must not fuse two genuinely separate lines.
+    assert len(_commands("pytest tests/ -q\npython ci/fetch_swiss_ephemeris.py")) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1716,7 +1813,13 @@ jobs:
         run: uv run --frozen python -m pytest tests/ -q -k "not corpus"
 """
 
-_FIXTURE_TARGET_EXPLICIT_FILE = """
+# NOTE THE `r` PREFIX. Without it the Python string parser consumes the
+# backslash-newline itself, so this fixture collapsed to a ONE-LINE command and
+# never once exercised the continued form it appears to describe (PR #65 review,
+# non-blocking item 3). As a raw string the backslash survives into the YAML, the
+# `run:` body really is two physical lines, and `_commands` has to handle the shell
+# continuation the way a shell does.
+_FIXTURE_TARGET_EXPLICIT_FILE = r"""
 jobs:
   swiss-ephemeris:
     steps:
@@ -1726,6 +1829,21 @@ jobs:
         run: |
           uv run --frozen python -m pytest tests/test_swiss_ephemeris.py \
             tests/test_independent_reference_corpus.py -q
+"""
+
+# The same continued shape, but NARROWED on the continuation line. Joining
+# continuations must not create a blind spot: a `--ignore` that happens to sit
+# after the line break has to be found exactly like one on the first line.
+_FIXTURE_TARGET_CONTINUED_BUT_IGNORES_CORPUS = r"""
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: |
+          uv run --frozen python -m pytest tests/ -q \
+            --ignore=tests/test_independent_reference_corpus.py
 """
 
 _FIXTURE_TARGET_ONLY_ECHOED = """
@@ -1761,7 +1879,15 @@ def test_reachability_parser_discriminates() -> None:
     # -k deselection.
     assert not _job_reaches(job_of(_FIXTURE_TARGET_DESELECTED_BY_K), corpus)
     # Naming the file explicitly is legitimate coverage, so it must NOT false-reject.
+    # This fixture is a RAW string, so its `run:` body really is two physical lines
+    # joined by a shell backslash-continuation — the form a long pytest invocation
+    # is actually written in. Before `_commands` joined continuations, shlex raised
+    # "No escaped character" on the first line, `_commands` swallowed that as an
+    # opaque line, and the whole command parsed to ZERO targets: a correctly-wired
+    # workflow REDDED this guard.
     assert _job_reaches(job_of(_FIXTURE_TARGET_EXPLICIT_FILE), corpus)
+    # ...and joining must not hide a narrowing flag that sits after the line break.
+    assert not _job_reaches(job_of(_FIXTURE_TARGET_CONTINUED_BUT_IGNORES_CORPUS), corpus)
     # A narrowed real command is not rescued by the full command appearing in an echo.
     assert not _job_reaches(job_of(_FIXTURE_TARGET_ONLY_ECHOED), corpus)
 
