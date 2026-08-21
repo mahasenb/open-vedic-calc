@@ -37,11 +37,37 @@ WHAT IT REFUSES
    without running them (``--collect-only``, ``--co``). A non-narrowing ``addopts``
    (``-q``, ``--strict-markers``, ...) is perfectly legitimate and is not flagged —
    this is about what removes assertions from a run, not about whether addopts is used.
-2. The presence of any OTHER file pytest reads ini options from. pytest honours
-   ``pytest.ini``, ``tox.ini`` and ``setup.cfg`` as well; only ``pyproject.toml``
-   exists here and only it is parsed, so a new one is refused rather than silently
-   uncovered. Extending this checker to parse it is the deliberate act that clears
-   the refusal.
+2. The presence of any OTHER file pytest reads ini options from, ANYWHERE IN THE
+   TREE. pytest honours ``pytest.ini``, ``.pytest.ini``, ``tox.ini`` and
+   ``setup.cfg`` as well as ``pyproject.toml``. Only the repo-root
+   ``pyproject.toml`` exists here and only it is parsed, so any of the other four
+   is **refused on sight** — not parsed, not judged for narrowing-ness, refused.
+   Extending this checker to parse one is the deliberate act that clears the
+   refusal, and that act lands the day one is legitimately added.
+
+   THE ROOT IS NOT THE ONLY PLACE THEY COUNT, and assuming it was is a defect this
+   check shipped with. pytest resolves its inifile by walking UP from the common
+   ancestor of its arguments, so a config file sitting in a directory the suite is
+   invoked against WINS over the root ``pyproject.toml``. Measured on this repo
+   with one file added::
+
+       tests/pytest.ini  ==  [pytest]\\naddopts = --collect-only
+       python ci/check_pytest_collection.py
+           -> "OK: pytest configuration does not narrow collection.", exit 0
+       REQUIRE_SWISS_EPHEMERIS=1 python -m pytest tests/ -q
+           -> "937 tests collected", 0 executed, exit 0
+
+   The root-only scan reported clean while every assertion in the suite had been
+   removed — the same fail-open the ``--collect-only`` case above describes, in a
+   directory nothing looked at. ``tests/pyproject.toml`` carrying
+   ``[tool.pytest.ini_options] addopts = "--collect-only"`` did the same. The scan
+   now covers the whole working tree, scoped by ``git ls-files --cached --others
+   --exclude-standard`` so the exclusions come from ``.gitignore`` rather than from
+   a hand-kept list here (``.venv/Lib/site-packages`` alone carries dozens of
+   third-party ``setup.cfg``/``tox.ini`` files, every one a false refusal under a
+   naive walk). A NESTED ``pyproject.toml`` is judged on content rather than on
+   sight, because a subpackage manifest is a legitimate thing to add and the other
+   four are not.
 
 3. A narrowing ``PYTEST_ADDOPTS`` in **this process's own environment**. A
    workflow- or job-level ``env:`` block lands here too, so an injection that
@@ -94,9 +120,10 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import subprocess
 import sys
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:  # Python >= 3.11 — the interpreter this repo pins in .python-version
     import tomllib
@@ -131,8 +158,20 @@ COLLECTION_ONLY_FLAGS = ("--collect-only", "--co")
 NARROWING_FLAGS = VALUE_TAKING_DESELECT_FLAGS + COLLECTION_ONLY_FLAGS
 
 # Files pytest reads ini options (and therefore `addopts`) from, other than
-# pyproject.toml. None exists in this repo; any that appears is refused.
+# pyproject.toml. None exists in this repo; any that appears is refused ON SIGHT,
+# wherever in the tree it appears — see unparsed_config_files().
 PYTEST_CONFIG_FILENAMES = ("pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg")
+
+# The one ini source this checker DOES parse — but only the repo-root copy of it.
+# A second one deeper in the tree is a separate, unparsed source (see below).
+PYPROJECT_FILENAME = "pyproject.toml"
+
+# Directory names never scanned, used ONLY by the fallback walk below. Git's own
+# ignore rules are the source of truth whenever git can answer; this list exists
+# so the checker still works in a tree that is not a git checkout (every tmp-tree
+# test in ci/tests/test_pytest_collection_check.py is one). Dot-directories are
+# skipped wholesale, which covers .git/.venv/.pytest_cache/.mypy_cache.
+_UNSCANNED_DIRECTORY_NAMES = frozenset({"venv", "node_modules", "__pycache__", "build", "dist"})
 
 
 def addopts_tokens(document: dict) -> list[str]:
@@ -173,9 +212,125 @@ def narrowing_addopts(tokens: list[str]) -> list[str]:
     return found
 
 
+def is_unparsed_config_path(relative: str) -> bool:
+    """True when a repo-relative path is a pytest ini source this checker does not parse.
+
+    Pure, path-only, and self-tested — the classification a whole-tree scan turns
+    on, kept separate from the scanning so ``--self-test`` can discriminate it
+    without a filesystem.
+    """
+    parts = PurePosixPath(str(relative).replace("\\", "/")).parts
+    if not parts:
+        return False
+    name = parts[-1]
+    if name in PYTEST_CONFIG_FILENAMES:
+        return True
+    # Only the ROOT pyproject.toml is parsed (addopts_tokens reads it). A nested
+    # one is a different file that pytest will honour as its inifile when it
+    # declares [tool.pytest.ini_options], and nothing here parses it.
+    return name == PYPROJECT_FILENAME and len(parts) > 1
+
+
+def _declares_pytest_ini_options(path: Path) -> bool:
+    """Whether a pyproject.toml actually declares ``[tool.pytest.ini_options]``.
+
+    The four filenames above are refused on sight because none has a legitimate
+    reason to exist in this repo. A SECOND pyproject.toml might — a subpackage
+    manifest is an ordinary thing — so this one is judged on content instead. A
+    check that reds on something legitimate is a check people learn to route
+    around, which is the same argument the PYTEST_ADDOPTS section makes for
+    tolerating `-q` in a contributor's shell.
+
+    Unreadable or unparseable counts as declaring: a manifest nothing could open
+    is exactly where a declaration would hide.
+    """
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return True
+    pytest_table = ((document.get("tool") or {}).get("pytest") or {})
+    return isinstance(pytest_table, dict) and "ini_options" in pytest_table
+
+
+def _git_working_tree_paths(root: Path) -> list[str] | None:
+    """Every path git considers part of the working tree, or None if git cannot answer.
+
+    SCOPE FROM THE SOURCE OF TRUTH, NOT A WALK. `--cached --others
+    --exclude-standard` is tracked files plus untracked-but-not-ignored ones, so
+    the exclusions come from .gitignore itself rather than from a list here that
+    could be wrong. That matters concretely: `.venv/Lib/site-packages` carries
+    dozens of third-party `setup.cfg` and `tox.ini` files, and every one of them
+    would be a false refusal under a naive walk.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return [
+        line.strip().replace("\\", "/")
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _walked_paths(root: Path) -> list[str]:
+    """Fallback enumeration for a tree that is not a git checkout."""
+    paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not name.startswith(".")
+            and name not in _UNSCANNED_DIRECTORY_NAMES
+            and not name.endswith(".egg-info")
+        ]
+        for filename in filenames:
+            paths.append((Path(dirpath) / filename).relative_to(root).as_posix())
+    return paths
+
+
 def unparsed_config_files(root: Path) -> list[str]:
-    """Config files pytest would honour that this checker does not parse."""
-    return [name for name in PYTEST_CONFIG_FILENAMES if (root / name).is_file()]
+    """Config files pytest would honour that this checker does not parse.
+
+    THE WHOLE TREE, NOT JUST THE ROOT. pytest resolves its inifile by walking UP
+    from the common ancestor of its arguments, so a config file in a directory
+    the suite is invoked against wins over the root pyproject.toml. Measured on
+    this repo before this scan existed, with one file added:
+
+        tests/pytest.ini  ==  [pytest]\\naddopts = --collect-only
+        python ci/check_pytest_collection.py
+            -> "OK: pytest configuration does not narrow collection.", exit 0
+        REQUIRE_SWISS_EPHEMERIS=1 python -m pytest tests/ -q
+            -> "937 tests collected", 0 executed, exit 0
+
+    and the same with `tests/pyproject.toml` carrying
+    `[tool.pytest.ini_options] addopts = "--collect-only"`. Both are the exact
+    fail-open this checker exists to close; the root-only scan reported clean
+    about both, because `tests/` is not the root.
+    """
+    candidates = _git_working_tree_paths(root)
+    if candidates is None:
+        candidates = _walked_paths(root)
+
+    found: list[str] = []
+    for relative in candidates:
+        if not is_unparsed_config_path(relative):
+            continue
+        if PurePosixPath(relative).name == PYPROJECT_FILENAME and not _declares_pytest_ini_options(
+            root / relative
+        ):
+            continue
+        found.append(relative)
+    return sorted(set(found))
 
 
 # ---------------------------------------------------------------------------
@@ -449,10 +604,19 @@ def problems(root: Path, environ: Mapping[str, str] | None = None) -> list[str]:
 
     for name in unparsed_config_files(root):
         found.append(
-            f"{name} exists, and pytest reads `addopts` from it. This checker only "
-            f"parses pyproject.toml, so it would report clean while a narrowing "
-            f"addopts sat in a file it never opens. Extend addopts_tokens() and "
-            f"PYTEST_CONFIG_FILENAMES to parse {name}, deliberately."
+            f"{name} exists, and pytest reads `addopts` from it. Only the ROOT "
+            f"pyproject.toml is parsed here, so this check would report clean "
+            f"while a narrowing addopts sat in a file nothing opens.\n"
+            f"  pytest resolves its inifile by walking UP from the common ancestor "
+            f"of its arguments, so a config file inside a directory the suite is "
+            f"invoked against (tests/, ci/tests/) WINS over the root pyproject.toml "
+            f"— it does not merely coexist with it.\n"
+            f"  Measured: `tests/pytest.ini` holding `addopts = --collect-only` left "
+            f"this checker exiting 0 \"OK\" while `pytest tests/ -q` collected 937 "
+            f"tests and executed none, also exiting 0.\n"
+            f"  If {name} is genuinely needed, extend addopts_tokens() and "
+            f"is_unparsed_config_path() to parse it — deliberately, in a change that "
+            f"says so."
         )
 
     return found
@@ -510,6 +674,34 @@ def _self_test() -> int:
         'echo "REQUIRE_SWISS_EPHEMERIS=1" >> "$GITHUB_ENV"',
     )
 
+    # The whole-tree config-file arm. Path classification only — the scan around
+    # it needs a filesystem, but the decision it turns on does not, and neutering
+    # this must red here rather than only in ci/tests/.
+    config_paths_refused = (
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "tests/pytest.ini",
+        "ci/tests/tox.ini",
+        "a/b/c/setup.cfg",
+        "tests/.pytest.ini",
+        # A nested pyproject.toml is a candidate; content decides (see
+        # _declares_pytest_ini_options), and the path arm must surface it.
+        "tests/pyproject.toml",
+    )
+    config_paths_clean = (
+        # The ROOT pyproject.toml is the one this checker parses.
+        "pyproject.toml",
+        "README.md",
+        "tests/conftest.py",
+        "ci/check_pytest_collection.py",
+        "tests/goldens/swiss_ephemeris_goldens.json",
+        # Names that merely CONTAIN a config filename are not config files.
+        "docs/pytest.ini.md",
+        "tests/setup.cfg.bak",
+    )
+
     failures: list[str] = []
     for text in narrowing_fixtures:
         if not narrowing_addopts(addopts_tokens(tomllib.loads(text))):
@@ -532,6 +724,13 @@ def _self_test() -> int:
         if run_body_names_addopts(run):
             failures.append(f"FALSELY flagged as naming {ADDOPTS_ENV}: {run!r}")
 
+    for relative in config_paths_refused:
+        if not is_unparsed_config_path(relative):
+            failures.append(f"NOT DETECTED as an unparsed pytest config path: {relative!r}")
+    for relative in config_paths_clean:
+        if is_unparsed_config_path(relative):
+            failures.append(f"FALSELY flagged as an unparsed pytest config path: {relative!r}")
+
     if failures:
         print("self-test FAILED:", file=sys.stderr)
         for failure in failures:
@@ -541,12 +740,14 @@ def _self_test() -> int:
         len(narrowing_fixtures) + len(clean_fixtures)
         + len(env_narrowing) + len(env_clean)
         + len(inline_declaring) + len(inline_clean)
+        + len(config_paths_refused) + len(config_paths_clean)
     )
     print(
-        f"self-test OK ({total} fixtures discriminated across three arms: "
+        f"self-test OK ({total} fixtures discriminated across four arms: "
         f"{len(narrowing_fixtures)}+{len(clean_fixtures)} pyproject addopts, "
         f"{len(env_narrowing)}+{len(env_clean)} runtime {ADDOPTS_ENV}, "
-        f"{len(inline_declaring)}+{len(inline_clean)} run-body mention)"
+        f"{len(inline_declaring)}+{len(inline_clean)} run-body mention, "
+        f"{len(config_paths_refused)}+{len(config_paths_clean)} unparsed config path)"
     )
     return 0
 

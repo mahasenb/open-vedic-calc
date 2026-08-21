@@ -2305,15 +2305,23 @@ def test_pytest_config_does_not_narrow_collection() -> None:
     )
 
     # FAIL CLOSED on a config file neither this guard nor the standalone checker
-    # parses. pytest reads ini options from several files; only pyproject.toml
-    # exists here. If another appears it must be covered deliberately rather than
-    # quietly left out of a check that claims to cover the configuration.
+    # parses. pytest reads ini options from several files; only the repo-root
+    # pyproject.toml exists here. If another appears it must be covered
+    # deliberately rather than quietly left out of a check that claims to cover
+    # the configuration.
+    #
+    # ANYWHERE IN THE TREE, not just the root: pytest resolves its inifile by
+    # walking UP from the common ancestor of its arguments, so `tests/pytest.ini`
+    # wins over the root pyproject.toml for `pytest tests/`. Measured before that
+    # scan existed — the checker exited 0 "OK" while `pytest tests/ -q` collected
+    # 937 tests and executed none.
     unparsed = _COLLECTION_CHECKER.unparsed_config_files(_REPO_ROOT)
     assert not unparsed, (
-        f"{unparsed} exist(s) in the repo root. pytest reads `addopts` from those "
-        "files too, and only pyproject.toml is parsed — so this would report green "
-        "while a narrowing addopts sat somewhere nothing looks. Extend "
-        "ci/check_pytest_collection.py to parse them."
+        f"{unparsed} exist(s) in this repository. pytest reads `addopts` from those "
+        "files too, and only the ROOT pyproject.toml is parsed — so this would "
+        "report green while a narrowing addopts sat somewhere nothing looks, and a "
+        "copy inside tests/ or ci/tests/ would take precedence over the root file "
+        "outright. Extend ci/check_pytest_collection.py to parse them."
     )
 
 

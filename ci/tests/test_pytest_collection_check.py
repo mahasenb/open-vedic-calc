@@ -120,10 +120,111 @@ def test_a_config_file_this_checker_does_not_parse_is_refused(
     assert name in found[0]
 
 
+@pytest.mark.parametrize("name", ("pytest.ini", "tox.ini", "setup.cfg", ".pytest.ini"))
+@pytest.mark.parametrize("directory", ("tests", "ci/tests"))
+def test_a_config_file_in_a_SUBDIRECTORY_is_refused(
+    tmp_path: pathlib.Path, name: str, directory: str
+) -> None:
+    """The root is not the only place pytest reads a config from.
+
+    MEASURED ON THE REAL REPO, before this arm existed. pytest resolves its
+    inifile by walking UP from the common ancestor of its arguments, so a config
+    dropped in `tests/` wins over the root pyproject.toml for `pytest tests/`:
+
+        tests/pytest.ini  ==  [pytest]\\naddopts = --collect-only
+        python ci/check_pytest_collection.py
+            -> "OK: pytest configuration does not narrow collection.", exit 0
+        REQUIRE_SWISS_EPHEMERIS=1 python -m pytest tests/ -q
+            -> "937 tests collected", 0 executed, exit 0
+
+    That is the exact fail-open this checker exists to close, one directory
+    down, and the root-only scan reported clean about it.
+    """
+    checker = _load_checker()
+    root = _tree(tmp_path)
+    target = root / directory
+    target.mkdir(parents=True, exist_ok=True)
+    (target / name).write_text("[pytest]\naddopts = --collect-only\n", encoding="utf-8")
+
+    found = checker.problems(root, environ={})
+    assert found, f"{directory}/{name} was ignored entirely"
+    assert any(name in problem for problem in found), (
+        f"{directory}/{name} was not named in the refusal: {found}"
+    )
+
+
+def test_a_nested_pyproject_declaring_pytest_options_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A second pyproject.toml is an ini source too — and only the root one is parsed.
+
+    Measured on the real repo the same way: `tests/pyproject.toml` carrying
+    `[tool.pytest.ini_options] addopts = "--collect-only"` left the checker
+    saying "OK" while `pytest tests/test_coord_bounds.py` collected 43 and
+    executed none.
+    """
+    checker = _load_checker()
+    root = _tree(tmp_path)
+    (root / "tests").mkdir()
+    (root / "tests" / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "--collect-only"\n', encoding="utf-8"
+    )
+
+    found = checker.problems(root, environ={})
+    assert found, "a nested pyproject.toml declaring pytest ini options was ignored"
+    assert any("pyproject.toml" in problem for problem in found)
+
+
+def test_a_nested_pyproject_without_pytest_options_is_not_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A subpackage manifest is legitimate and must not red.
+
+    Positive control, and the reason the pyproject arm PARSES rather than
+    refusing on sight the way pytest.ini/tox.ini/setup.cfg do: those four have
+    no legitimate reason to exist here, a second project manifest might, and a
+    check that cries wolf is one people learn to route around.
+    """
+    checker = _load_checker()
+    root = _tree(tmp_path)
+    (root / "subpkg").mkdir()
+    (root / "subpkg" / "pyproject.toml").write_text(
+        '[project]\nname = "subpkg"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+
+    assert checker.problems(root, environ={}) == [], (
+        "an ordinary nested project manifest was refused"
+    )
+
+
 def test_the_real_repository_configuration_is_clean() -> None:
     """The check this repo's CI actually performs, performed here too."""
     checker = _load_checker()
     assert checker.problems(_REPO, environ={}) == []
+
+
+def test_the_real_repository_tree_is_scanned_not_just_its_root() -> None:
+    """The clean verdict above must come from a scan that could have found something.
+
+    `test_the_real_repository_configuration_is_clean` passes both before and
+    after this arm exists — an empty result proves nothing about coverage. This
+    plants a config file in the real repo's own `tests/` directory, asserts the
+    refusal fires, and removes it again, so the clean verdict is known to be a
+    measurement rather than a blind spot.
+    """
+    checker = _load_checker()
+    planted = _REPO / "tests" / "pytest.ini"
+    assert not planted.exists(), f"{planted} already exists; refusing to overwrite it"
+    planted.write_text("[pytest]\naddopts = --collect-only\n", encoding="utf-8")
+    try:
+        found = checker.problems(_REPO, environ={})
+    finally:
+        planted.unlink()
+    assert any("pytest.ini" in problem for problem in found), (
+        "a pytest.ini planted in the real repo's tests/ directory was not "
+        f"detected — the repo scan does not reach it. Found: {found}"
+    )
+    assert checker.problems(_REPO, environ={}) == [], "cleanup did not restore the tree"
 
 
 def test_main_exit_codes(monkeypatch, tmp_path: pathlib.Path) -> None:
