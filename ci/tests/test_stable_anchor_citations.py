@@ -123,10 +123,13 @@ NON-VACUITY
 ===========
 
 ``test_the_anchor_inventory_meets_its_floor`` refuses an empty or shrunken
-corpus.  "Every anchor resolves" is vacuously true of zero anchors, and a
-regex that silently stops matching is exactly how a guard dies quietly -- the
-floors below were measured at this convention's introduction and are asserted
-per form, not just in total, so a form going dark cannot hide behind the others.
+corpus.  "Every anchor resolves" is vacuously true of zero anchors, and a regex
+that silently stops matching is exactly how a guard dies quietly.  The floors
+are therefore asserted PER FORM rather than only in total, so one form going
+dark cannot hide behind the others -- and PER CHUNK KIND as well, because the
+corpus feeds only Forms A and D: Forms B and C re-parse ASTs directly, so half
+the corpus can vanish while their counts sit untouched.  That is measured, not
+supposed; the constant block below carries the numbers.
 
 Extend this file, never weaken it.
 """
@@ -137,6 +140,7 @@ import io
 import re
 import subprocess
 import tokenize
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -148,16 +152,34 @@ _SCANNED_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".toml"})
 _HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".toml"})
 
 # ---------------------------------------------------------------------------
-# Non-vacuity floors.  MEASURED at introduction, not guessed -- 96 tracked files
-# scanned into 2384 prose chunks, yielding Form A 23, Form B 7 declared modules
-# / 34 bullet anchors (1 of them a containment pair), Form C 46, Form D 1: 104
-# anchors in total.  That is a DATED measurement, not a standing claim; the live
-# count is printed by the floor test on every run and is the only number to
-# trust.  The floors sit a little below it so ordinary refactoring does not red
-# the guard, and are asserted PER FORM so one form going dark cannot hide
-# behind the others.
+# Non-vacuity floors.  MEASURED at this file's final state, not guessed -- 96
+# tracked files (87 .py, 6 .yml/.toml, 3 .md) scanned into 2393 prose chunks
+# (1454 comment, 936 docstring, 3 markdown), yielding Form A 23, Form B 7
+# declared modules / 34 bullet anchors (1 of them a containment pair), Form C
+# 46, Form D 1: 104 anchors in total.  That is a DATED measurement, not a
+# standing claim; the live counts are printed by the floor test on every run and
+# are the only numbers to trust.  The floors sit a little below the measurement
+# so ordinary refactoring does not red the guard, and are asserted PER FORM so
+# one form going dark cannot hide behind the others.
+#
+# EVERY number above is floored below.  That is deliberate: an unfloored number
+# in this comment would be a hand-typed figure that nothing recounts -- the
+# exact defect class this whole module exists to catch -- and the corpus size
+# was in fact stale here for one review round, having been measured before this
+# file's own docstrings finished growing.
+#
+# The CHUNK floors are per KIND, and they are not decoration.  Measured: making
+# `python_chunks` drop comments while keeping docstrings costs the whole comment
+# half of the corpus -- 59% of it -- and every other floor still passes.  Form A
+# falls only 23 -> 20, clearing its floor of 18; Forms B and C never read the
+# chunk corpus at all (they re-parse ASTs directly); Form D's one citation lives
+# in a docstring and survives.  So the whole guard stays GREEN with every Python
+# comment in the tree unread.  A per-kind floor is the only thing here that sees
+# it.
 # ---------------------------------------------------------------------------
 _MIN_SCANNED_FILES = 80
+_MIN_COMMENT_CHUNKS = 1200
+_MIN_DOCSTRING_CHUNKS = 800
 _MIN_NODE_ID_ANCHORS = 18
 _MIN_DECLARED_MODULES = 6
 _MIN_BULLET_ANCHORS = 28
@@ -721,9 +743,13 @@ def test_the_anchor_inventory_meets_its_floor():
     each turn this whole module green while checking nothing.
     """
     inventory = build_inventory()
+    by_kind = Counter(chunk.kind for chunk in inventory["chunks"])
     counts = {
         "files scanned": len(inventory["scanned"]),
         "prose chunks": len(inventory["chunks"]),
+        "  of which comment": by_kind["comment"],
+        "  of which docstring": by_kind["docstring"],
+        "  of which markdown": by_kind["markdown"],
         "Form A node-id anchors": len(inventory["node_ids"]),
         "Form B declared modules": len(inventory["declarations"]),
         "Form B bullet anchors": len(inventory["bullets"]),
@@ -746,6 +772,30 @@ def test_the_anchor_inventory_meets_its_floor():
         f"only {len(inventory['scanned'])} tracked files were scanned "
         f"(floor {_MIN_SCANNED_FILES}) -- the corpus extractor is broken, not the tree"
     )
+
+    # Per-KIND, because a file can be scanned and still yield no prose. Measured:
+    # dropping comments alone costs 59% of the corpus and every OTHER floor here
+    # still passes, so a total-only floor would not see it.
+    assert by_kind["comment"] >= _MIN_COMMENT_CHUNKS, (
+        f"only {by_kind['comment']} comment chunks (floor {_MIN_COMMENT_CHUNKS}) "
+        f"-- the comment half of the corpus has gone dark, and Forms B and C "
+        f"cannot notice because they re-parse ASTs rather than reading chunks"
+    )
+    assert by_kind["docstring"] >= _MIN_DOCSTRING_CHUNKS, (
+        f"only {by_kind['docstring']} docstring chunks "
+        f"(floor {_MIN_DOCSTRING_CHUNKS}) -- the docstring half of the corpus "
+        f"has gone dark"
+    )
+    # Markdown gets an EQUALITY, not a floor: every tracked .md yields exactly one
+    # chunk, so the two move together under an added or deleted file and diverge
+    # only when the extractor drops one. A floor of 3 against 3 measured files
+    # would red on a legitimate deletion and pass on a silent drop of two.
+    markdown_files = [p for p in inventory["scanned"] if p.endswith(".md")]
+    assert by_kind["markdown"] == len(markdown_files), (
+        f"{by_kind['markdown']} markdown chunks for {len(markdown_files)} tracked "
+        f".md files ({markdown_files}) -- each should yield exactly one"
+    )
+
     assert len(inventory["node_ids"]) >= _MIN_NODE_ID_ANCHORS, (
         f"Form A found {len(inventory['node_ids'])} anchors, floor "
         f"{_MIN_NODE_ID_ANCHORS} -- the node-id form has gone dark"
