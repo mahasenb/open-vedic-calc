@@ -36,12 +36,27 @@ The files land in `data/ephe/` (git-ignored, and baked into the images) and are:
 `bphs_core.utils.probe_ephemeris_source()` at one-day steps, the last day the
 seven visible grahas answer from these files is **2400-01-10**; from 2400-01-11
 swisseph silently falls back to its built-in Moshier ephemeris and still returns
-a full, plausible result. The served date range — for **every** date field a
-caller can send, not only `birth_date` — is bounded to the measured span rather
-than the label: see `MIN_EPHEMERIS_DATE` / `MAX_EPHEMERIS_DATE` in
-`app/schemas.py`, which additionally hold a day of margin at each end because a
-single local date spans UTC instants a day either side once
-`timezone_offset_hours` (\[-12, +14]) is applied.
+a full, plausible result. Every date field a caller can send — not only
+`birth_date` — is therefore bounded to a measured span rather than to the label.
+
+There are **two** such spans, because how much of these files a request touches
+depends on what it asks:
+
+- **Point-lookup fields** (`birth_date`, `at_date`, `from_date` / `to_date`,
+  `reference_date`) take `MIN_EPHEMERIS_DATE` / `MAX_EPHEMERIS_DATE`
+  (`app/schemas.py`) — the measured extent of these files, holding a day of
+  margin at each end because a single local date spans UTC instants a day either
+  side once `timezone_offset_hours` (\[-12, +14]) is applied.
+- **Scanned-day fields** (the `start_date` / `end_date` pairs on the muhurat and
+  lagna-shuddhi endpoints) take the narrower `MIN_SCANNED_DATE` /
+  `MAX_SCANNED_DATE`. Computing one electional day is not one lookup: deciding
+  whether its lunar month is intercalary needs the new moons bracketing it, and
+  the yoga limb searches similarly, so a single scanned day reads up to ~32 days
+  around itself (measured +31.835 d at the furthest). The upper bound is pulled
+  in far enough that the whole of that reach still lands inside these files.
+
+Both spans are measured against the files this manifest pins, never taken from
+the "AD 1800–2400" label; if the pinned data ever moves, re-measure both.
 - `sefstars.txt` — fixed stars (~0.1 MB)
 
 ## Where the bytes actually come from

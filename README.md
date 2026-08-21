@@ -130,8 +130,9 @@ Two caveats worth knowing, both measured:
   a servable request (birth 2390-06-15, `from_date` 2395-01-01), `to_date` at
   2400-01-09, 2450-01-01 and 2500-01-01 all answered 200 with the same 15
   ephemeris calls, the natal chart, though the last runs a century past the
-  span. They are bounded for the crash and for one consistent served span, not
-  because a fallback answer was measured behind them. The cost is that a
+  span. They are bounded for the crash and to keep the point-lookup fields on one
+  consistent span, not because a fallback answer was measured behind them (they
+  drive none). The cost is that a
   late-born chart can no longer request a timeline running past 2400-01-09.
 - Several limbs legitimately look outside the scanned day — the eclipse veto must
   find the *next* eclipse, the Adhika-Maasa check reads the bracketing new moons,
