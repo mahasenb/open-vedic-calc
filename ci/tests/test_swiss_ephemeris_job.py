@@ -2327,6 +2327,163 @@ def test_pytest_config_does_not_narrow_collection() -> None:
 
 _COLLECTION_CHECKER_SCRIPT = "ci/check_pytest_collection.py"
 
+# The events a real change arrives on. A step that is skipped for both of these
+# never runs when it matters, whatever else the workflow says.
+_REAL_CHANGE_EVENTS = ("push", "pull_request")
+
+
+def _workflow_documents() -> list[tuple[Path, dict]]:
+    """Every parsed workflow document, as (path, document) pairs."""
+    documents: list[tuple[Path, dict]] = []
+    for workflow_path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        document = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        if isinstance(document, dict):
+            documents.append((workflow_path, document))
+    return documents
+
+
+def _job_matrix_yields_a_run(job: dict) -> bool:
+    """Whether the job's ``strategy.matrix``, if any, produces at least one run.
+
+    A job whose matrix is empty is DECLARED and never executes — `strategy:
+    {matrix: {include: []}}` is a job that appears in the workflow, appears in
+    this guard's scan, and runs zero times.
+
+    FAILS CLOSED on anything it cannot evaluate: a computed
+    ``matrix: ${{ fromJSON(...) }}``, a non-list axis, or an ``exclude:`` block
+    (whose removals could empty the product, and modelling them exactly means
+    reimplementing GitHub's matrix expansion). STATED BOUND: this repo has no
+    matrix on any job today, so none of those refusals is reachable now; if one
+    is ever added, extending this is the deliberate act that clears it.
+    """
+    strategy = job.get("strategy")
+    if strategy is None:
+        return True
+    if not isinstance(strategy, dict):
+        return False
+    if "matrix" not in strategy:
+        return True
+
+    matrix = strategy["matrix"]
+    if not isinstance(matrix, dict) or "exclude" in matrix:
+        return False
+
+    include = matrix.get("include")
+    include_count = len(include) if isinstance(include, list) else 0
+    axes = {key: value for key, value in matrix.items() if key != "include"}
+    if not axes:
+        return include_count > 0
+
+    product = 1
+    for values in axes.values():
+        if not isinstance(values, list):
+            return False
+        product *= len(values)
+    return product > 0 or include_count > 0
+
+
+def _discards_failure(mapping: dict) -> bool:
+    """Whether ``continue-on-error`` would throw this job's or step's failure away.
+
+    Fails closed on an expression: an unevaluable value is not a proven ``false``.
+    """
+    value = mapping.get("continue-on-error")
+    return value is not None and value is not False and str(value).strip().lower() != "false"
+
+
+def _why_not_enforced(job: dict, step: dict, event_name: str) -> str | None:
+    """Why `step` would not actually enforce anything on `event_name`, or None.
+
+    ONE META-LEVEL UP FROM THE STEP'S OWN `if:` (PR #66 review). Three ways a
+    step that is present in the workflow enforces nothing, and the previous rule
+    checked only the first:
+
+      1. the STEP's `if:` skips it;
+      2. the HOSTING JOB's `if:` or matrix means the job never runs — a step
+         inside a job that does not run does not run, and the step's own `if:`
+         says nothing whatever about that;
+      3. `continue-on-error` at either level, which is worse than not running:
+         the step executes, REFUSES, and the workflow reports success anyway.
+
+    Returns a reason rather than a bool so the assertion can say which of the
+    three fired, on which mapping.
+    """
+    for label, mapping in (("job", job), ("step", step)):
+        try:
+            runs = _runs_for_event(mapping, event_name)
+        except _UnsupportedExpression as exc:
+            # The contract on _runs_for_event: an expression this guard cannot
+            # evaluate must fail the test, never be treated as "probably fine".
+            return (
+                f"the {label}'s `if:` ({_condition(mapping)!r}) is outside the "
+                f"subset this guard can evaluate ({exc}), so it cannot be "
+                f"certified as running on {event_name}"
+            )
+        if not runs:
+            return (
+                f"the {label}'s `if:` ({_condition(mapping)!r}) is False for "
+                f"{event_name}, so it does not run on a real change"
+            )
+        if _discards_failure(mapping):
+            return (
+                f"the {label} is `continue-on-error: "
+                f"{mapping.get('continue-on-error')!r}`, so this check can refuse "
+                "and the workflow still reports success"
+            )
+
+    if not _job_matrix_yields_a_run(job):
+        return (
+            f"the job's `strategy` ({job.get('strategy')!r}) does not provably "
+            "yield at least one run, so the step may never execute"
+        )
+    return None
+
+
+def _plain_python_invocations(
+    documents: list[tuple[Path, dict]]
+) -> list[tuple[Path, str, dict, dict, str]]:
+    """Every (path, job_name, job, step, run) invoking the checker as PLAIN python.
+
+    Not through pytest: a narrowing pytest configuration would disarm it exactly
+    as it disarms every other test, which is the hole it exists to close.
+    """
+    invocations: list[tuple[Path, str, dict, dict, str]] = []
+    for workflow_path, document in documents:
+        for job_name, job in (document.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                run = str(step.get("run", ""))
+                if not run or not _invokes(run, "python", _COLLECTION_CHECKER_SCRIPT):
+                    continue
+                if any(
+                    "pytest" in tokens
+                    for tokens in _commands(run)
+                    if _COLLECTION_CHECKER_SCRIPT in " ".join(tokens)
+                ):
+                    continue
+                invocations.append((workflow_path, job_name, job, step, run))
+    return invocations
+
+
+def _enforced_invocations(
+    documents: list[tuple[Path, dict]]
+) -> tuple[list[tuple[Path, str, dict, dict, str]], list[str]]:
+    """(invocations that really run and really count, reasons the others do not)."""
+    enforced: list[tuple[Path, str, dict, dict, str]] = []
+    rejections: list[str] = []
+    for workflow_path, job_name, job, step, run in _plain_python_invocations(documents):
+        reasons = [
+            reason
+            for event in _REAL_CHANGE_EVENTS
+            if (reason := _why_not_enforced(job, step, event)) is not None
+        ]
+        if reasons:
+            rejections.append(f"{workflow_path.name} job {job_name!r}: {reasons[0]}")
+        else:
+            enforced.append((workflow_path, job_name, job, step, run))
+    return enforced, rejections
+
 
 def test_a_workflow_step_runs_the_standalone_collection_check() -> None:
     """The standalone checker is inert unless a workflow actually runs it.
@@ -2344,22 +2501,17 @@ def test_a_workflow_step_runs_the_standalone_collection_check() -> None:
     check that is not there. `test_ci_runs_gate_regression_suite.py` makes it for
     `ci/tests/`; this makes it for the one check that has to live outside pytest.
     """
-    invoking_steps: list[tuple[Path, dict, str]] = []
-    for workflow_path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
-        document = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            continue
-        for job in (document.get("jobs") or {}).values():
-            if not isinstance(job, dict):
-                continue
-            for step in _steps(job):
-                run = str(step.get("run", ""))
-                if not run:
-                    continue
-                if _invokes(run, "python", _COLLECTION_CHECKER_SCRIPT):
-                    invoking_steps.append((workflow_path, step, run))
+    documents = _workflow_documents()
 
-    assert invoking_steps, (
+    any_invocation = [
+        (path, job_name)
+        for path, document in documents
+        for job_name, job in (document.get("jobs") or {}).items()
+        if isinstance(job, dict)
+        for step in _steps(job)
+        if step.get("run") and _invokes(str(step["run"]), "python", _COLLECTION_CHECKER_SCRIPT)
+    ]
+    assert any_invocation, (
         f"no workflow step invokes {_COLLECTION_CHECKER_SCRIPT}. That script is the "
         "only check covering a pytest configuration that stops pytest running the "
         "tests -- including this file. Unrun, it protects nothing."
@@ -2367,42 +2519,159 @@ def test_a_workflow_step_runs_the_standalone_collection_check() -> None:
 
     # It must not be smuggled in THROUGH pytest: a narrowing addopts would disarm
     # it exactly as it disarms every other test.
-    plain_python = [
-        (path, step, run)
-        for path, step, run in invoking_steps
-        if not any(
-            "pytest" in tokens
-            for tokens in _commands(run)
-            if _COLLECTION_CHECKER_SCRIPT in " ".join(tokens)
-        )
-    ]
-    assert plain_python, (
+    assert _plain_python_invocations(documents), (
         f"{_COLLECTION_CHECKER_SCRIPT} is only ever invoked through pytest. The whole "
         "point of it is to run where a narrowing pytest configuration cannot reach; "
         "running it under pytest reintroduces the hole it exists to close."
     )
 
-    # At least one invoking step must be reachable on a real push/PR, and must
+    # At least one invoking step must actually ENFORCE on a real push/PR, and must
     # self-test the detector first -- same ordering rule as the ephemeris fetcher's
     # `--self-test`: a detector that has stopped discriminating must never get as
     # far as certifying the real configuration.
-    reachable = [
-        (path, step, run)
-        for path, step, run in plain_python
-        if all(_runs_for_event(step, event) for event in ("push", "pull_request"))
-    ]
-    assert reachable, (
-        f"every step invoking {_COLLECTION_CHECKER_SCRIPT} is skipped by its own `if:` "
-        "for push and pull_request, so it never runs on a real change"
+    #
+    # "Enforce", not merely "not skipped by its own `if:`" -- see _why_not_enforced.
+    # The step's own condition is one of three ways it can be disarmed, and it was
+    # the only one this checked before (PR #66 review). The hosting JOB's `if:` and
+    # matrix decide whether the step runs at all, and `continue-on-error` at either
+    # level decides whether its refusal counts for anything.
+    enforced, rejections = _enforced_invocations(documents)
+    assert enforced, (
+        f"no step invoking {_COLLECTION_CHECKER_SCRIPT} actually enforces it on a "
+        "real change:\n"
+        + "\n".join(f"  - {rejection}" for rejection in rejections)
     )
     assert any(
         _invokes(run, "python", _COLLECTION_CHECKER_SCRIPT, "--self-test")
-        for _path, _step, run in reachable
+        for _path, _job_name, _job, _step, run in enforced
     ), (
-        f"no reachable step runs `{_COLLECTION_CHECKER_SCRIPT} --self-test`. A "
+        f"no enforced step runs `{_COLLECTION_CHECKER_SCRIPT} --self-test`. A "
         "detector that has stopped discriminating must not be able to certify the "
         "real configuration -- the same ordering ci/fetch_swiss_ephemeris.py uses."
     )
+
+
+# ---------------------------------------------------------------------------
+# ONE META-LEVEL UP: the step's `if:` is not the only thing that disarms it
+# ---------------------------------------------------------------------------
+#
+# PR #66's review noted this gap and it is closed here. The reachability arm of
+# test_a_workflow_step_runs_the_standalone_collection_check evaluated the STEP's
+# own `if:` and nothing else — so a step with no `if:` at all was certified
+# "reachable on push and pull_request" no matter what its hosting JOB said.
+#
+# A step inside a job that does not run does not run. Job-level `if:` is not a
+# hypothetical idiom here either: THREE of this repo's jobs already use it
+# (`swiss-ephemeris`, `production-image-ephemeris` and `docker-test-image` all
+# carry `if: github.event_name != 'schedule'`), so adding one to `test` is an
+# ordinary-looking edit that the old guard would have waved through.
+#
+# `continue-on-error` is in the same family and is arguably worse: the step runs,
+# REFUSES, and the workflow reports success anyway. A check whose failure is
+# discarded is not enforcing anything, so it is not counted as enforcing.
+
+
+def test_why_not_enforced_rejects_a_disabled_hosting_job() -> None:
+    """The JOB's enablement, not just the step's.
+
+    Drives the real predicate the guard uses, against synthetic shapes, so a
+    regression in it reds here with a readable reason rather than only showing
+    up as a missing rejection three functions away.
+    """
+    step = {"run": "python ci/check_pytest_collection.py"}
+
+    always = {"steps": [step]}
+    assert _why_not_enforced(always, step, "push") is None, (
+        "a job with no `if:` hosting a step with no `if:` must be enforced"
+    )
+
+    for job_if in (False, "${{ false }}", "github.event_name == 'schedule'"):
+        job = {"if": job_if, "steps": [step]}
+        reason = _why_not_enforced(job, step, "push")
+        assert reason is not None, (
+            f"a step in a job with `if: {job_if!r}` was certified as enforced on "
+            "push — the job never runs, so neither does the step"
+        )
+        assert "job" in reason
+
+
+def test_why_not_enforced_rejects_a_discarded_failure() -> None:
+    """`continue-on-error` at either level means the refusal changes nothing."""
+    step = {"run": "python ci/check_pytest_collection.py"}
+
+    assert _why_not_enforced({"steps": [step]}, dict(step, **{"continue-on-error": True}), "push")
+    assert _why_not_enforced({"steps": [step], "continue-on-error": True}, step, "push")
+    # Fail closed on an expression: this guard cannot evaluate it, so it must
+    # not certify it.
+    assert _why_not_enforced(
+        {"steps": [step]}, dict(step, **{"continue-on-error": "${{ github.actor }}"}), "push"
+    )
+    # An explicit false is the documented default and must NOT red.
+    assert _why_not_enforced(
+        {"steps": [step], "continue-on-error": False},
+        dict(step, **{"continue-on-error": False}),
+        "push",
+    ) is None
+
+
+def test_why_not_enforced_rejects_a_matrix_that_yields_no_run() -> None:
+    """A job whose matrix is empty is DECLARED and never executes."""
+    step = {"run": "python ci/check_pytest_collection.py"}
+
+    for matrix in (
+        {"include": []},
+        {"python": []},
+        {"python": ["3.11"], "os": []},
+        # Computed at run time — unevaluable here, so not certifiable here.
+        "${{ fromJSON(needs.setup.outputs.matrix) }}",
+    ):
+        job = {"strategy": {"matrix": matrix}, "steps": [step]}
+        assert _why_not_enforced(job, step, "push") is not None, (
+            f"a job with `strategy.matrix: {matrix!r}` was certified as enforced, "
+            "but it produces no run at all"
+        )
+
+    ordinary = {"strategy": {"matrix": {"python": ["3.10", "3.11"]}}, "steps": [step]}
+    assert _why_not_enforced(ordinary, step, "push") is None, (
+        "an ordinary non-empty matrix was rejected"
+    )
+    assert _why_not_enforced({"strategy": {"fail-fast": False}, "steps": [step]}, step, "push") is None
+
+
+def test_disabling_the_hosting_job_in_the_REAL_workflow_is_caught() -> None:
+    """The mutation the old guard waved through, against the real file.
+
+    This is the test that pins the guard rather than the helper: it takes the
+    actual workflow documents, applies the single edit that disarms the
+    collection check, and asserts the enforcement scan now finds nothing left.
+    Under the step-only reachability rule this mutation changed nothing, because
+    the step's own `if:` is still absent.
+    """
+    documents = _workflow_documents()
+    enforced, _rejections = _enforced_invocations(documents)
+    assert enforced, "sanity: the real workflows must enforce the check before mutation"
+
+    mutated: list[tuple[Path, dict]] = []
+    touched = 0
+    for path, document in documents:
+        copy = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in (copy.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                if _invokes(str(step.get("run", "")), "python", _COLLECTION_CHECKER_SCRIPT):
+                    job["if"] = "github.event_name == 'schedule'"
+                    touched += 1
+        mutated.append((path, copy))
+
+    assert touched, "no step invoking the checker was found to mutate"
+    still_enforced, rejections = _enforced_invocations(mutated)
+    assert not still_enforced, (
+        "disabling the HOSTING JOB left the collection check certified as "
+        "enforced. The step's own `if:` is untouched by this edit, which is "
+        "exactly why the step-only rule missed it."
+    )
+    assert rejections, "the scan rejected the invocation without saying why"
 
 
 def test_manifest_and_goldens_are_committed() -> None:
