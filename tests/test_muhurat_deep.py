@@ -233,7 +233,11 @@ class TestHappyPath:
         )
 
     def test_personal_balam_skipped_when_no_natal_moon(self):
-        """Branch 254->286: personal stays None without natal Moon data."""
+        """``personal`` stays None without natal Moon data.
+
+        Covers the false arc of ``compute_muhurat_for_day``'s
+        ``if birth_nakshatra and birth_moon_sign:`` guard — both are required.
+        """
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         assert out["personal_balam"] is None
         # only nakshatra given -> still skipped (both required)
@@ -380,7 +384,11 @@ class TestInauspiciousFallbacks:
         assert exc.value.limb == limb
 
     def test_durmuhurtam_short_list_skips_both_periods(self, monkeypatch):
-        """Branch 217->219: a <2-element durmuhurtam list yields no entries."""
+        """A <2-element durmuhurtam list yields no entries.
+
+        Covers the false arcs of both ``len(dm) >= 2`` and ``len(dm) >= 4`` in
+        ``compute_muhurat_for_day``'s durmuhurtam block.
+        """
         monkeypatch.setattr(m.drik, "durmuhurtam", lambda *_a, **_k: ["07:00:00"])
         out = m.compute_muhurat_for_day(PLACE, TARGET)
         labels = {p["label"] for p in out["inauspicious_periods"]}

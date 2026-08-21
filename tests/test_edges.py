@@ -81,11 +81,19 @@ def _snapshot(planets=None, lagna="Aries", lagna_lord="Mars",
 # ===========================================================================
 
 class TestDashasEdges:
-    """Missing: line 54 (Moon missing), lines 135-138 (yogini end_date cycle_count),
-    lines 180-190 (get_active_dasha yogini branch + return None)."""
+    """Edge branches covered here, named by function in bphs_core/dashas.py:
+
+      - ``_moon_nakshatra_and_fraction`` — Moon missing from rasi_chart.
+      - ``_yogini_dashas`` — ``end_date`` supplied, forcing the multi-cycle
+        ``cycle_count`` branch.
+      - ``get_active_dasha`` — the ``system == "yogini"`` branch, and the
+        unknown-system fall-through to ``return None``.
+      - ``get_dasha_timeline`` → ``_vimshottari_antardashas`` — antardasha
+        periods emitted alongside their mahadasha.
+    """
 
     def test_moon_nakshatra_fraction_no_moon_returns_ashwini(self):
-        """Line 54: when Moon is absent the fallback is Ashwini, fraction=0."""
+        """_moon_nakshatra_and_fraction: Moon absent → Ashwini, fraction=0."""
         from bphs_core.dashas import _moon_nakshatra_and_fraction
         snap = _snapshot({})
         nak, frac = _moon_nakshatra_and_fraction(snap)
@@ -93,7 +101,7 @@ class TestDashasEdges:
         assert frac == 0.0
 
     def test_yogini_with_end_date_triggers_cycle_count(self):
-        """Lines 135-138: passing end_date to _yogini_dashas forces cycle_count >= 2."""
+        """_yogini_dashas: passing end_date forces the cycle_count >= 2 branch."""
         from bphs_core.dashas import _yogini_dashas
         moon = _planet("Rohini".split()[0], degrees=5.0, house=1,
                        planet_name="Moon", nakshatra="Rohini")
@@ -110,7 +118,7 @@ class TestDashasEdges:
         assert len(periods) > 8
 
     def test_get_active_dasha_yogini_branch(self):
-        """Lines 186-189: get_active_dasha with system='yogini' traverses yogini path."""
+        """get_active_dasha: system='yogini' → the _yogini_dashas containment scan."""
         from bphs_core.dashas import get_active_dasha
         rasi = {"Moon": _planet("Taurus", 5.0, 1, "neutral", "Rohini",
                                 planet_name="Moon")}
@@ -122,7 +130,7 @@ class TestDashasEdges:
             assert result.system == "yogini"
 
     def test_get_active_dasha_returns_none_for_unknown_system(self):
-        """Line 190: system not in ('vimshottari', 'yogini') → returns None."""
+        """get_active_dasha: system not in ('vimshottari', 'yogini') → returns None."""
         from bphs_core.dashas import get_active_dasha
         rasi = {"Moon": _planet("Aries", 5.0, 1, "neutral", "Ashwini",
                                 planet_name="Moon")}
@@ -149,21 +157,33 @@ class TestDashasEdges:
 # ===========================================================================
 
 class TestProfileEdges:
-    """Missing: line 82 (no Moon), 95-96 (pada calc exception), 148 (no Rahu),
-    160-161 (no planets in arc), 171 (no Moon for sade_sati), 213/221/228/235-236
-    (kalsarp directions), 256 (empty name numerology), 274-282 (logger warning +
-    phase transitions), 351->355 (favourable_points lagna_lord fallback)."""
+    """Edge branches covered here, named by function in bphs_core/profile.py:
+
+      - ``janma_nakshatra`` — Moon missing from rasi_chart; and the pada
+        try-block on the valid-Moon path (its ``(ValueError, ZeroDivisionError)``
+        guard is unreachable with a valid ``utils.SIGNS``).
+      - ``kalsarp_dosh`` — Rahu absent; Rahu present but no visible planet
+        collected into ``in_rahu_ketu_arc``; and the ``all_in or all_out`` block
+        that sets ``direction`` (``ketu_to_rahu`` reciprocal case), versus the
+        mixed-arc ``partial=True`` fall-through.
+      - ``sade_sati_lifetime`` — Moon missing (or its sign not in
+        ``utils.SIGNS``) → ``[]``.
+      - ``numerology`` — the ``if name.strip()`` guard, and a name carrying no
+        Chaldean-mapped letters at all (falsy ``total`` → name_number None).
+      - ``favourable_points`` — Moon absent, so ``rasi_lord`` falls back to
+        ``snapshot.lagna_lord``.
+    """
 
     # --- janma_nakshatra edge: no Moon ---
     def test_janma_nakshatra_no_moon_returns_empty(self):
-        """Line 82: Moon missing → {}."""
+        """janma_nakshatra: Moon missing from rasi_chart → {}."""
         from bphs_core.profile import janma_nakshatra
         snap = _snapshot({})
         assert janma_nakshatra(snap) == {}
 
     # --- kalsarp_dosh edges ---
     def test_kalsarp_no_rahu_returns_false(self):
-        """Line 148: Rahu absent → present=False immediately."""
+        """kalsarp_dosh: Rahu absent → present=False immediately, rahu_house=None."""
         from bphs_core.profile import kalsarp_dosh
         snap = _snapshot({"Sun": _planet("Aries", 10.0, 1, planet_name="Sun")})
         result = kalsarp_dosh(snap)
@@ -171,7 +191,7 @@ class TestProfileEdges:
         assert result["rahu_house"] is None
 
     def test_kalsarp_no_7_visible_planets_returns_false(self):
-        """Lines 160-161: Rahu present but no visible planets → present=False."""
+        """kalsarp_dosh: Rahu present but in_rahu_ketu_arc stays empty → present=False."""
         from bphs_core.profile import kalsarp_dosh
         rahu = _planet("Aries", 15.0, 1, planet_name="Rahu")
         snap = _snapshot({"Rahu": rahu})
@@ -179,7 +199,8 @@ class TestProfileEdges:
         assert result["present"] is False
 
     def test_kalsarp_all_in_ketu_to_rahu_arc_direction(self):
-        """Lines 235-236 (ketu_to_rahu direction): all planets in Ketu→Rahu arc."""
+        """kalsarp_dosh: the all_out arm of the all_in-or-all_out block —
+        every planet in the Ketu→Rahu arc → direction='ketu_to_rahu'."""
         from bphs_core.profile import kalsarp_dosh
         # Rahu at Aries 0° (lon 0), Ketu at Libra 0° (lon 180).
         # "all_out" means no planet is in the 0-180 arc (Rahu→Ketu),
@@ -225,7 +246,7 @@ class TestProfileEdges:
 
     # --- sade_sati_lifetime: no Moon ---
     def test_sade_sati_no_moon_returns_empty(self):
-        """Line 171: no Moon in chart → []."""
+        """sade_sati_lifetime: no Moon (or Moon sign not in utils.SIGNS) → []."""
         from bphs_core.profile import sade_sati_lifetime
         snap = _snapshot({})
         result = sade_sati_lifetime(snap, datetime.date(1990, 1, 1))
@@ -233,7 +254,7 @@ class TestProfileEdges:
 
     # --- numerology: empty name ---
     def test_numerology_empty_name_no_name_number(self):
-        """Line 256: name='' → name_number=None."""
+        """numerology: name='' fails the name.strip() guard → name_number=None."""
         from bphs_core.profile import numerology
         result = numerology(datetime.date(1990, 6, 15), name="")
         assert result["name"] is None
@@ -248,7 +269,8 @@ class TestProfileEdges:
 
     # --- favourable_points: lagna_lord fallback when Moon absent ---
     def test_favourable_points_no_moon_uses_lagna_lord(self):
-        """Lines 351-355: snapshot has no Moon → falls back to snapshot.lagna_lord."""
+        """favourable_points: snapshot has no Moon → rasi_lord falls back to
+        snapshot.lagna_lord."""
         from bphs_core.profile import favourable_points
         snap = _snapshot({}, lagna="Aries", lagna_lord="Mars")
         result = favourable_points(snap)
@@ -258,8 +280,12 @@ class TestProfileEdges:
 
     # --- profile: pada calc ValueError branch ---
     def test_janma_nakshatra_pada_with_valid_moon(self):
-        """Lines 95-96: normal Moon path sets pada 1-4. Also hits the except guard
-        indirectly (ZeroDivisionError cannot occur with valid SIGNS list)."""
+        """janma_nakshatra: a valid Moon takes the pada try-block → pada 1-4.
+
+        The (ValueError, ZeroDivisionError) guard wrapping that block is NOT
+        reached on this path: with a valid utils.SIGNS list neither exception
+        can be raised, so the guard is unreachable rather than covered here.
+        """
         from bphs_core.profile import janma_nakshatra
         moon = _planet("Aries", 5.0, 1, "neutral", "Ashwini", planet_name="Moon")
         snap = _snapshot({"Moon": moon})
@@ -272,9 +298,19 @@ class TestProfileEdges:
 # ===========================================================================
 
 class TestSpecialPointsEdges:
-    """Missing: line 15 (_sign_and_deg uses longitude_to_sign_and_degree), 43
-    (_arudha_pada_house with result==7), 68 (upapada lord pd=None), 89 (atmakaraka
-    empty candidates), 137 (karakamsa navamsa None)."""
+    """Edge branches covered here, named by function in
+    bphs_core/special_points.py:
+
+      - ``_sign_and_deg`` — delegation to ``utils.longitude_to_sign_and_degree``.
+      - ``_arudha_pada_house`` — the BPHS exception rule when the pada lands on
+        the 1st or the 7th.
+      - ``get_arudha_lagna`` — lagna lord absent from rasi_chart.
+      - ``get_upapada`` — 12th lord absent from rasi_chart.
+      - ``get_atmakaraka`` — no non-node candidates at all.
+      - ``get_karakamsa`` — the Atmakaraka absent from navamsa_chart.
+      - ``_sidereal_longitude`` — longitude_abs present, longitude_abs absent
+        (reconstruction), and the planet absent entirely.
+    """
 
     def _sp_snapshot(self, planets=None, lagna="Aries", lagna_lord="Mars"):
         rasi = planets or {}
@@ -297,14 +333,15 @@ class TestSpecialPointsEdges:
         )
 
     def test_sign_and_deg_via_sidereal_longitude(self):
-        """Line 15: _sign_and_deg correctly delegates to longitude_to_sign_and_degree."""
+        """_sign_and_deg: delegates to utils.longitude_to_sign_and_degree (lon % 360)."""
         from bphs_core.special_points import _sign_and_deg
         sign, deg = _sign_and_deg(45.5)  # 45.5° → Taurus 15.5°
         assert sign == "Taurus"
         assert abs(deg - 15.5) < 0.01
 
     def test_arudha_pada_house_landing_on_7_maps_to_4(self):
-        """Line 43: pada==7 case; 7th from pada is taken (7 → 10th from pada = 4th house)."""
+        """_arudha_pada_house: pada==7 case; the 10th from the pada is taken
+        (pada 7 → 10th from 7 = 4th house)."""
         from bphs_core.special_points import _arudha_pada_house, _nth_house_from
         # lord_house such that ((2*lh-1)-1)%12+1 == 7.
         # 2*lh-2 ≡ 6 (mod 12)  →  2*lh ≡ 8 (mod 12)  → lh ≡ 4 (mod 6) → lh=4
@@ -314,14 +351,14 @@ class TestSpecialPointsEdges:
         assert pada == _nth_house_from(7, 10)
 
     def test_arudha_pada_house_landing_on_1_maps_to_10(self):
-        """Line 43: pada==1 case; 10th from pada 1 = house 10."""
+        """_arudha_pada_house: pada==1 case; 10th from pada 1 = house 10."""
         from bphs_core.special_points import _arudha_pada_house
         # lord_house such that ((2*lh-1)-1)%12+1 == 1 → 2*lh-2 ≡ 0 (mod 12) → lh=1
         pada = _arudha_pada_house(1)
         assert pada == 10
 
     def test_upapada_12th_lord_absent_returns_12th_sign(self):
-        """Line 68: 12th lord missing from rasi_chart → sign = 12th sign itself."""
+        """get_upapada: 12th lord missing from rasi_chart → sign = the 12th sign itself."""
         from bphs_core.special_points import get_upapada
         from bphs_core import utils
         # Aries lagna: 12th sign = Pisces, lord Jupiter — not in rasi_chart.
@@ -333,13 +370,14 @@ class TestSpecialPointsEdges:
         assert result.sign == "Pisces"
 
     def test_atmakaraka_empty_chart_returns_sun(self):
-        """Line 89: no planets in rasi_chart → fallback 'Sun'."""
+        """get_atmakaraka: no non-node candidates in rasi_chart → fallback 'Sun'."""
         from bphs_core.special_points import get_atmakaraka
         snap = self._sp_snapshot({})
         assert get_atmakaraka(snap) == "Sun"
 
     def test_karakamsa_ak_not_in_navamsa_uses_lagna(self):
-        """Line 137: AK planet absent from navamsa_chart → falls back to lagna."""
+        """get_karakamsa: the get_atmakaraka pick is absent from navamsa_chart →
+        falls back to lagna."""
         from bphs_core.special_points import get_karakamsa
         # Sun has highest degrees but is not in navamsa_chart.
         rasi = {"Sun": _planet("Aries", 29.0, 1, planet_name="Sun")}
@@ -349,7 +387,8 @@ class TestSpecialPointsEdges:
         assert result.sign == "Gemini"
 
     def test_arudha_lagna_lord_absent_returns_lagna_sign(self):
-        """Line 43 (get_arudha_lagna path): lagna lord absent → sign = lagna, deg = 0."""
+        """get_arudha_lagna: lagna lord absent from rasi_chart (so
+        _arudha_pada_house is never reached) → sign = lagna, deg = 0."""
         from bphs_core.special_points import get_arudha_lagna
         # Mars is lagna_lord but not in rasi_chart.
         snap = self._sp_snapshot({}, lagna="Aries", lagna_lord="Mars")
@@ -358,7 +397,7 @@ class TestSpecialPointsEdges:
         assert result.degrees == 0.0
 
     def test_sidereal_longitude_uses_abs_when_available(self):
-        """Line 244: _sidereal_longitude uses longitude_abs field when present."""
+        """_sidereal_longitude: longitude_abs present → used as-is, mod 360."""
         from bphs_core.special_points import _sidereal_longitude
         # longitude_abs should be used as-is (mod 360).
         sun = _planet("Aries", 5.0, 1, planet_name="Sun", longitude_abs=395.0)
@@ -367,7 +406,7 @@ class TestSpecialPointsEdges:
         assert abs(result - 35.0) < 0.01   # 395 % 360 = 35
 
     def test_sidereal_longitude_fallback_reconstruction(self):
-        """Line 248: no longitude_abs → reconstructed from sign+degrees."""
+        """_sidereal_longitude: longitude_abs None → reconstructed from sign+degrees."""
         from bphs_core.special_points import _sidereal_longitude
         sun = _planet("Taurus", 5.0, 2, planet_name="Sun", longitude_abs=None)
         snap = self._sp_snapshot({"Sun": sun})
@@ -387,9 +426,16 @@ class TestSpecialPointsEdges:
 # ===========================================================================
 
 class TestTransitsEdges:
-    """Missing: line 94 (get_sade_sati_info no Moon), 103 (first phase), 107 (third
-    phase), 182/192 (compute_transit_signals no Moon), 214/234 (compute_gochara_vedha
-    no Moon), 264 (compute_transit_derived no Moon), 270-276 (chandrashtama/dhaiya)."""
+    """Edge branches covered here, named by function in bphs_core/transits.py:
+
+      - ``get_sade_sati_info`` — natal Moon absent → inactive SadeSatiInfo.
+      - ``compute_transit_signals`` — natal Moon absent → {}.
+      - ``compute_gochara_vedha`` — natal Moon absent → [].
+      - ``compute_transit_derived`` — natal Moon absent → all flags off; the
+        chandrashtama arm (``_house_from_moon`` of the transit Moon == 8); both
+        dhaiya / Kantaka Sani arms (transit Saturn's house from the natal Moon
+        == 4, and == 8); and transit Saturn absent leaving dhaiya_phase None.
+    """
 
     def _ts(self, moon_sign: str | None = "Aries"):
         if moon_sign is None:
@@ -409,7 +455,8 @@ class TestTransitsEdges:
 
     # --- get_sade_sati_info: no Moon ---
     def test_sade_sati_info_no_moon_returns_inactive(self):
-        """Line 94: Moon absent → SadeSatiInfo(is_active=False, phase='none')."""
+        """get_sade_sati_info: natal Moon absent → SadeSatiInfo(is_active=False,
+        phase='none')."""
         from bphs_core.transits import get_sade_sati_info
         snap = self._ts(None)
         result = get_sade_sati_info(snap, datetime.datetime(2025, 1, 1))
@@ -418,7 +465,7 @@ class TestTransitsEdges:
 
     # --- compute_transit_signals: no Moon ---
     def test_transit_signals_no_moon_returns_empty(self):
-        """Line 182/192: Moon absent → empty dict."""
+        """compute_transit_signals: natal Moon absent → empty dict."""
         from bphs_core.transits import compute_transit_signals
         snap = self._ts(None)
         transits = self._tp(Jupiter="Gemini")
@@ -426,7 +473,7 @@ class TestTransitsEdges:
 
     # --- compute_gochara_vedha: no Moon ---
     def test_gochara_vedha_no_moon_returns_empty(self):
-        """Lines 214/234: Moon absent → []."""
+        """compute_gochara_vedha: natal Moon absent → []."""
         from bphs_core.transits import compute_gochara_vedha
         snap = self._ts(None)
         transits = self._tp(Mars="Gemini", Jupiter="Pisces")
@@ -434,7 +481,7 @@ class TestTransitsEdges:
 
     # --- compute_transit_derived: no Moon ---
     def test_transit_derived_no_moon_returns_false_flags(self):
-        """Line 264: Moon absent → all flags False/None."""
+        """compute_transit_derived: natal Moon absent → all flags False/None."""
         from bphs_core.transits import compute_transit_derived
         snap = self._ts(None)
         result = compute_transit_derived(snap, self._tp())
@@ -446,7 +493,8 @@ class TestTransitsEdges:
 
     # --- chandrashtama: transit Moon in 8th ---
     def test_chandrashtama_active_when_transit_moon_in_8th(self):
-        """Line 268: chandrashtama = True when transit Moon is 8 houses from natal Moon."""
+        """compute_transit_derived: chandrashtama=True when _house_from_moon of the
+        transit Moon is the 8th from the natal Moon."""
         from bphs_core.transits import compute_transit_derived
         # Natal Moon in Aries (idx 0); 8th from Aries = Scorpio.
         snap = self._ts("Aries")
@@ -456,7 +504,8 @@ class TestTransitsEdges:
 
     # --- dhaiya in 4th ---
     def test_dhaiya_active_saturn_in_4th_from_moon(self):
-        """Lines 273-274: dhaiya (Kantaka Sani) when Saturn transits 4th from natal Moon."""
+        """compute_transit_derived: dhaiya (Kantaka Sani) arm where transit Saturn's
+        house from the natal Moon is the 4th."""
         from bphs_core.transits import compute_transit_derived
         # Natal Moon in Aries; 4th from Aries = Cancer.
         snap = self._ts("Aries")
@@ -467,7 +516,8 @@ class TestTransitsEdges:
 
     # --- dhaiya in 8th ---
     def test_dhaiya_active_saturn_in_8th_from_moon(self):
-        """Line 275-276: dhaiya when Saturn transits 8th from natal Moon."""
+        """compute_transit_derived: dhaiya arm where transit Saturn's house from the
+        natal Moon is the 8th."""
         from bphs_core.transits import compute_transit_derived
         # Natal Moon in Aries; 8th from Aries = Scorpio.
         snap = self._ts("Aries")
@@ -491,11 +541,19 @@ class TestTransitsEdges:
 # ===========================================================================
 
 class TestVimshopakaEdges:
-    """Missing: lines 43-44 (pyjhora import fallback), line 151 (planet absent from
-    varga → contributes 0)."""
+    """Edge branches covered here, named by symbol in bphs_core/vimshopaka.py:
+
+      - ``_DASHAVARGA_WEIGHTS_RAW`` — the module-level try/except around the
+        pyjhora import, i.e. the literal BPHS fallback table in the except arm.
+      - ``compute_vimshopaka`` — the ``pd is None`` arm, where a planet absent
+        from a varga contributes 0 for that varga.
+      - ``compute_all_vimshopaka`` — the ``if p in snapshot.rasi_chart`` filter.
+      - ``_dignity_factor`` — the unrecognised-dignity fallback.
+    """
 
     def test_fallback_table_matches_bphs_if_pyjhora_unavailable(self):
-        """Lines 43-44: the literal fallback table satisfies both invariants."""
+        """_DASHAVARGA_WEIGHTS_RAW: the except-arm literal fallback table satisfies
+        both invariants."""
         from bphs_core.vimshopaka import _DASHAVARGA_WEIGHTS_RAW, _VARGA_ATTR
         # If pyjhora's import failed the fallback literal is used; either way these
         # must pass (the module asserts this at import time already, but we test
@@ -505,7 +563,8 @@ class TestVimshopakaEdges:
         assert abs(sum(_DASHAVARGA_WEIGHTS_RAW.values()) - 20.0) < 1e-9
 
     def test_missing_planet_in_varga_contributes_zero(self):
-        """Line 151: planet absent from a varga → 0 points for that varga."""
+        """compute_vimshopaka: pd is None arm — planet absent from a varga → 0 points
+        for that varga."""
         from bphs_core.vimshopaka import compute_vimshopaka
         # Only populate rasi_chart (D1); all other vargas empty → D2..D60 contribute 0.
         sun = _planet("Aries", 10.0, 1, "exalted", planet_name="Sun")
@@ -537,9 +596,15 @@ class TestVimshopakaEdges:
 # ===========================================================================
 
 class TestYogasEdges:
-    """Missing: line 39 (empty dignities in _compute_yoga_strength), 57 (lord is None
-    in viparita), 113 (same-house degenerate kh==th in raja yoga), 133 (seen_conjunction
-    dedup), 154 (detect_parivartana no planets)."""
+    """Edge branches covered here, named by function in bphs_core/yogas.py:
+
+      - ``_compute_yoga_strength`` — the empty-``dignities`` arm → 'moderate'.
+      - ``detect_viparita_raja_yoga`` — the ``lord is None`` continue guard.
+      - ``detect_raja_yogas`` — the ``kh == th`` degenerate guard (house 1 sits in
+        both the kendra and the trikona list), and the ``seen_conjunction`` dedup.
+      - ``detect_parivartana_yoga`` — an empty ``planets`` list (nothing to
+        iterate), and the ``lord_of_a == p_a`` own-sign skip.
+    """
 
     def _chart(self, planets=None, lagna="Aries",
                house_cusps=None):
@@ -577,13 +642,14 @@ class TestYogasEdges:
         )
 
     def test_compute_yoga_strength_no_planets_returns_moderate(self):
-        """Line 39: empty planets list → dignities list empty → 'moderate'."""
+        """_compute_yoga_strength: empty planets list → dignities empty → 'moderate'."""
         from bphs_core.yogas import _compute_yoga_strength
         chart = self._chart({})
         assert _compute_yoga_strength(chart, []) == "moderate"
 
     def test_viparita_raja_lord_none_skips(self):
-        """Line 57: house lord returns None for a house with no valid sign lord.
+        """detect_viparita_raja_yoga: the `lord is None` continue guard — _house_lord
+        returning None for a house with no valid sign lord.
 
         Force lord=None by supplying a house_cusps where the 6th cusp points
         to a sign index that has no lord in utils.get_sign_lord — not possible
@@ -599,7 +665,8 @@ class TestYogasEdges:
         assert isinstance(result, list)
 
     def test_raja_yoga_same_house_degenerate_skipped(self):
-        """Line 113: kh==th (house 1 counted in both kendra+trikona lists) is skipped."""
+        """detect_raja_yogas: the kh==th guard — house 1 counted in both the kendra
+        and the trikona list is skipped."""
         from bphs_core.yogas import detect_raja_yogas
         # Aries lagna: Mars lords house 1. House 1 is in both KENDRA and TRIKONA.
         # The (kh=1, th=1, kl==tl==Mars) case must NOT produce a spurious yoga.
@@ -613,8 +680,9 @@ class TestYogasEdges:
                 pytest.fail("Degenerate kh==th Raja Yoga was not suppressed")
 
     def test_raja_yoga_seen_conjunction_dedup(self):
-        """Line 133: the same kendra-lord/trikona-lord pair conjunct in the same house
-        must appear only once even if enumerated from multiple (kh, th) combinations."""
+        """detect_raja_yogas seen_conjunction dedup: the same kendra-lord/trikona-lord
+        pair conjunct in the same house must appear only once even if enumerated from
+        multiple (kh, th) combinations."""
         from bphs_core.yogas import detect_raja_yogas
         # Aries lagna: house_cusps → Aries(1),Tau(2),Gem(3),Can(4),Leo(5),Vir(6)...
         # Set up so Jupiter lords kendra(4=Cancer) AND trikona(9) and Mercury lords
@@ -636,13 +704,13 @@ class TestYogasEdges:
             pairs_seen.add(pair)
 
     def test_detect_parivartana_empty_chart(self):
-        """Line 154: no planets → empty list (no iteration)."""
+        """detect_parivartana_yoga: no planets in rasi_chart → empty list (no iteration)."""
         from bphs_core.yogas import detect_parivartana_yoga
         chart = self._chart({})
         assert detect_parivartana_yoga(chart) == []
 
     def test_detect_parivartana_self_lord_skips(self):
-        """Line 184: planet is in its own sign (lord_of_a == p_a) → skipped."""
+        """detect_parivartana_yoga: planet in its own sign (lord_of_a == p_a) → skipped."""
         from bphs_core.yogas import detect_parivartana_yoga
         # Sun in Leo: lord of Leo is Sun → lord_of_a == p_a, so skipped.
         chart = self._chart({
@@ -657,10 +725,18 @@ class TestYogasEdges:
 # ===========================================================================
 
 class TestStrengthEdges:
-    """Missing: line 65 (unknown dignity fallback 7.5), 71 (planet not in
-    DIG_BALA_PEAK → 0.0), 81 (Sun in night/day_planet not is_day), 102 (Sun/Moon
-    cheshta → 0.0), 118 (planet not in NAISARGIKA), 310 (ref_idx.get returns None →
-    continue)."""
+    """Edge branches covered here, named by function in bphs_core/strength.py:
+
+      - ``_sthana_bala`` — the final 7.5 fall-through for an unrecognised dignity.
+      - ``_dig_bala`` — planet absent from ``_DIG_BALA_PEAK`` → 0.0.
+      - ``_kaala_bala`` — the night-planet-at-night 30.0 arm, and the 15.0
+        fall-through taken when neither the day nor the night arm fires.
+      - ``_cheshta_bala`` — the Sun/Moon 0.0 arm and the retrograde 30.0 arm.
+      - ``compute_shadbala`` — planet absent from rasi_chart → ValueError.
+      - ``compute_ashtakavarga`` — the ``ref_idx.get(ref) is None`` continue for a
+        reference point absent from the chart, and the ``planet is not None``
+        single-planet return.
+    """
 
     def _chart_with(self, planets: dict, sun_house: int = 1,
                     lagna: str = "Aries"):
@@ -686,20 +762,21 @@ class TestStrengthEdges:
         return _snapshot(rasi, lagna=lagna)
 
     def test_sthana_bala_unknown_dignity_returns_7_5(self):
-        """Line 65: unrecognised dignity string → 7.5."""
+        """_sthana_bala: unrecognised dignity string → the final 7.5 fall-through."""
         from bphs_core.strength import _sthana_bala
         pd = _planet("Aries", 10.0, 1, dignity="unrecognised_string")
         assert _sthana_bala(pd, "Sun") == 7.5
 
     def test_dig_bala_rahu_not_in_peak_table(self):
-        """Line 71: Rahu/Ketu absent from _DIG_BALA_PEAK → 0.0."""
+        """_dig_bala: Rahu/Ketu absent from _DIG_BALA_PEAK (peak is None) → 0.0."""
         from bphs_core.strength import _dig_bala
         pd = _planet("Aries", 10.0, 1, planet_name="Rahu")
         assert _dig_bala(pd, "Rahu") == 0.0
         assert _dig_bala(pd, "Ketu") == 0.0
 
     def test_kaala_bala_night_for_day_planet(self):
-        """Line 81: Sun in house 1 (night) + day planet (Sun) → 15.0 (not 30)."""
+        """_kaala_bala: Sun in house 1 (night) + day planet (Sun) → neither 30.0 arm
+        fires, so the 15.0 fall-through is taken (not 30)."""
         from bphs_core.strength import _kaala_bala
         # Sun in house 1 (1-6 range) → is_day=False
         sun = _planet("Aries", 10.0, 1, planet_name="Sun")
@@ -708,7 +785,8 @@ class TestStrengthEdges:
         assert _kaala_bala(snap, "Sun") == 15.0
 
     def test_kaala_bala_day_for_night_planet(self):
-        """Line 88: sun in house 7 (day) + night planet (Moon) → 15.0 (not 30)."""
+        """_kaala_bala: Sun in house 7 (day) + night planet (Moon) → neither 30.0 arm
+        fires, so the 15.0 fall-through is taken (not 30)."""
         from bphs_core.strength import _kaala_bala
         sun = _planet("Libra", 10.0, 7, planet_name="Sun")
         moon = _planet("Aries", 10.0, 1, planet_name="Moon")
@@ -717,7 +795,8 @@ class TestStrengthEdges:
         assert _kaala_bala(snap, "Moon") == 15.0
 
     def test_kaala_bala_night_planet_during_night_is_30(self):
-        """Line 88-89: night planet (Moon) at night → 30.0."""
+        """_kaala_bala: the `not is_day and planet in night_planets` arm — night
+        planet (Moon) at night → 30.0."""
         from bphs_core.strength import _kaala_bala
         sun = _planet("Aries", 10.0, 1, planet_name="Sun")    # house 1 → night
         moon = _planet("Taurus", 10.0, 2, planet_name="Moon")
@@ -725,33 +804,33 @@ class TestStrengthEdges:
         assert _kaala_bala(snap, "Moon") == 30.0
 
     def test_cheshta_bala_sun_returns_zero(self):
-        """Line 95: Sun → 0.0 (Sun/Moon have no Cheshta Bala)."""
+        """_cheshta_bala: Sun → 0.0 (Sun/Moon have no Cheshta Bala)."""
         from bphs_core.strength import _cheshta_bala
         pd = _planet("Aries", 10.0, 1)
         assert _cheshta_bala(pd, "Sun") == 0.0
 
     def test_cheshta_bala_moon_returns_zero(self):
-        """Line 95: Moon → 0.0."""
+        """_cheshta_bala: Moon → 0.0."""
         from bphs_core.strength import _cheshta_bala
         pd = _planet("Aries", 10.0, 1)
         assert _cheshta_bala(pd, "Moon") == 0.0
 
     def test_cheshta_bala_retrograde_planet_is_30(self):
-        """Line 96 retrograde branch: retrograde Mars → 30.0."""
+        """_cheshta_bala: retrograde branch — retrograde Mars → 30.0."""
         from bphs_core.strength import _cheshta_bala
         pd = _planet("Aries", 10.0, 1, retrograde=True)
         assert _cheshta_bala(pd, "Mars") == 30.0
 
     def test_compute_shadbala_raises_for_missing_planet(self):
-        """Line 118: compute_shadbala raises ValueError when planet not in chart."""
+        """compute_shadbala: raises ValueError when the planet is not in rasi_chart."""
         from bphs_core.strength import compute_shadbala
         snap = _snapshot({})
         with pytest.raises(ValueError, match="Sun"):
             compute_shadbala(snap, "Sun")
 
     def test_ashtakavarga_ref_none_is_skipped(self):
-        """Line 310: a reference planet absent from rasi_chart → its contribution
-        skipped (ref_idx.get returns None → continue)."""
+        """compute_ashtakavarga: a reference planet absent from rasi_chart → its
+        contribution skipped (ref_idx.get returns None → continue)."""
         from bphs_core.strength import compute_ashtakavarga
         # Only Moon in chart; Sun, Mars etc. are absent.
         # Lagna is present (always added from snapshot.lagna).
@@ -764,7 +843,8 @@ class TestStrengthEdges:
         assert len(result["binna"]) == 7
 
     def test_ashtakavarga_per_planet_mode(self):
-        """Line 319-320: planet= kwarg returns single-planet binna directly."""
+        """compute_ashtakavarga: the planet is not None arm returns that planet's
+        binna directly."""
         from bphs_core.strength import compute_ashtakavarga
         moon = _planet("Taurus", 5.0, 2, planet_name="Moon")
         snap = _snapshot({"Moon": moon}, lagna="Aries")
