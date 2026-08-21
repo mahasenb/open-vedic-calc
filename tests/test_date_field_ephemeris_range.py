@@ -3,10 +3,12 @@
 PR #68 bounded ``birth_date`` to the MEASURED Swiss data span
 (``MIN_EPHEMERIS_DATE``..``MAX_EPHEMERIS_DATE``, app/schemas.py) after finding
 that the tail of the advertised range answered at HTTP 200 off the Moshier
-fallback. ``birth_date`` was not the only date on the wire. Eight further date
-inputs carried no range check at all, and a ninth — ``reference_date`` — was
-missed by the field sweep that produced that count because it is a ``date``,
-not an ``IsoDateStr``.
+fallback. ``birth_date`` was not the only date on the wire. NINE further
+``IsoDateStr`` inputs carried no range check at all — ``at_date``, ``from_date``,
+``to_date``, and THREE ``start_date``/``end_date`` pairs — and a TENTH,
+``reference_date``, was missed by the field sweep entirely because it is a
+``date``, not an ``IsoDateStr``, so it never matched that grep. TEN in all, and
+``_SINGLE_DATE_CASES`` below carries one entry per field.
 
 MEASURED BEFORE THIS CHANGE (base 5e63404, Swiss data present, spying on every
 ``swe.calc_ut`` a served request makes):
@@ -37,13 +39,22 @@ calls to it.
 
 ``reference_date``, ``from_date`` and ``to_date`` are NOT asserted Swiss-backed,
 and that omission is deliberate rather than an oversight. Measured, they drive
-ZERO ephemeris calls: /v1/dashas answers from arithmetic projected off the natal
-Moon (the call count stays at exactly 15 — the natal chart — with to_date at
-2026-12-31 or at 2999-12-31), and /v1/compat's 30 calls are its two natal charts
-and do not move when reference_date goes to 3000-01-01. A "Swiss-backed" spy
-assertion on those fields would pass by construction while measuring nothing,
-which is worse than no test. They are bounded for the crash and for a uniform
-served contract; what is asserted here is the crash closing.
+ZERO ephemeris calls.
+
+For /v1/dashas the demonstration has to run on a pair the service will actually
+SERVE, which a normal birth cannot provide: birth 1950-06-15 with to_date
+2999-12-31 is refused 422 by the birth-relative MAX_DASHA_DAYS cap having made
+ZERO ephemeris calls, so it shows nothing either way. A late birth keeps the cap
+satisfied — measured at base with birth 2390-06-15 and from_date 2395-01-01,
+to_date at 2400-01-09, 2450-01-01 and 2500-01-01 all returned 200 with the
+swe.calc_ut count pinned at exactly 15 (the natal chart), the last of them
+running ~100 years past the ephemeris span. /v1/compat needs no such care, having
+no cap: 30 calls (its two natal charts) at reference_date 2026-05-26,
+2400-01-09, 2500-01-01 and 3000-01-01 alike.
+
+A "Swiss-backed" spy assertion on those fields would pass by construction while
+measuring nothing, which is worse than no test. They are bounded for the crash
+and for a uniform served contract; what is asserted here is the crash closing.
 
 The muhurat/lagna-shuddhi scanned-day fields are asserted to be REFUSED outside
 the span and ACCEPTED at the bounds, but are likewise not asserted Swiss-backed
@@ -55,8 +66,11 @@ silently.
 import datetime
 import os
 import threading
+from types import UnionType
+from typing import Annotated, Union, get_args, get_origin
 
 import pytest
+from pydantic import AfterValidator, BaseModel
 
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
@@ -65,6 +79,7 @@ import swisseph as swe
 from fastapi.testclient import TestClient
 
 from bphs_core import utils
+from app import schemas as app_schemas
 from app.main import app
 from app.schemas import MAX_EPHEMERIS_DATE, MIN_EPHEMERIS_DATE
 from tests.conftest import SAMPLE_A, SAMPLE_B
@@ -155,6 +170,130 @@ _IDS = [c[0] for c in _SINGLE_DATE_CASES]
 
 
 # ---------------------------------------------------------------------------
+# The COUNT is derived here, never typed into prose
+# ---------------------------------------------------------------------------
+#
+# The first draft of this module said "eight" because a grep for `IsoDateStr`
+# was eyeballed and the three start_date/end_date pairs were read as two. The
+# number was wrong in five places before anyone re-counted. So the enumeration
+# is computed from the schema module itself and asserted, and any future date
+# input either appears here or reddens this file.
+
+
+_OUT_OF_SPAN_PROBES = ("2500-01-01", datetime.date(2500, 1, 1))
+
+
+def _after_validators(annotation) -> list:
+    """Every AfterValidator function reachable inside this annotation.
+
+    Recursive because a naive ``field.metadata`` check gets ``reference_date``
+    WRONG: it is declared ``BoundedReferenceDate | None``, and for a union
+    Pydantic leaves ``FieldInfo.metadata`` EMPTY — the validator lives on the
+    union's Annotated member, not on the field.
+    """
+    out: list = []
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        out += [m.func for m in args[1:] if isinstance(m, AfterValidator)]
+        out += _after_validators(args[0])
+        return out
+    if get_origin(annotation) in (Union, UnionType):
+        for arg in get_args(annotation):
+            out += _after_validators(arg)
+    return out
+
+
+def _rejects_out_of_span(funcs) -> bool:
+    """Does any of these validators actually REFUSE a date outside the span?
+
+    Presence of an AfterValidator is NOT the question, and testing for it was a
+    real bug in the first draft of this checker. ``IsoDateStr`` carries its own
+    AfterValidator — the ISO *shape* check — so a presence test calls every bare
+    ``IsoDateStr`` field "bounded". Measured: with that version, reverting
+    ``at_date: BoundedAtDate`` to ``at_date: IsoDateStr`` left this file GREEN,
+    which is exactly the regression the checker exists to catch.
+
+    So the validators are CALLED with an out-of-span probe and must raise. A
+    shape validator accepts 2500-01-01 happily; only a range validator refuses.
+    """
+    for fn in funcs:
+        for probe in _OUT_OF_SPAN_PROBES:
+            try:
+                fn(probe)
+            except ValueError:
+                return True
+            except Exception:
+                continue  # wrong probe type for this validator; try the other
+    return False
+
+
+def _request_model_date_fields() -> dict[tuple[str, str], bool]:
+    """{(model, field): is_bounded} for every date-ish field on a request model."""
+    found: dict[tuple[str, str], bool] = {}
+    for name in dir(app_schemas):
+        obj = getattr(app_schemas, name)
+        if not (isinstance(obj, type) and issubclass(obj, BaseModel) and obj is not BaseModel):
+            continue
+        # Request models only: response models are free to carry unbounded dates.
+        if not any(tag in name for tag in ("Request", "DataIn", "Member", "PersonFields")):
+            continue
+        for field, info in obj.model_fields.items():
+            if "date" in field:
+                # BOTH places must be gathered, and each catches what the other
+                # misses. For a plain `x: BoundedAtDate` Pydantic HOISTS the
+                # metadata onto FieldInfo.metadata and leaves `annotation` as the
+                # bare `str`/`date` — so walking the annotation alone finds
+                # nothing. For `x: BoundedReferenceDate | None` it does the
+                # opposite: metadata is EMPTY and the validator stays inside the
+                # union member. Measured both ways; a checker that looks in one
+                # place is wrong about half the fields here.
+                funcs = [m.func for m in info.metadata if isinstance(m, AfterValidator)]
+                funcs += _after_validators(info.annotation)
+                found[(name, field)] = _rejects_out_of_span(funcs)
+    return found
+
+
+def test_every_request_model_date_field_is_bounded():
+    """No date a caller can send may reach the engine unbounded."""
+    fields = _request_model_date_fields()
+    unbounded = sorted(k for k, bounded in fields.items() if not bounded)
+    assert not unbounded, (
+        "these request-model date fields carry no range validator:\n"
+        + "\n".join(f"  - {m}.{f}" for m, f in unbounded)
+    )
+
+
+def test_the_non_birth_date_field_count_is_ten():
+    """Pins the number this module's docstring states.
+
+    Ten distinct declaration sites, not ten models: birth_date is declared once
+    on BoundedPersonFields and inherited, while start_date/end_date are declared
+    separately on each of the three scan request models.
+    """
+    non_birth = sorted(k for k in _request_model_date_fields() if k[1] != "birth_date")
+    assert len(non_birth) == 10, (
+        f"expected 10 non-birth date fields on request models, found "
+        f"{len(non_birth)}:\n" + "\n".join(f"  - {m}.{f}" for m, f in non_birth)
+        + "\n\nIf a date input was added or removed, update the count in this "
+        "module's docstring, app/schemas.py and CLAUDE.md together — and add a "
+        "_SINGLE_DATE_CASES entry for it."
+    )
+
+
+def test_the_case_table_covers_every_non_birth_date_field():
+    """_SINGLE_DATE_CASES must not silently stop covering a field."""
+    declared = {f for (_m, f) in _request_model_date_fields() if f != "birth_date"}
+    covered = {field for (_l, _e, field, _bad, _ok) in _SINGLE_DATE_CASES}
+    assert declared == covered, (
+        f"case table covers {sorted(covered)} but the request models declare "
+        f"{sorted(declared)}; missing {sorted(declared - covered)}"
+    )
+    assert len(_SINGLE_DATE_CASES) == 10, (
+        f"expected one case per non-birth date field (10), got {len(_SINGLE_DATE_CASES)}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Out of span -> 422, and the 422 names the real bound
 # ---------------------------------------------------------------------------
 
@@ -229,7 +368,7 @@ def test_compat_year_9999_no_longer_overflows():
 
     Measured on 5e63404 at bphs_core/compat.py:374 —
     ``window_start + timedelta(days=25 * 365.25)`` runs past year 9999 and
-    raises. This is the ninth date field, and the one the IsoDateStr sweep
+    raises. This is the TENTH date field, and the one the IsoDateStr sweep
     missed: reference_date is a ``date``, so it never matched that grep.
     """
     r = client.post("/v1/compat", json={
