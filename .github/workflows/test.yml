@@ -75,17 +75,26 @@ jobs:
       - name: The pytest configuration does not narrow collection
         # A PLAIN `python` step, deliberately, and BEFORE any pytest step.
         #
-        # `addopts` in pyproject.toml applies to every pytest invocation in this
-        # repo, so a narrowing value there disarms the suite AND the pytest-resident
-        # guard that would have caught it — the guard is simply among the tests that
-        # no longer run. Measured: `addopts = "--collect-only"` makes
-        # `pytest ci/tests/ -q` exit 0 having collected 88 tests and executed none,
-        # and `addopts = "-k 'not narrow'"` exits 0 with the addopts guard itself
-        # deselected. Neither is catchable from inside pytest.
+        # pytest takes arguments from places the run line does not show, and each
+        # of them disarms the suite AND the pytest-resident guard that would have
+        # caught it — the guard is simply among the tests that no longer run.
+        # Measured on this repo:
         #
-        # Nothing in pytest's configuration can deselect, skip or no-op this step.
-        # ci/tests/test_pytest_collection_check.py fails if it is removed from every
-        # workflow at once.
+        #   addopts = "--collect-only" in pyproject.toml
+        #     -> `pytest ci/tests/ -q` exit 0, 119 collected, 0 executed
+        #   addopts = "-k 'not narrow'"
+        #     -> exit 0, with the addopts guard itself deselected
+        #   PYTEST_ADDOPTS='--collect-only' (a workflow-level `env:` block)
+        #     -> `pytest ci/tests/ -q` exit 0, 119 collected, 0 executed, AND
+        #        `pytest tests/ -q` exit 0, 912 collected, 0 executed with
+        #        REQUIRE_SWISS_EPHEMERIS=1 still set — fixtures do not run during
+        #        collection, so the fail-closed flag never evaluates
+        #
+        # None of those is catchable from inside pytest. This step reads its own
+        # environment and parses these workflow files, as plain python, so nothing
+        # in pytest's configuration can deselect, skip or no-op it.
+        # ci/tests/test_swiss_ephemeris_job.py::test_a_workflow_step_runs_the_
+        # standalone_collection_check fails if it is removed from every workflow.
         run: uv run --frozen python ci/check_pytest_collection.py --self-test && uv run --frozen python ci/check_pytest_collection.py
       - name: Run tests
         # Scheduled (weekly CVE-only) runs skip pytest — nothing about the code

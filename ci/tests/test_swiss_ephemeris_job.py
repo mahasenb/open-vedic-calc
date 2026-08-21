@@ -197,81 +197,16 @@ def _runs(job: dict) -> list[str]:
     return [str(step["run"]) for step in _steps(job) if "run" in step]
 
 
-def _join_shell_continuations(run: str) -> list[str]:
-    """Split a ``run:`` body into LOGICAL lines, joining backslash-continuations.
-
-    A long pytest invocation is very often written across several physical lines
-    with a trailing backslash, and a shell reads those as one command. Tokenising
-    them line-by-line is wrong twice over: ``shlex.split`` RAISES on a line ending
-    in a lone backslash (``ValueError: No escaped character``), which ``_commands``
-    swallows as "opaque line, skip it", and the continuation lines that follow are
-    then read as commands in their own right.
-
-    Measured, on the legitimate form this guard is supposed to accept::
-
-        uv run --frozen python -m pytest tests/test_swiss_ephemeris.py \
-          tests/test_independent_reference_corpus.py -q
-
-    every consumer of ``_commands`` broke at once — ``_pytest_targets`` returned
-    ``[]``, so ``_job_reaches`` reported the corpus module unreachable and the
-    reachability guard REDDED on a correctly-wired workflow. Fail-closed, yes, but a
-    guard that reds on legitimate input is a guard the next person to hit it weakens
-    or deletes, which is how a fail-closed false positive turns into a fail-open real
-    one. (PR #65 review, non-blocking item 3.)
-
-    Only an ODD number of trailing backslashes continues a line: a trailing ``\\\\``
-    is an escaped backslash — a real final token, not a continuation.
-    """
-    logical: list[str] = []
-    pending = ""
-    for physical in run.splitlines():
-        line = physical.rstrip("\r")
-        trailing_backslashes = len(line) - len(line.rstrip("\\"))
-        if trailing_backslashes % 2 == 1:
-            pending += line[:-1]
-            continue
-        logical.append(pending + line)
-        pending = ""
-    if pending:
-        # A continuation with nothing after it (the body ended). Keep what was
-        # accumulated rather than dropping the command entirely — dropping it is
-        # the very failure mode this function exists to remove.
-        logical.append(pending)
-    return logical
-
-
-def _commands(run: str) -> list[list[str]]:
-    """Tokenise a ``run:`` body into individual shell commands.
-
-    A ``run:`` body is shell script, so structure alone cannot answer "does this
-    invoke pytest" — but a substring search cannot either: `echo "pytest tests/"`
-    contains the string and runs nothing. Tokenising with shlex (comments stripped)
-    puts the words in argv positions, so a quoted string collapses to ONE token and
-    can no longer masquerade as a command. Commands are split on the shell operators
-    that start a new one.
-
-    Line continuations are joined first (see ``_join_shell_continuations``), so a
-    command written across several physical lines is tokenised as the single command
-    a shell would run.
-    """
-    commands: list[list[str]] = []
-    for line in _join_shell_continuations(run):
-        try:
-            tokens = shlex.split(line, comments=True)
-        except ValueError:
-            # Unbalanced quoting — treat the line as opaque rather than guessing.
-            continue
-        current: list[str] = []
-        for token in tokens:
-            if token in {"&&", "||", ";", "|", "&"}:
-                if current:
-                    commands.append(current)
-                current = []
-                continue
-            current.append(token)
-        if current:
-            commands.append(current)
-    return commands
+# Tokenising lives in ci/check_pytest_collection.py — the plain-python checker that
+# must analyse the same run bodies from OUTSIDE pytest. One definition, two readers:
+# a second copy here would drift, and the copy that stopped handling a form would be
+# the one nobody re-read. The behaviour these names carry is pinned by
+# test_commands_joins_shell_line_continuations below, which exercises the imported
+# implementation directly.
+_COLLECTION_CHECKER = _load_ci_module("check_pytest_collection")
+_join_shell_continuations = _COLLECTION_CHECKER.join_shell_continuations
+_commands = _COLLECTION_CHECKER.shell_commands
+_sets_env_inline = _COLLECTION_CHECKER.sets_env_inline
 
 
 def _invokes(run: str, program: str, *required_tokens: str) -> bool:
@@ -1726,7 +1661,6 @@ _FIXTURE = "swiss_ephemeris"
 #                                 "yes, every gated module is reached" — correctly,
 #                                 and irrelevantly.
 #   _NARROWING_FLAGS              the union, which is what this file tests against.
-_COLLECTION_CHECKER = _load_ci_module("check_pytest_collection")
 _VALUE_TAKING_DESELECT_FLAGS = _COLLECTION_CHECKER.VALUE_TAKING_DESELECT_FLAGS
 _COLLECTION_ONLY_FLAGS = _COLLECTION_CHECKER.COLLECTION_ONLY_FLAGS
 _NARROWING_FLAGS = _COLLECTION_CHECKER.NARROWING_FLAGS
@@ -2162,26 +2096,6 @@ def test_swiss_job_reaches_every_swiss_gated_module() -> None:
 
 _ADDOPTS_ENV = "PYTEST_ADDOPTS"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
-
-
-def _sets_env_inline(tokens: list[str], name: str) -> bool:
-    """True when a command sets ``name`` as a shell environment assignment.
-
-    POSITION is what discriminates here, not the presence of the string. A real
-    assignment is either a leading ``VAR=value`` prefix on the command or an
-    argument to ``export``; ``echo "PYTEST_ADDOPTS=-k nothing"`` shlex-collapses to
-    a single token that still *starts* with the variable name, so a name-only
-    match would red on a harmless echo — the fail-closed-false-positive shape that
-    `_join_shell_continuations` exists to undo elsewhere in this file.
-    """
-    index = 0
-    while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
-        if tokens[index].split("=", 1)[0] == name:
-            return True
-        index += 1
-    if tokens and tokens[0] == "export":
-        return any(token.split("=", 1)[0] == name for token in tokens[1:])
-    return False
 
 
 def _addopts_env_declarations(document: dict, job: dict) -> list[str]:
