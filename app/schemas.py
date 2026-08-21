@@ -84,8 +84,23 @@ MAX_EPHEMERIS_DATE = date(2400, 1, 9)
 # WHY THERE IS A CEILING AT ALL. _is_adhik_maasa asks whether the amanta month
 # containing the scanned day is intercalary, which needs the new moons
 # bracketing it; the furthest is at most one synodic month away (max ~29.83 d),
-# plus the scanned day and the timezone span (up to 0.583 d at tz=+14) — a
-# ceiling near 31.4 d against the 31.835 d measured.
+# plus the scanned day and the timezone span (up to 0.583 d at tz=+14).
+#
+# Those terms sum to ~31.4 d, which is BELOW the 31.835 d measured — so state
+# plainly what the remaining ~0.4 d is, rather than quoting a "ceiling" a
+# measurement already exceeds. It is SEARCH OVERSHOOT: pyjhora finds the new
+# moon by iterating, and the iteration evaluates positions slightly PAST the
+# instant it converges on, so the furthest Julian Day touched is a little beyond
+# the event itself. The astronomy bounds the event; the solver adds a small,
+# implementation-dependent tail on top of it.
+#
+# That is precisely why the served bound is set from the MEASURED reach with a
+# margin, and not from the analytic sum: the analytic terms bound the event, and
+# the thing that has to stay inside the files is the furthest READ. Treat ~31.4 d
+# as the astronomical floor under the measurement, never as a proven ceiling over
+# it — an independent re-measurement on a different sample returned +31.602 d for
+# this limb, close to but not equal to the +31.834 d recorded here, which is
+# exactly the kind of solver-dependent variation the 9.018 d margin absorbs.
 #
 # THE DERIVATION. The shipped Sun/Moon data was bisected against the files
 # actually present: it answers from JD 2378496.4998 (1799-12-31 23:59 UT) to
@@ -128,42 +143,63 @@ MIN_SCANNED_DATE = MIN_EPHEMERIS_DATE
 MAX_SCANNED_DATE = date(2399, 12, 1)
 
 
-def _out_of_span_message(field_name: str, lo: date, hi: date) -> str:
+# WHY the two spans need two REASONS, not just two pairs of dates. For a point
+# lookup the span really is "what the files cover". For a scanned day it is not:
+# the files cover a good deal more than MAX_SCANNED_DATE, and a caller told that
+# 2399-12-15 is outside "the span the data files cover" would reasonably conclude
+# the service was wrong, because the data for that day plainly exists. What is
+# outside the files is what the scan READS AROUND that day. The reason travels
+# with the bound so the 422 and the OpenAPI text can never explain a scanned-day
+# refusal in point-lookup terms.
+_POINT_SPAN_REASON = (
+    "the span the shipped Swiss Ephemeris data files actually cover for every "
+    "supported timezone offset; outside it the answer would come from the "
+    "Moshier fallback"
+)
+_SCAN_SPAN_REASON = (
+    "the span an electional scan can compute ENTIRELY on the shipped Swiss "
+    "Ephemeris data. It is narrower than the range those files cover, because a "
+    "scanned day is not a point lookup: determining the lunar month and yoga for "
+    "one day reads up to ~32 days beyond it, so a day close to the end of the "
+    "data would be answered partly from the Moshier fallback"
+)
+
+
+def _out_of_span_message(field_name: str, lo: date, hi: date, reason: str) -> str:
     """The 422 body for any date outside the span that binds *field_name*.
 
     Named per field rather than hardcoded to "birth_date", because every date
     the caller can send is bounded and a message naming the wrong field is worse
-    than a vague one. The span is a parameter rather than the module constants
-    because the scanned-day fields are bound more tightly than the point-lookup
-    fields, and a 422 quoting the wrong one of the two would send the caller
-    looking for a bug in its own request.
+    than a vague one. The span AND its reason are parameters rather than module
+    constants because the scanned-day fields are bound more tightly than the
+    point-lookup fields, and a 422 quoting the wrong one of the two would send
+    the caller looking for a bug in its own request.
     """
     return (
         f"{field_name} must be between {lo.isoformat()} and "
-        f"{hi.isoformat()} (the span the shipped Swiss "
-        "Ephemeris data files actually cover for every supported timezone "
-        "offset; outside it the answer would come from the Moshier fallback)"
+        f"{hi.isoformat()} ({reason})"
     )
 
 
-def _openapi_description(what: str, lo: date, hi: date) -> str:
+def _openapi_description(what: str, lo: date, hi: date, reason: str) -> str:
     """The served contract as /openapi.json advertises it.
 
     Advertising a range wider than the data covers is what these bounds exist
     to stop, so the description is generated from the constants and can never
-    drift from the validator.
+    drift from the validator. It carries the same per-span reason as the 422, so
+    a caller reading the schema and a caller reading a refusal are told the same
+    thing about why the range ends where it does.
     """
-    return (
-        f"{what}, {lo.isoformat()} to "
-        f"{hi.isoformat()} inclusive — the span covered by the "
-        "shipped Swiss Ephemeris data files for every supported timezone offset."
-    )
+    return f"{what}, {lo.isoformat()} to {hi.isoformat()} inclusive — {reason}."
 
 
 def _validate_ephemeris_date(value: date) -> date:
     if not (MIN_EPHEMERIS_DATE <= value <= MAX_EPHEMERIS_DATE):
         raise ValueError(
-            _out_of_span_message("birth_date", MIN_EPHEMERIS_DATE, MAX_EPHEMERIS_DATE)
+            _out_of_span_message(
+                "birth_date", MIN_EPHEMERIS_DATE, MAX_EPHEMERIS_DATE,
+                _POINT_SPAN_REASON,
+            )
         )
     return value
 
@@ -173,15 +209,18 @@ def _bounded_date(
     what: str,
     lo: date = MIN_EPHEMERIS_DATE,
     hi: date = MAX_EPHEMERIS_DATE,
+    reason: str = _POINT_SPAN_REASON,
 ):
     """``Annotated[date, ...]`` bounded to the given span."""
     def _check(value: date) -> date:
         if not (lo <= value <= hi):
-            raise ValueError(_out_of_span_message(field_name, lo, hi))
+            raise ValueError(_out_of_span_message(field_name, lo, hi, reason))
         return value
 
     return Annotated[
-        date, AfterValidator(_check), Field(description=_openapi_description(what, lo, hi))
+        date,
+        AfterValidator(_check),
+        Field(description=_openapi_description(what, lo, hi, reason)),
     ]
 
 
@@ -190,6 +229,7 @@ def _bounded_iso_date_str(
     what: str,
     lo: date = MIN_EPHEMERIS_DATE,
     hi: date = MAX_EPHEMERIS_DATE,
+    reason: str = _POINT_SPAN_REASON,
 ):
     """``Annotated[str, ...]``: an ISO date string INSIDE the given span.
 
@@ -202,13 +242,13 @@ def _bounded_iso_date_str(
     def _check(value: str) -> str:
         parsed = datetime.strptime(value, "%Y-%m-%d").date()
         if not (lo <= parsed <= hi):
-            raise ValueError(_out_of_span_message(field_name, lo, hi))
+            raise ValueError(_out_of_span_message(field_name, lo, hi, reason))
         return value
 
     return Annotated[
         IsoDateStr,
         AfterValidator(_check),
-        Field(description=_openapi_description(what, lo, hi)),
+        Field(description=_openapi_description(what, lo, hi, reason)),
     ]
 
 
@@ -221,7 +261,8 @@ BoundedBirthDate = Annotated[
     AfterValidator(_validate_ephemeris_date),
     Field(
         description=_openapi_description(
-            "Birth date", MIN_EPHEMERIS_DATE, MAX_EPHEMERIS_DATE
+            "Birth date", MIN_EPHEMERIS_DATE, MAX_EPHEMERIS_DATE,
+            _POINT_SPAN_REASON,
         )
     ),
 ]
@@ -279,10 +320,12 @@ BoundedToDate = _bounded_iso_date_str("to_date", "Timeline end date")
 # (app/main.py's muhurat handler, and scan_lagna_shuddhi / the family scan in
 # bphs_core/lagna_shuddhi.py), so start_date is itself a scanned day.
 BoundedScanStartDate = _bounded_iso_date_str(
-    "start_date", "Scan range start date", MIN_SCANNED_DATE, MAX_SCANNED_DATE
+    "start_date", "Scan range start date", MIN_SCANNED_DATE, MAX_SCANNED_DATE,
+    _SCAN_SPAN_REASON,
 )
 BoundedScanEndDate = _bounded_iso_date_str(
-    "end_date", "Scan range end date", MIN_SCANNED_DATE, MAX_SCANNED_DATE
+    "end_date", "Scan range end date", MIN_SCANNED_DATE, MAX_SCANNED_DATE,
+    _SCAN_SPAN_REASON,
 )
 BoundedReferenceDate = _bounded_date("reference_date", "Reference date")
 

@@ -76,7 +76,7 @@ that differs from another tool can be explained rather than guessed at:
 | Bhava-Chalit cusps | Sidereal **Placidus**, supplementary only | `chalit_cusps` in the chart response |
 | Ascendant | Computed directly from `swe.houses`, not from the chart library | `bphs_core/chart.py` |
 | Sunrise / sunset | **Disc centre at the true (geometric) horizon** — the classical Hindu convention; `rsmi` words `897` / `898` | `bphs_core/utils.py`, `RISE_FLAGS` / `SET_FLAGS` |
-| Ephemeris | Swiss Ephemeris data files; served date range **1800-01-02 … 2400-01-09** for **every** date field | baked into the images; bound in `app/schemas.py` |
+| Ephemeris | Swiss Ephemeris data files; served date range **1800-01-02 … 2400-01-09**, narrowing to **… 2399-12-01** for the electional scan fields | baked into the images; bound in `app/schemas.py` |
 
 That range is the **measured** span of the shipped data files, not the
 "AD 1800–2400" label on them. The files stop answering on 2400-01-11, and
@@ -88,16 +88,40 @@ at each end because a local date spans UTC instants a day either side once
 `timezone_offset_hours` is applied. See `EPHEMERIS_LICENSE.md` for the
 measurement.
 
-**Every** date a caller can send is bounded to that one span — all ten beyond
-`birth_date`: `at_date` (`/v1/transits`), `from_date` / `to_date` (`/v1/dashas`),
-the `start_date` / `end_date` pair on `/v1/muhurat`,
-`/v1/muhurat/lagna-shuddhi` and `/v1/muhurat/family-lagna-shuddhi` (including
-their `/async` submit forms), and the optional `reference_date` on `/v1/compat`.
-Two of those used to fault rather than answer — `at_date=9999-01-01` raised an
-uncaught `swisseph.Error` and `reference_date=9999-01-01` an uncaught
+**Every** date a caller can send is bounded — all ten beyond `birth_date` — but
+they are bounded by **two** spans, not one, because a *point lookup* and a
+*scanned day* ask different amounts of the same files.
+
+**Point-lookup fields — 1800-01-02 … 2400-01-09.** `at_date` (`/v1/transits`),
+`from_date` / `to_date` (`/v1/dashas`), and the optional `reference_date` on
+`/v1/compat`. These read the instant they name, so the span above — the data,
+plus a day of timezone margin at each end — is exactly right for them. Measured,
+a transit request reads at most 0.583 d past `at_date`, which is just the
+timezone offset.
+
+**Scanned-day fields — 1800-01-02 … 2399-12-01.** The `start_date` / `end_date`
+pairs on `/v1/muhurat`, `/v1/muhurat/lagna-shuddhi` and
+`/v1/muhurat/family-lagna-shuddhi` (including their `/async` submit forms). A
+scanned day is **not** a point lookup: deciding whether its lunar month is
+intercalary needs the new moons bracketing it, and the yoga limb searches
+similarly, so computing one day reads up to **~32 days around it** — measured
++31.835 d forward at the furthest. Bounding these to the point-lookup span
+therefore let an accepted scan run off the end of the data: at 2400-01-09, 53 of
+64 (day, timezone) combinations read past the end of the files and 35 lost
+accuracy on days the files *do* cover, at HTTP 200. The upper bound is pulled in
+by 39 days so the whole of that reach still lands inside the data. The **lower**
+bound is not pulled in, deliberately — the backward search also leaves the files,
+but swisseph's fallback is measured *not* to persist in that direction, so
+narrowing there would cost ~4.5 years of range and buy nothing.
+
+Two of these fields used to fault rather than answer — `at_date=9999-01-01`
+raised an uncaught `swisseph.Error` and `reference_date=9999-01-01` an uncaught
 `OverflowError`, both surfacing as a bare 500 — and the muhurat scan range used
-to serve dates past the files at 200 off the fallback. All are 422 now, and each
-422 names the offending field and both bounds.
+to serve dates past the files at 200 off the fallback. All are 422 now. Each 422
+names the offending field, both bounds, **and which of the two spans it is
+quoting**, because "outside the range the data files cover" is a true reason for
+a point lookup and a misleading one for a scanned day, whose refused dates are
+themselves covered by the files.
 
 Two caveats worth knowing, both measured:
 
@@ -109,22 +133,27 @@ Two caveats worth knowing, both measured:
   span. They are bounded for the crash and for one consistent served span, not
   because a fallback answer was measured behind them. The cost is that a
   late-born chart can no longer request a timeline running past 2400-01-09.
-- The bound does **not** make every muhurat scan Swiss-backed at the very edges
-  of the span. Several limbs legitimately look outside the scanned day — the
-  eclipse veto must find the *next* eclipse, and the Adhika-Maasa check reads the
-  bracketing new moons — so a day scanned near either end reads past the files.
-  Reading past them is not itself the defect; no data exists there. The defect is
-  that swisseph *keeps* the fallback afterwards, so a later lookup at a date the
-  files **do** cover can answer analytically too. `_is_eclipse_day` now restores
-  the ephemeris state on the way out, which closes its share of that.
-  Measured after the fix: the low end loses no accuracy at all (zero in-span
-  fallback across 58 dates sampled 1800-01-02…1801-07-14, despite most of those
-  scans' calls answering from the fallback at dates with no data); the interior
-  is clean, including multi-day range scans at every timezone; and a residue
-  remains over roughly the final fortnight of the range, timezone-dependent,
-  caused by the tithi and lunar-month searches running past the data end inside a
-  single library call. That remainder is an engine defect at the data edge,
-  tracked separately from these schema bounds.
+- Several limbs legitimately look outside the scanned day — the eclipse veto must
+  find the *next* eclipse, the Adhika-Maasa check reads the bracketing new moons,
+  and the yoga limb searches similarly — so reading past the data at the very
+  edge of the range was once unavoidable. Reading past it is not itself the
+  defect; no data exists there. The defect is that swisseph *keeps* the fallback
+  afterwards, so a later lookup at a date the files **do** cover answers
+  analytically too, and that happens *inside* a single library call where no
+  restore can intercept it. Two things close it, and they are different in kind:
+  `_is_eclipse_day` restores the ephemeris state on the way out, and the
+  scanned-day fields are now bounded so the searches have nothing to run off in
+  the first place. Measured after both: the low end loses no accuracy (zero
+  in-span fallback across 58 dates sampled 1800-01-02…1801-07-14, despite most of
+  those scans' calls answering from the fallback at dates with no data); the
+  interior is clean, including multi-day range scans at every timezone; and the
+  end-of-range residue is **gone for every date the service accepts** — the walk
+  over the last accepted days finds zero in-span fallback at every timezone
+  corner, where the same walk at 2400-01-09 lost 122–226 calls per request.
+  One attribution correction, since the earlier text carried it: the residue was
+  **not** principally the *tithi* search. Measured per limb, `drik.tithi` has the
+  **smallest** out-of-day reach (+1.998 d); the two that actually reached the end
+  of the data are `drik.lunar_month` (+31.834 d) and `drik.yogam` (+24.859 d).
 
 The node model is the choice most likely to explain a visible discrepancy.
 Measured over 1800–2400 at one-day steps against the real Swiss data files, the

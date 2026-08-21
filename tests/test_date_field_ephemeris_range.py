@@ -594,6 +594,39 @@ def test_a_scan_day_inside_the_point_span_but_past_the_scan_bound_is_422(
     )
 
 
+def test_the_two_spans_give_DIFFERENT_reasons_for_a_refusal():
+    """A refused scanned day must not be explained in point-lookup terms.
+
+    "Outside the span the data files cover" is a true reason for `at_date` and a
+    MISLEADING one for a scanned day: MAX_SCANNED_DATE + 1 is comfortably inside
+    the files, so a caller told that the data does not cover it would reasonably
+    conclude the service was wrong. What is outside the files is what the scan
+    READS AROUND that day. This pins that the two field classes explain
+    themselves differently, so the reason cannot silently collapse back onto one
+    wording the way the bounds themselves once did.
+    """
+    scan = client.post("/v1/muhurat",
+                       json=_muhurat(_BETWEEN_THE_TWO_SPANS, _BETWEEN_THE_TWO_SPANS))
+    point = client.post("/v1/transits", json=_transits("2500-01-01"))
+    assert scan.status_code == 422 and point.status_code == 422
+
+    files_cover = "data files actually cover"
+    assert files_cover in point.text, (
+        "the point-lookup 422 stopped explaining itself as the span the files "
+        f"cover. Got: {point.text[:300]}"
+    )
+    assert files_cover not in scan.text, (
+        "a scanned-day refusal is being explained as 'the span the data files "
+        f"actually cover' — but {_BETWEEN_THE_TWO_SPANS} IS covered by the files; "
+        "what is not covered is the ~32 days the scan reads around it. Got: "
+        f"{scan.text[:400]}"
+    )
+    assert "not a point lookup" in scan.text, (
+        f"the scanned-day 422 does not say why its span is narrower. "
+        f"Got: {scan.text[:400]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # at_date is Swiss-backed at both bounds — re-measured, not restated
 # ---------------------------------------------------------------------------
