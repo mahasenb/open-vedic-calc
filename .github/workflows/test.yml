@@ -60,6 +60,64 @@ jobs:
           # single resolve — a second declaration of it is a second chance to
           # test one side of that fork while shipping the other.
           python-version-file: .python-version
+      - name: Install uv, at the version the shipped images install
+        # THE INSTALLER IS PART OF THE RESOLVE. This used to be a bare
+        # `python -m pip install --upgrade uv` on the front of the install step
+        # below, floating to whatever was newest on the index at the moment the
+        # job ran — while Dockerfile and Dockerfile.test both install uv from a
+        # digest-pinned `FROM ghcr.io/astral-sh/uv:<version>@sha256:<digest>`
+        # stage. So CI could resolve, sync and test the lock through a DIFFERENT
+        # uv than the one that builds the shipped image: the same "the gate is
+        # not running what ships" shape as the 13-package divergence recorded on
+        # the next step, one layer further out.
+        #
+        # `version:` is EXACT and must equal the tag both Dockerfiles install —
+        # never `latest` or `latest-known`, which re-resolve per run and are the
+        # thing being removed. The Dockerfiles are the source of truth because
+        # dependabot WATCHES them (its `docker` ecosystem parses FROM
+        # instructions) and does not watch this input at all (its
+        # `github-actions` ecosystem bumps an action's `uses:` ref, never the
+        # value of an input to it). A pin nobody watches is a pin that rots, so
+        # the equality is the maintenance mechanism: the image bump arrives on
+        # its own schedule, ci/tests/test_environment_convergence.py goes red on
+        # the disagreement, and this line has to follow inside the same reviewed
+        # change. That test derives the expected value from the Dockerfiles and
+        # pins no version literal of its own.
+        #
+        # Referenced by a full release tag rather than a bare major like every
+        # sibling action here: measured 2026-08-21, astral-sh/setup-uv publishes
+        # moving major tags for v1..v7 only while its current release is
+        # v10.0.1, so `@v10` does not resolve. dependabot's github-actions
+        # ecosystem bumps this ref.
+        #
+        # enable-cache is off deliberately. There was no uv cache here before,
+        # and the action defaults it ON ("auto") on hosted runners — leaving it
+        # unset would smuggle a new Actions cache, and a new failure mode, into
+        # a change whose entire purpose is to remove a moving part.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: false
+      - name: The lockfile is FRESH (uv.lock still satisfies pyproject.toml)
+        # `--frozen` on the next step installs uv.lock exactly as committed and
+        # NEVER consults pyproject.toml — so a dependency edit committed without
+        # re-running `uv lock` is installed, tested and shipped as though it had
+        # not happened, silently, because nothing fails. Measured 2026-08-21 on
+        # a scratch copy of this repo's own pair, one pin edited in
+        # pyproject.toml with uv.lock left byte-identical:
+        #
+        #   uv lock --check ......  exit 1, "the lockfile needs to be updated"
+        #   uv export --frozen ...  exit 0   <- the silent pass
+        #   uv export --locked ...  exit 2
+        #
+        # A SEPARATE step, not a flip of the install to `uv sync --locked`: the
+        # shipped Dockerfile installs with `--frozen`, and this repo's rule is to
+        # run the exact command CI runs rather than an equivalent — putting the
+        # image and its gate on two different install paths would reintroduce a
+        # divergence in the act of closing one. Placed before the install only so
+        # a stale lock reports itself as a stale lock; it fails the job from
+        # either position. Resolves offline (~1 ms) when the lock is fresh.
+        run: uv lock --check
       - name: Install the FROZEN dependency set
         # `uv sync --frozen`, not `pip install -e ".[dev]"`. The old floating
         # install ignored uv.lock entirely and resolved whatever was newest at
@@ -69,9 +127,7 @@ jobs:
         # idna, pytz, typing-extensions, websockets, annotated-types,
         # annotated-doc). The suite that gates every merge was certifying a
         # dependency set no deployment ever ran.
-        run: |
-          python -m pip install --upgrade uv
-          uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev
       - name: The pytest configuration does not narrow collection
         # A PLAIN `python` step, deliberately, and BEFORE any pytest step.
         #
@@ -196,14 +252,30 @@ jobs:
       - name: Fetch + verify the Swiss ephemeris data files
         run: python ci/fetch_swiss_ephemeris.py
 
+      - name: Install uv, at the version the shipped images install
+        # Same pin, same reason, as the `test` job above — where the full
+        # rationale (why exact, why the Dockerfiles are the source of truth, why
+        # a full release tag, why the cache stays off) is recorded once. It
+        # matters most HERE: this is the accuracy gate, and the goldens are only
+        # reproducible against a pinned resolve, which means pinning the tool
+        # that produces the resolve as well as the lock it produces it from.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: false
+
+      - name: The lockfile is FRESH (uv.lock still satisfies pyproject.toml)
+        # See the `test` job above for the measurement. `--frozen` cannot see a
+        # stale lock, and this job of all jobs must not certify goldens against
+        # a dependency set that pyproject.toml no longer asks for.
+        run: uv lock --check
+
       - name: Install the FROZEN dependency set
         # uv sync --frozen, not `pip install -e .`: the committed golden values are
         # only reproducible against a pinned resolve (pyswisseph 2.10.3.2, pyjhora
         # 4.8.7 — the same set the shipped image installs). A floating resolve would
         # turn a dependency's own numeric change into a mystery golden failure.
-        run: |
-          python -m pip install --upgrade uv
-          uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev
 
       - name: Run the full suite against real Swiss data
         env:

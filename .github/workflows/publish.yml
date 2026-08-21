@@ -50,12 +50,28 @@ jobs:
           # is the one enforcing the coverage gate that authorises the image
           # build below, so it above all must certify the set that image ships.
           python-version-file: .python-version
+      # Install uv at the version the shipped images install, rather than the
+      # bare `python -m pip install --upgrade uv` this used to carry, which
+      # floated to whatever was newest on the index at run time. The full
+      # rationale — why the version is exact, why the Dockerfiles' digest-pinned
+      # `FROM ghcr.io/astral-sh/uv:<version>@sha256:<digest>` stage is the source
+      # of truth, why a full release tag, why the cache stays off — is recorded
+      # once in test.yml's `test` job. The argument is sharpest here: this job
+      # enforces the coverage gate that AUTHORISES the image build below, so the
+      # uv it resolves and tests with had better be the uv that builds it.
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: false
+      # `--frozen` installs uv.lock as committed and never reads pyproject.toml,
+      # so it cannot see a lock left stale by a dependency edit (measured — see
+      # test.yml). This job gates the image build, and the image installs from
+      # that same lock, so a stale one would ship.
+      - run: uv lock --check
       # Install the FROZEN set, not a floating `pip install -e ".[dev]"`. This
       # job enforces the coverage gate that authorises the image build below,
       # so it of all jobs must be running the dependency set that image ships.
-      - run: |
-          python -m pip install --upgrade uv
-          uv sync --frozen --extra dev
+      - run: uv sync --frozen --extra dev
       # This job runs with the Moshier fallback (no Swiss ephemeris data files here);
       # line coverage is identical to a Swiss run — only numeric values differ, and
       # tests/test_swiss_ephemeris.py skips. It is NOT the accuracy gate: real Swiss

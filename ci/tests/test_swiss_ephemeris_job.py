@@ -1519,6 +1519,25 @@ _EXPECTED_ENABLEMENT_SNAPSHOT = {
             "if": None,
             "continue_on_error": None,
         },
+        # The two steps below joined this job when the uv toolchain was pinned:
+        # CI used to install uv with a floating `pip install --upgrade uv` while
+        # both Dockerfiles digest-pin it, and nothing asserted uv.lock was still
+        # fresh against pyproject.toml. Neither carries an `if:` or a
+        # `continue-on-error:`, so this job's enablement shape is unchanged in
+        # every respect this snapshot exists to police — the entries are added
+        # because the snapshot is positional, not because anything about when
+        # this job runs has moved. See
+        # ci/tests/test_environment_convergence.py sections 5 and 6.
+        {
+            "name": "Install uv, at the version the shipped images install",
+            "if": None,
+            "continue_on_error": None,
+        },
+        {
+            "name": "The lockfile is FRESH (uv.lock still satisfies pyproject.toml)",
+            "if": None,
+            "continue_on_error": None,
+        },
         {
             "name": "Install the FROZEN dependency set",
             "if": None,
