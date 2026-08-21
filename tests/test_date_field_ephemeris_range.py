@@ -614,8 +614,20 @@ def test_an_at_date_just_past_the_bound_would_have_leaked(swiss_ephemeris: int) 
 #                       (``drik.lunar_month``) searching back to 1798-07-10.
 #   scanned 2400-01-09   342/2800 on Moshier — 48 from ``_is_adhik_maasa``
 #                       reaching forward to 2400-01-29, and 294 from the day's
-#                       OWN panchanga limbs (``drik.tithi`` at muhurat.py:492
-#                       first) at 2400-01-08..2400-01-10.
+#                       OWN panchanga limbs — ``drik.tithi``, the first of the
+#                       four — at 2400-01-08..2400-01-10.
+#
+# Those call sites are named by FUNCTION, deliberately, not by line number. The
+# first draft of this block cited the tithi call by line number, which was true
+# at the base commit and false by the time it was written: the same change that
+# added this comment added ~25 lines to ``_is_eclipse_day`` above it, shifting
+# that call (492 -> 517). A citation invalidated by its own commit is the worst
+# case of the failure this repo already recorded ("a citation that rots
+# silently is worse than none"), and it is not hypothetical here — sweeping
+# every file:line citation in the tree found FOUR more that no longer point at
+# what they claim, all of them predating this change. Name the callee and its
+# enclosing function; both are greppable and neither moves when a line is
+# inserted somewhere above.
 #
 # THE PART THAT ACTUALLY COSTS ACCURACY
 # -------------------------------------
