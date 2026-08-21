@@ -107,10 +107,14 @@ _CHITRA_STAR = "Spica"
 # swisseph's SIDM_LAHIRI is a t0/rate polynomial (t0 = J1900) evaluated under a modern
 # precession model, not a re-derivation of the Committee's tables, so Spica drifts
 # slightly from exactly 180 deg. Measured: worst 73.9328 arcsec across the corpus
-# epochs, and worst 78.9051 arcsec swept yearly across the whole supported birth span
-# (1800-01-01..2400-12-31, app/schemas.py). 120 arcsec is that span-wide envelope with
-# margin, and still 2.3x inside the nearest competing convention (Krishnamurti, minimum
-# 274.7359 arcsec over the same epochs) — see test_the_anchors_discriminate.
+# epochs, and worst 78.9051 arcsec swept yearly across the data files' full label span
+# (1800-01-01..2400-12-31 — WIDER than the served birth-date bound; see
+# MIN_EPHEMERIS_DATE / MAX_EPHEMERIS_DATE in app/schemas.py). That the sweep is wider
+# than the served span is the safe direction for a TOLERANCE: an envelope measured over
+# a superset still bounds every instant the service will actually answer, so narrowing
+# the served bound cannot invalidate this number. 120 arcsec is that span-wide envelope
+# with margin, and still 2.3x inside the nearest competing convention (Krishnamurti,
+# minimum 274.7359 arcsec over the same epochs) — see test_the_anchors_discriminate.
 _CHITRA_TOLERANCE_ARCSEC = 120.0
 
 # --- A2: the reform-epoch value ---------------------------------------------------

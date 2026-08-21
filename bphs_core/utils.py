@@ -15,9 +15,11 @@ from jhora.panchanga import drik
 # the actual instantaneous intersection of the Moon's orbital plane with the
 # ecliptic -- or the MEAN node, a smoothed analytical fit to that intersection.
 # Measured on the then-pinned dependency set (pyswisseph 2.10.3.2, pyjhora 4.8.6)
-# against the real Swiss ephemeris data files, over the engine's supported
-# birth-date span (1800-01-01..2400-12-31, app/schemas.py) at one-day steps and
-# refined at one-hour steps around the worst day:
+# against the real Swiss ephemeris data files, over the data files' full label
+# span (1800-01-01..2400-12-31 -- WIDER than the served birth-date bound, which
+# is narrower and measured; see MIN_EPHEMERIS_DATE/MAX_EPHEMERIS_DATE in
+# app/schemas.py) at one-day steps and refined at one-hour steps around the
+# worst day:
 #
 #     max |true - mean| = 1.981465100 deg = 118.8879 arcmin = 7133.2744 arcsec
 #                         at 1905-10-10 22:00 UT
@@ -286,9 +288,10 @@ apply_lunar_node_model()
 # 2400-12-31), and FLG_NOABERR would be worth 20.8557 arcsec.
 #
 # WHAT THE GOVERNING FLAGS ARE WORTH. Measured with the frozen resolve against
-# the real Swiss ephemeris data files, scanning 1800-01-01..2400-12-31 (the
-# supported birth-date span, app/schemas.py) at one-day steps -- 219511 days x 9
-# grahas:
+# the real Swiss ephemeris data files, scanning 1800-01-01..2400-12-31 (the data
+# files' full label span, WIDER than the served birth-date bound -- see
+# MIN_EPHEMERIS_DATE/MAX_EPHEMERIS_DATE in app/schemas.py) at one-day steps --
+# 219511 days x 9 grahas:
 #
 #   FLG_TRUEPOS (geometric vs apparent)
 #       max 0.016817256 deg = 60.5421 arcsec, Mercury at 2353-06-16 00:00 UT.

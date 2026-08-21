@@ -50,8 +50,9 @@ retflag 65858).
 WHAT THE THREE GOVERNING FLAGS ARE ACTUALLY WORTH
 -------------------------------------------------
 Measured with the frozen resolve against the real Swiss ephemeris data files,
-scanning 1800-01-01..2400-12-31 (the supported birth-date span, app/schemas.py)
-one day at a time — 219511 days x 9 grahas:
+scanning 1800-01-01..2400-12-31 (the data files' full label span — WIDER than
+the served birth-date bound; see MIN_EPHEMERIS_DATE / MAX_EPHEMERIS_DATE in
+app/schemas.py) one day at a time — 219511 days x 9 grahas:
 
   FLG_TRUEPOS (geometric vs apparent position)
       max |declared - apparent| = 0.016817256 deg = 60.5421 arcsec
@@ -180,8 +181,9 @@ _MEASURED_FROZEN_WORD = 65810
 # defaults) is the same silent frame change as the upgrade was.
 _MEASURED_PREVIOUS_RELEASE_WORD = 66386
 
-# Epoch of maximum geometric-vs-apparent separation in the supported span, from
-# the scan quoted in the module docstring. Synthetic and deliberately chosen: at
+# Epoch of maximum geometric-vs-apparent separation in the SCANNED span, from
+# the scan quoted in the module docstring. (2353-06-16 also falls inside the
+# narrower served birth-date bound, so it stays the worst case in practice.) Synthetic and deliberately chosen: at
 # an arbitrary instant Jupiter's separation is 1.34 arcsec, small enough that a
 # sloppy tolerance could not tell the two frames apart. Mercury here is 60.54.
 _MAX_TRUEPOS_SEPARATION_UT = (2353, 6, 16, 0, 0)
