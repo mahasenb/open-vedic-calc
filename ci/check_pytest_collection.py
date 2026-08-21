@@ -50,16 +50,33 @@ WHAT IT REFUSES
    reason: it must not certify a detector from inside an already-narrowed
    environment.
 
-4. ``PYTEST_ADDOPTS`` **declared anywhere in the workflow files** — every job,
-   all three ``env:`` levels, and inline shell assignments in ``run:`` bodies.
-   This is the placement (3) cannot see: a step-level ``env:`` on a *sibling*
-   pytest step never enters this process at all.
+4. ``PYTEST_ADDOPTS`` **anywhere in the workflow files** — every job, all three
+   ``env:`` levels, and **any mention at all inside a ``run:`` body**. This is the
+   placement (3) cannot see: a step-level ``env:``, or a ``$GITHUB_ENV`` write, on
+   a *sibling* step never enters this process.
 
    (3) is narrowing-only; (4) is presence-only. Deliberate: a contributor's shell
    may legitimately carry ``PYTEST_ADDOPTS=-q``, and redding on that would teach
    people to distrust this check — but a workflow file has no legitimate reason to
-   declare the variable at all, and judging an arbitrary value's narrowing-ness
-   means reimplementing pytest's argument parser.
+   name the variable at all, and judging an arbitrary value's narrowing-ness means
+   reimplementing pytest's argument parser.
+
+   THE RUN-BODY RULE IS PRESENCE BECAUSE MODELLING FAILED. An earlier version
+   analysed argv position — a leading ``VAR=value`` prefix, or an argument to
+   ``export``. Both of those are shell-LOCAL: every ``run:`` is a fresh shell, so
+   neither escapes its own body. The form that actually reaches a later step is
+   GitHub Actions' own cross-step mechanism, ``echo "VAR=value" >> "$GITHUB_ENV"``,
+   where the assignment is an argument to ``echo`` and the position check said no.
+   Measured with one such line appended to the swiss job's install step: this
+   checker exited 0 "OK", all 149 guard tests passed, and the accuracy step would
+   then have run under ``--collect-only``. See ``run_body_names_addopts``.
+
+KNOWN BOUND, stated rather than left implicit: this scans the workflow files in
+``.github/workflows``. A composite or reusable action pulled in with ``uses:`` can
+write ``$GITHUB_ENV`` from a file outside this repository, and nothing here reads
+that. Closing it would mean resolving and fetching third-party action source — a
+different kind of check. Recorded as a bound of this control, not a claim of
+completeness.
 
 PARSED, NEVER GREPPED. ``# addopts = "-k not_corpus"`` is a comment and must stay
 invisible; a grep would red on it and a reader would then learn to distrust this
@@ -220,23 +237,35 @@ def shell_commands(run: str) -> list[list[str]]:
     return commands
 
 
-def sets_env_inline(tokens: list[str], name: str) -> bool:
-    """True when a command sets ``name`` as a shell environment assignment.
+def run_body_names_addopts(run: str) -> bool:
+    """True when a ``run:`` body mentions ``PYTEST_ADDOPTS`` at all. PRESENCE, not
+    semantics — and the plainest substring test, deliberately.
 
-    POSITION discriminates, not the presence of the string. A real assignment is
-    either a leading ``VAR=value`` prefix or an argument to ``export``;
-    ``echo "PYTEST_ADDOPTS=..."`` shlex-collapses to a single token that still
-    *starts* with the variable name, so a name-only match would red on a harmless
-    echo.
+    TOKENISING WAS THE BUG (PR #66 round-2 review, blocking finding). The previous
+    version of this check analysed argv POSITION: it accepted a leading
+    ``VAR=value`` prefix or an argument to ``export`` as an assignment, and rejected
+    anything else as "just an echo". Both forms it recognised are shell-LOCAL —
+    every ``run:`` is a fresh shell, so neither escapes its own body. The form that
+    actually reaches a later step is GitHub Actions' own cross-step mechanism::
+
+        echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"
+
+    ``shell_commands`` renders that as
+    ``['echo', 'PYTEST_ADDOPTS=--collect-only', '>>', '$GITHUB_ENV']`` — the
+    assignment is an ARGUMENT to echo, so the position check returned False. Measured
+    with that one line appended to the swiss job's install step: the checker exited 0
+    "OK", all 149 guard tests passed, and the accuracy step would then have run under
+    ``--collect-only`` (912 collected, 0 executed, ``REQUIRE_SWISS_EPHEMERIS`` never
+    evaluating). The checker caught the weak forms and missed the effective one.
+
+    So this does not model shell semantics at all. Telling a harmless echo from a
+    poisoning one requires modelling redirection, heredocs, ``printf``, ``tee``,
+    variable indirection — an open surface, and modelling is precisely what failed.
+    A ``run:`` body has no more legitimate reason to name this variable than an
+    ``env:`` block does; if one ever genuinely needs to, that is an exception to
+    record here deliberately, not a rule to relax.
     """
-    index = 0
-    while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
-        if tokens[index].split("=", 1)[0] == name:
-            return True
-        index += 1
-    if tokens and tokens[0] == "export":
-        return any(token.split("=", 1)[0] == name for token in tokens[1:])
-    return False
+    return ADDOPTS_ENV in run
 
 
 # ---------------------------------------------------------------------------
@@ -357,13 +386,14 @@ def workflow_addopts_declarations(root: Path) -> list[str]:
                         f"{ADDOPTS_ENV} ({step_env[ADDOPTS_ENV]!r})."
                     )
                 run = step.get("run")
-                if run and any(
-                    sets_env_inline(tokens, ADDOPTS_ENV)
-                    for tokens in shell_commands(str(run))
-                ):
+                if run and run_body_names_addopts(str(run)):
                     found.append(
-                        f"{relative} job {job_name!r} step {label!r} assigns "
-                        f"{ADDOPTS_ENV} inline in its run body."
+                        f"{relative} job {job_name!r} step {label!r} names "
+                        f"{ADDOPTS_ENV} in its run body. Any mention is refused: "
+                        f"`echo \"{ADDOPTS_ENV}=...\" >> \"$GITHUB_ENV\"` sets the "
+                        "variable for every LATER step in the job, which is how a "
+                        "single line in an install step silently disarms the "
+                        "accuracy gate that follows it."
                     )
     return found
 
@@ -460,18 +490,24 @@ def _self_test() -> int:
                      "--ignore=tests/test_swiss_ephemeris.py")
     env_clean = ("", "-q", "--color=no", "-q --strict-markers")
 
-    # The workflow-declaration arm, exercised through the same tokenising the real
-    # scan uses. A leading assignment and an `export` are declarations; an ECHO of
-    # the identical string is not.
+    # The run-body arm. `$GITHUB_ENV` forms come FIRST because they are the ones
+    # that persist across steps — and the ones the previous, tokenising version of
+    # this check let through.
     inline_declaring = (
+        'echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"',
+        "echo PYTEST_ADDOPTS=--co >> $GITHUB_ENV",
+        'printf "PYTEST_ADDOPTS=%s" --collect-only >> "$GITHUB_ENV"',
         'PYTEST_ADDOPTS="--collect-only" pytest tests/ -q',
         "export PYTEST_ADDOPTS=-k nothing",
         "REQUIRE_SWISS_EPHEMERIS=1 PYTEST_ADDOPTS=--co pytest tests/",
+        # A bare mention, no assignment: still refused. Presence, not semantics.
+        'echo "PYTEST_ADDOPTS"',
     )
     inline_clean = (
-        'echo "PYTEST_ADDOPTS=--collect-only"',
         "pytest tests/ -q",
         "python ci/check_pytest_collection.py",
+        "uv sync --frozen --extra dev\nuv run --frozen pytest tests/ -q",
+        'echo "REQUIRE_SWISS_EPHEMERIS=1" >> "$GITHUB_ENV"',
     )
 
     failures: list[str] = []
@@ -490,11 +526,11 @@ def _self_test() -> int:
             failures.append(f"FALSELY flagged as a narrowing {ADDOPTS_ENV}: {value!r}")
 
     for run in inline_declaring:
-        if not any(sets_env_inline(t, ADDOPTS_ENV) for t in shell_commands(run)):
-            failures.append(f"NOT DETECTED as an inline {ADDOPTS_ENV} assignment: {run!r}")
+        if not run_body_names_addopts(run):
+            failures.append(f"NOT DETECTED as a run body naming {ADDOPTS_ENV}: {run!r}")
     for run in inline_clean:
-        if any(sets_env_inline(t, ADDOPTS_ENV) for t in shell_commands(run)):
-            failures.append(f"FALSELY flagged as an inline assignment: {run!r}")
+        if run_body_names_addopts(run):
+            failures.append(f"FALSELY flagged as naming {ADDOPTS_ENV}: {run!r}")
 
     if failures:
         print("self-test FAILED:", file=sys.stderr)
@@ -510,7 +546,7 @@ def _self_test() -> int:
         f"self-test OK ({total} fixtures discriminated across three arms: "
         f"{len(narrowing_fixtures)}+{len(clean_fixtures)} pyproject addopts, "
         f"{len(env_narrowing)}+{len(env_clean)} runtime {ADDOPTS_ENV}, "
-        f"{len(inline_declaring)}+{len(inline_clean)} inline assignment)"
+        f"{len(inline_declaring)}+{len(inline_clean)} run-body mention)"
     )
     return 0
 

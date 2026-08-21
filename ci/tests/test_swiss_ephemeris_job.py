@@ -206,7 +206,7 @@ def _runs(job: dict) -> list[str]:
 _COLLECTION_CHECKER = _load_ci_module("check_pytest_collection")
 _join_shell_continuations = _COLLECTION_CHECKER.join_shell_continuations
 _commands = _COLLECTION_CHECKER.shell_commands
-_sets_env_inline = _COLLECTION_CHECKER.sets_env_inline
+_run_body_names_addopts = _COLLECTION_CHECKER.run_body_names_addopts
 
 
 def _invokes(run: str, program: str, *required_tokens: str) -> bool:
@@ -2121,10 +2121,8 @@ def _addopts_env_declarations(document: dict, job: dict) -> list[str]:
         if isinstance(step_env, dict) and _ADDOPTS_ENV in step_env:
             found.append(f"step {label!r} env: {step_env[_ADDOPTS_ENV]!r}")
         run = step.get("run")
-        if run and any(
-            _sets_env_inline(tokens, _ADDOPTS_ENV) for tokens in _commands(str(run))
-        ):
-            found.append(f"step {label!r} run: inline {_ADDOPTS_ENV}= assignment")
+        if run and _run_body_names_addopts(str(run)):
+            found.append(f"step {label!r} run: names {_ADDOPTS_ENV}")
 
     return found
 
@@ -2139,21 +2137,30 @@ _narrowing_addopts = _COLLECTION_CHECKER.narrowing_addopts
 def test_addopts_parser_discriminates() -> None:
     """Fixtures both addopts arms must get right — each is something a textual
     scan of the workflow or of pyproject.toml gets wrong."""
-    # --- the environment arm -------------------------------------------------
-    # A real leading assignment, and a real `export`, are found.
-    assert _sets_env_inline(
-        shlex.split('PYTEST_ADDOPTS=-k nothing uv run pytest tests/'), _ADDOPTS_ENV
-    )
-    assert _sets_env_inline(shlex.split('export PYTEST_ADDOPTS="-k nothing"'), _ADDOPTS_ENV)
-    # Two assignments in a row: the scan must not stop at the first.
-    assert _sets_env_inline(
-        shlex.split('REQUIRE_SWISS_EPHEMERIS=1 PYTEST_ADDOPTS=-x pytest tests/'), _ADDOPTS_ENV
-    )
-    # An ECHO of the same string is not an assignment.
-    assert not _sets_env_inline(
-        shlex.split('echo "PYTEST_ADDOPTS=-k nothing"'), _ADDOPTS_ENV
-    )
-    assert not _sets_env_inline(shlex.split("pytest tests/ -q"), _ADDOPTS_ENV)
+    # --- the run-body arm ----------------------------------------------------
+    # PRESENCE, not argv position. The position-based version of this check missed
+    # `>> "$GITHUB_ENV"` -- the ONLY form that persists to a later step, and the one
+    # a sibling pytest step actually runs under (PR #66 round-2 review). Every form
+    # below is refused, including a bare mention.
+    for run in (
+        'echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"',
+        "echo PYTEST_ADDOPTS=--co >> $GITHUB_ENV",
+        'PYTEST_ADDOPTS=-k nothing uv run pytest tests/',
+        'export PYTEST_ADDOPTS="-k nothing"',
+        'REQUIRE_SWISS_EPHEMERIS=1 PYTEST_ADDOPTS=-x pytest tests/',
+        'echo "PYTEST_ADDOPTS=-k nothing"',
+        'echo "PYTEST_ADDOPTS"',
+    ):
+        assert _run_body_names_addopts(run), f"run body not flagged: {run!r}"
+
+    # A run body that does not name it is clean, including a $GITHUB_ENV write of a
+    # DIFFERENT variable -- the rule is about this variable, not about the idiom.
+    for run in (
+        "pytest tests/ -q",
+        "uv sync --frozen --extra dev",
+        'echo "REQUIRE_SWISS_EPHEMERIS=1" >> "$GITHUB_ENV"',
+    ):
+        assert not _run_body_names_addopts(run), f"clean run body flagged: {run!r}"
 
     def job_and_document(text: str) -> tuple[dict, dict]:
         document = yaml.safe_load(text)
@@ -2194,19 +2201,29 @@ def test_addopts_parser_discriminates() -> None:
     )
     assert _addopts_env_declarations(document, job) == []
 
-    # Nor is an echo of it inside a run body.
+    # An ECHO of it inside a run body IS now a declaration — this assertion was
+    # inverted before (PR #66 round-2 review). `echo "PYTEST_ADDOPTS=..." >>
+    # "$GITHUB_ENV"` is GitHub's own cross-step mechanism and the ONLY form that
+    # persists to a later step; telling it apart from a harmless echo means
+    # modelling shell redirection, and that modelling is exactly what let it
+    # through. Presence is the rule for a run body now.
+    for body in (
+        '      - run: echo "PYTEST_ADDOPTS=-k nothing"\n',
+        '      - run: echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"\n',
+        '      - run: PYTEST_ADDOPTS="-k nothing" pytest tests/ -q\n',
+    ):
+        document, job = job_and_document(
+            "jobs:\n  swiss-ephemeris:\n    steps:\n" + body
+        )
+        assert _addopts_env_declarations(document, job), f"not flagged: {body!r}"
+
+    # A run body that does not name it stays clean, including a $GITHUB_ENV write
+    # of a different variable.
     document, job = job_and_document(
         "jobs:\n  swiss-ephemeris:\n    steps:\n"
-        '      - run: echo "PYTEST_ADDOPTS=-k nothing"\n'
+        '      - run: echo "REQUIRE_SWISS_EPHEMERIS=1" >> "$GITHUB_ENV"\n'
     )
     assert _addopts_env_declarations(document, job) == []
-
-    # An inline assignment on the real command IS one.
-    document, job = job_and_document(
-        "jobs:\n  swiss-ephemeris:\n    steps:\n"
-        '      - run: PYTEST_ADDOPTS="-k nothing" pytest tests/ -q\n'
-    )
-    assert _addopts_env_declarations(document, job)
 
     # --- the pyproject arm ---------------------------------------------------
     narrowing_forms = (
