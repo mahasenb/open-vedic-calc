@@ -323,9 +323,15 @@ class TestDashasEndpoint:
         """
         Date range entirely before birth → dashas filtered out → empty list.
         SAMPLE_A birth = 1950-06-15, so 1800-1900 should return nothing.
+
+        The lower end is MIN_EPHEMERIS_DATE rather than 1800-01-01: from_date is
+        bounded to the served ephemeris span (app/schemas.py) and 1800-01-01 is
+        one day below it. The property under test — a window entirely before
+        birth yields an empty timeline — is unchanged.
         """
+        from app.schemas import MIN_EPHEMERIS_DATE
         r = client.post("/v1/dashas", json=self._req(
-            from_date="1800-01-01", to_date="1900-01-01"
+            from_date=MIN_EPHEMERIS_DATE.isoformat(), to_date="1900-01-01"
         ))
         assert r.status_code == 200
         assert r.json() == []

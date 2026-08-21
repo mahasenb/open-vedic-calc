@@ -213,12 +213,26 @@ def test_family_lagna_shuddhi_sub_minute_step_is_422():
 # ---------------------------------------------------------------------------
 
 def test_dashas_unbounded_far_future_is_422():
-    """to_date=9999-12-31 must be rejected before any period materialization."""
-    req = {**SAMPLE_A, "from_date": "2000-01-01", "to_date": "9999-12-31",
+    """A far-future to_date must be rejected before any period materialization.
+
+    This asserts the MAX_DASHA_DAYS cap specifically, so to_date is the LAST
+    date the ephemeris span admits rather than 9999-12-31. Since the span bound
+    landed on from_date/to_date (app/schemas.py), 9999-12-31 is refused by the
+    schema before this handler runs — so probing with it would leave the cap
+    untested and this guard would still pass with MAX_DASHA_DAYS deleted.
+    MAX_EPHEMERIS_DATE against SAMPLE_A's 1950 birth is ~450 years, far past the
+    128-year cap, so the cap is unambiguously what answers here.
+    9999-12-31 is covered as a span-bound refusal in
+    tests/test_date_field_ephemeris_range.py.
+    """
+    from app.schemas import MAX_EPHEMERIS_DATE
+    req = {**SAMPLE_A, "from_date": "2000-01-01", "to_date": MAX_EPHEMERIS_DATE.isoformat(),
            "systems": ["vimshottari"]}
     r = client.post("/v1/dashas", json=req)
     assert r.status_code == 422
-    assert "exceeds" in r.text.lower()
+    assert "exceeds" in r.text.lower(), (
+        f"the MAX_DASHA_DAYS cap did not answer — got: {r.text[:300]}"
+    )
 
 
 def test_dashas_reversed_range_is_422():
@@ -288,17 +302,27 @@ def test_dashas_one_over_max_is_422():
 
 
 def test_dashas_far_future_narrow_window_is_422():
-    """Far-future narrow window that bypassed the old from_date cap must now be 422.
+    """Far-future NARROW window that bypassed the old from_date cap must be 422.
 
-    An attacker passing from_date=9900-01-01, to_date=9999-12-31 (span < 47000 days)
-    with a normal birth year would force the engine to materialise ~60+ Vimshottari
-    cycles from birth before window-filtering.  The new birth-relative guard catches
-    this: (9999-12-31 - 1950-06-15).days >> MAX_DASHA_DAYS."""
-    req = {**SAMPLE_A, "from_date": "9900-01-01", "to_date": "9999-12-31",
+    A caller passing a short window sited far from birth (here 2390-01-01 →
+    MAX_EPHEMERIS_DATE, a ~10-year span) would force the engine to materialise
+    dozens of Vimshottari cycles from birth before window-filtering. The
+    birth-relative guard catches it: (2400-01-09 - 1950-06-15).days is ~164,000,
+    far past MAX_DASHA_DAYS, even though the window itself is narrow.
+
+    Both dates are INSIDE the ephemeris span on purpose. The original probe used
+    9900-01-01 → 9999-12-31, which the span bound (app/schemas.py) now refuses at
+    the schema before this handler runs — leaving the birth-relative cap, the
+    thing this test names, unexercised.
+    """
+    from app.schemas import MAX_EPHEMERIS_DATE
+    req = {**SAMPLE_A, "from_date": "2390-01-01", "to_date": MAX_EPHEMERIS_DATE.isoformat(),
            "systems": ["vimshottari"]}
     r = client.post("/v1/dashas", json=req)
     assert r.status_code == 422, f"Far-future narrow window must be rejected: {r.status_code}"
-    assert "exceeds" in r.text.lower()
+    assert "exceeds" in r.text.lower(), (
+        f"the MAX_DASHA_DAYS cap did not answer — got: {r.text[:300]}"
+    )
 
 
 # ---------------------------------------------------------------------------

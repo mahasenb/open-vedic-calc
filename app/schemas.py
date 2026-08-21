@@ -61,15 +61,71 @@ MIN_EPHEMERIS_DATE = date(1800, 1, 2)
 MAX_EPHEMERIS_DATE = date(2400, 1, 9)
 
 
+def _out_of_span_message(field_name: str) -> str:
+    """The 422 body for any date outside the span.
+
+    Named per field rather than hardcoded to "birth_date", because every date
+    the caller can send is bounded by the same span and a message naming the
+    wrong field is worse than a vague one.
+    """
+    return (
+        f"{field_name} must be between {MIN_EPHEMERIS_DATE.isoformat()} and "
+        f"{MAX_EPHEMERIS_DATE.isoformat()} (the span the shipped Swiss "
+        "Ephemeris data files actually cover for every supported timezone "
+        "offset; outside it the answer would come from the Moshier fallback)"
+    )
+
+
+def _openapi_description(what: str) -> str:
+    """The served contract as /openapi.json advertises it.
+
+    Advertising a range wider than the data covers is what these bounds exist
+    to stop, so the description is generated from the constants and can never
+    drift from the validator.
+    """
+    return (
+        f"{what}, {MIN_EPHEMERIS_DATE.isoformat()} to "
+        f"{MAX_EPHEMERIS_DATE.isoformat()} inclusive — the span covered by the "
+        "shipped Swiss Ephemeris data files for every supported timezone offset."
+    )
+
+
 def _validate_ephemeris_date(value: date) -> date:
     if not (MIN_EPHEMERIS_DATE <= value <= MAX_EPHEMERIS_DATE):
-        raise ValueError(
-            f"birth_date must be between {MIN_EPHEMERIS_DATE.isoformat()} and "
-            f"{MAX_EPHEMERIS_DATE.isoformat()} (the span the shipped Swiss "
-            "Ephemeris data files actually cover for every supported timezone "
-            "offset; outside it the answer would come from the Moshier fallback)"
-        )
+        raise ValueError(_out_of_span_message("birth_date"))
     return value
+
+
+def _bounded_date(field_name: str, what: str):
+    """``Annotated[date, ...]`` bounded to the ephemeris span."""
+    def _check(value: date) -> date:
+        if not (MIN_EPHEMERIS_DATE <= value <= MAX_EPHEMERIS_DATE):
+            raise ValueError(_out_of_span_message(field_name))
+        return value
+
+    return Annotated[
+        date, AfterValidator(_check), Field(description=_openapi_description(what))
+    ]
+
+
+def _bounded_iso_date_str(field_name: str, what: str):
+    """``Annotated[str, ...]``: an ISO date string INSIDE the ephemeris span.
+
+    Layered on IsoDateStr rather than replacing it, so a malformed value still
+    fails the shape check first and the field stays a ``str`` on the wire —
+    every one of these is handed straight to ``datetime.strptime`` downstream
+    (app/main.py) and coercing it to a ``date`` here would be a silent
+    request-shape change, not a bound.
+    """
+    def _check(value: str) -> str:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        if not (MIN_EPHEMERIS_DATE <= parsed <= MAX_EPHEMERIS_DATE):
+            raise ValueError(_out_of_span_message(field_name))
+        return value
+
+    return Annotated[
+        IsoDateStr, AfterValidator(_check), Field(description=_openapi_description(what))
+    ]
 
 
 # A birth date carried on the wire as a date, bounded to the ephemeris range
@@ -79,15 +135,49 @@ def _validate_ephemeris_date(value: date) -> date:
 BoundedBirthDate = Annotated[
     date,
     AfterValidator(_validate_ephemeris_date),
-    Field(
-        description=(
-            f"Birth date, {MIN_EPHEMERIS_DATE.isoformat()} to "
-            f"{MAX_EPHEMERIS_DATE.isoformat()} inclusive — the span covered by "
-            "the shipped Swiss Ephemeris data files for every supported "
-            "timezone offset."
-        ),
-    ),
+    Field(description=_openapi_description("Birth date")),
 ]
+
+# ---------------------------------------------------------------------------
+# The NON-birth date inputs, bounded to the SAME measured span.
+#
+# birth_date was bounded first (see above) because it was the one that faulted
+# loudest. It was never the only date on the wire: eight further IsoDateStr
+# fields and one optional `date` carried no range check at all. Measured on the
+# commit that introduced these constants, with the real Swiss files present and
+# a spy on every swe.calc_ut a served request makes:
+#
+#   /v1/transits at_date=9999-01-01   ->  500, UNCAUGHT swisseph.Error
+#   /v1/transits at_date=0001-01-01   ->  500, UNCAUGHT swisseph.Error
+#   /v1/transits at_date=2400-06-01   ->  200, 10/25 calls on MOSHIER
+#   /v1/transits at_date=2500-01-01   ->  200, 71/86 calls on MOSHIER
+#   /v1/muhurat  2400-06-01           ->  200, 1450/6353 calls on MOSHIER
+#   lagna-shuddhi 2400-06-01          ->  200, 1650/6553 calls on MOSHIER
+#   family        2400-06-01          ->  200, 3300/13106 calls on MOSHIER
+#   /v1/compat   reference_date=9999  ->  500, UNCAUGHT OverflowError
+#
+# The 500s are the fault birth_date's guard was written to stop, reached through
+# a different field. The 200s are the silent-Moshier tail, reached through a
+# different field. Same span, same reason, same refusal.
+#
+# NOT every one of these fields consults the ephemeris at the bounded date, and
+# the bound is not claimed to be an accuracy fix for the ones that do not:
+# measured, /v1/dashas answers from arithmetic projected off the natal Moon (its
+# swe.calc_ut count is 15 — the natal chart — whether to_date is 2026-12-31 or
+# 2999-12-31), and /v1/compat's reference_date drives no calls either. Those two
+# are bounded to close the OverflowError and to keep one span across the served
+# contract, not because a Moshier answer was measured behind them. The cost is
+# real and deliberate: a late-born chart can no longer request a dasha timeline
+# past MAX_EPHEMERIS_DATE, which it could before (measured: birth 2390-06-15,
+# to_date 2500-01-01 was a 200). Serving a period dated past the span this
+# service declares it covers is the inconsistency being removed.
+# ---------------------------------------------------------------------------
+BoundedAtDate = _bounded_iso_date_str("at_date", "Transit date")
+BoundedFromDate = _bounded_iso_date_str("from_date", "Timeline start date")
+BoundedToDate = _bounded_iso_date_str("to_date", "Timeline end date")
+BoundedScanStartDate = _bounded_iso_date_str("start_date", "Scan range start date")
+BoundedScanEndDate = _bounded_iso_date_str("end_date", "Scan range end date")
+BoundedReferenceDate = _bounded_date("reference_date", "Reference date")
 
 
 class BoundedPersonFields(BaseModel):
@@ -118,8 +208,8 @@ class PersonalDataIn(BoundedPersonFields):
 
 
 class DashaRequest(PersonalDataIn):
-    from_date: IsoDateStr
-    to_date: IsoDateStr
+    from_date: BoundedFromDate
+    to_date: BoundedToDate
     # Only these two dasha systems are computed (get_dasha_timeline). Restricting
     # the element type to a Literal rejects unknown values at the boundary instead
     # of silently dropping them (an unknown system would otherwise be ignored,
@@ -130,7 +220,7 @@ class DashaRequest(PersonalDataIn):
 
 
 class TransitRequest(PersonalDataIn):
-    at_date: IsoDateStr
+    at_date: BoundedAtDate
 
 
 # --- Chart ---
@@ -379,8 +469,8 @@ class MuhurtRequest(BoundedPersonFields):
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
-    start_date: IsoDateStr
-    end_date: IsoDateStr
+    start_date: BoundedScanStartDate
+    end_date: BoundedScanEndDate
 
 
 class TimeWindow(BaseModel):
@@ -479,8 +569,8 @@ class LagnaShuddhiRequest(BoundedPersonFields):
     latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
     longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     timezone_offset_hours: float = Field(ge=-12, le=14, allow_inf_nan=False)
-    start_date: IsoDateStr
-    end_date: IsoDateStr
+    start_date: BoundedScanStartDate
+    end_date: BoundedScanEndDate
     activity_category: ActivityCategory = "generic"
     # Lower-bounded: a sub-minute step over a 365-day range is a denial-of-service
     # vector (~31M inner-loop iterations). 60s is the default scan granularity.
@@ -550,8 +640,8 @@ class FamilyMember(BoundedPersonFields):
 
 class FamilyLagnaShuddhiRequest(BaseModel):
     members: list[FamilyMember]
-    start_date: IsoDateStr
-    end_date: IsoDateStr
+    start_date: BoundedScanStartDate
+    end_date: BoundedScanEndDate
     activity_category: ActivityCategory = "generic"
     # See LagnaShuddhiRequest.step_seconds — lower bound guards against DoS.
     step_seconds: int = Field(60, ge=60)
@@ -609,7 +699,12 @@ class FamilyLagnaShuddhiJobStatus(BaseModel):
 class CompatRequest(BaseModel):
     person_a: PersonalDataIn
     person_b: PersonalDataIn
-    reference_date: date | None = None
+    # The ninth date input, and the one the IsoDateStr sweep missed: it is a
+    # `date`, so it never matched that grep. Unbounded it reached
+    # compute_dasha_overlaps, where `window_start + timedelta(days=25*365.25)`
+    # runs past year 9999 and raised an uncaught OverflowError (a raw 500).
+    # Optional, and stays optional — `None` still means "today".
+    reference_date: BoundedReferenceDate | None = None
 
 
 class KutaScore(BaseModel):
