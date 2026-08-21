@@ -175,15 +175,14 @@ def test_the_interior_never_needed_the_restore(
 # 2. The verdict itself does not depend on which engine answers
 # ---------------------------------------------------------------------------
 
-def _force_moshier() -> str:
-    """Point swisseph at an empty directory, so every read falls back.
+def _force_moshier(empty_dir: str) -> None:
+    """Point swisseph at *empty_dir*, so every read falls back to Moshier.
 
-    Returns the directory, purely so a failure message can show it. The calling
-    test MUST be decorated with the ``restored_engine`` fixture.
+    Must be re-applied before EVERY sample being compared, not once before a
+    loop — see ``test_eclipse_verdict_is_engine_independent`` for why. The
+    calling test MUST use the ``restored_engine`` fixture.
     """
-    empty = tempfile.mkdtemp(prefix="no_ephe_")
-    swe.set_ephe_path(empty)
-    return empty
+    swe.set_ephe_path(empty_dir)
 
 
 # Local days carrying an eclipse visible at PLACE, plus their neighbours. Chosen
@@ -208,19 +207,51 @@ def test_eclipse_verdict_is_engine_independent(
     falling back costs nothing observable. It is a DIRECT comparison, not an
     argument from tolerances: each day is answered twice, once with the Swiss
     files in use and once with swisseph pointed at an empty directory.
+
+    THE ENGINE IS RE-FORCED BEFORE EVERY SAMPLE, AND THAT IS NOT A DETAIL.
+    The first version of this test forced the fallback once and then looped. That
+    is self-defeating HERE specifically, because the very fix this module exists
+    to pin — ``_is_eclipse_day`` re-applying the ephemeris path in its ``finally``
+    — undoes the forcing as a side effect of the first call. Measured on that
+    version::
+
+        after force, before any call : MOSHIER
+        sample 0 2026-08-28: BEFORE = MOSHIER  AFTER = SWISS
+        sample 1 2027-08-02: BEFORE = SWISS    AFTER = SWISS
+        sample 2 2028-01-12: BEFORE = SWISS    AFTER = SWISS
+
+    so 11 of 12 samples compared Swiss against Swiss while claiming to compare
+    engines — a test that would have passed no matter how engine-sensitive the
+    verdict became. The per-sample assertions below are what stop that from
+    recurring silently: each one fails loudly if its half did not actually run on
+    the engine it names, so the comparison cannot quietly become vacuous again.
     """
-    swiss_verdicts = {d: muhurat._is_eclipse_day(d, PLACE) for d in _VERDICT_SAMPLE}
+    empty = tempfile.mkdtemp(prefix="no_ephe_")
+
+    swiss_verdicts = {}
+    for d in _VERDICT_SAMPLE:
+        utils.restore_ephemeris_state()
+        assert _engine(_day_noon_jd(d), swe.MOON) == "SWISS", (
+            f"the Swiss half of the comparison did not run on Swiss data for {d}. "
+            "A previous sample left the engine degraded, so this half is not the "
+            "reference it claims to be."
+        )
+        swiss_verdicts[d] = muhurat._is_eclipse_day(d, PLACE)
+
     assert any(swiss_verdicts.values()), (
         "not one sampled day is an eclipse day, so this test would pass without "
         "comparing anything that matters. Re-pick _VERDICT_SAMPLE."
     )
 
-    empty = _force_moshier()
-    assert _engine(_day_noon_jd(_INTERIOR_DATE), swe.MOON) == "MOSHIER", (
-        f"the fallback was not actually forced (ephe path {empty}); this "
-        "comparison would have run both halves on the same engine."
-    )
-    moshier_verdicts = {d: muhurat._is_eclipse_day(d, PLACE) for d in _VERDICT_SAMPLE}
+    moshier_verdicts = {}
+    for d in _VERDICT_SAMPLE:
+        _force_moshier(empty)
+        assert _engine(_day_noon_jd(d), swe.MOON) == "MOSHIER", (
+            f"the fallback was not actually forced for {d} (ephe path {empty}); "
+            "this sample would have run BOTH halves on the same engine and "
+            "compared nothing."
+        )
+        moshier_verdicts[d] = muhurat._is_eclipse_day(d, PLACE)
 
     disagreements = {d: (swiss_verdicts[d], moshier_verdicts[d])
                      for d in _VERDICT_SAMPLE
