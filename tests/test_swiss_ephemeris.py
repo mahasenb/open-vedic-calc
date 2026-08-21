@@ -49,6 +49,9 @@ import json
 import math
 import os
 import pathlib
+import subprocess
+import sys
+from collections.abc import Mapping
 
 import pytest
 import swisseph as swe
@@ -65,6 +68,7 @@ from tests.conftest import (
 
 _GOLDENS = pathlib.Path(__file__).resolve().parent / "goldens" / "swiss_ephemeris_goldens.json"
 _UPDATE_ENV = "UPDATE_SWISS_GOLDENS"
+_CI_ENV = "CI"
 
 # 1e-6 deg = 3.6 mas. Chosen to be far below the Swiss/Moshier divergence (which is
 # ~1e-4 deg and up) and far above any float-formatting noise in the JSON round trip.
@@ -203,6 +207,62 @@ def _canonical(document: dict) -> str:
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
+def golden_recording_refusal(environ: Mapping[str, str]) -> str | None:
+    """Why re-recording the Swiss goldens is refused right now, or ``None``.
+
+    A pure function of the environment, so the policy can be ASSERTED directly
+    rather than inferred from what the recorder did to a file. Mirrors
+    ``ci/fetch_reference_corpus.py::refusal_reason`` — deliberately, and now
+    with the same ``CI`` semantics rather than weaker ones.
+
+    ``CI`` IS READ FOR PRESENCE, NOT TRUTHINESS. The previous form here was
+    ``assert not os.environ.get("CI")``, which is satisfied by every falsy
+    string — ``""`` most obviously, and an empty ``CI`` is a value CI systems
+    really do export. Under it, a CI run could re-record the engine-authored
+    goldens and then compare them against themselves, reporting green having
+    validated nothing. Reading for presence fails in the safe direction: a
+    false refusal costs one ``unset CI``, a false permit costs the regression
+    signal these goldens exist to carry.
+    """
+    if _CI_ENV in environ:
+        return (
+            f"REFUSED: {_UPDATE_ENV}=1 is not permitted when {_CI_ENV} is set "
+            f"(value {environ[_CI_ENV]!r}).\n"
+            f"\n"
+            f"These goldens are recorded by running this engine and writing down "
+            f"what it said, so a CI run that rewrites them replaces the expected "
+            f"values with the observed ones and then reports green having compared "
+            f"the engine against itself.\n"
+            f"\n"
+            f"{_CI_ENV} is read for PRESENCE, not truthiness: an empty-string "
+            f"{_CI_ENV} is still {_CI_ENV}. If a red golden is genuinely explained "
+            f"by a deliberate dependency or data-file bump, re-record it locally "
+            f"against real Swiss data and commit the diff in that same review:\n"
+            f"    python ci/fetch_swiss_ephemeris.py\n"
+            f"    {_UPDATE_ENV}=1 python -m pytest tests/test_swiss_ephemeris.py"
+        )
+    return None
+
+
+def record_goldens(
+    observed: dict,
+    environ: Mapping[str, str],
+    *,
+    target: pathlib.Path = _GOLDENS,
+) -> None:
+    """Write the goldens, or refuse — the ONE place this file is written.
+
+    The refusal is checked BEFORE the write, not reported after it: a guard
+    downstream of the side effect it guards is not a guard. ``target`` is a
+    keyword argument so the refusal can be exercised against a throwaway path
+    without a test seam in the recording arm itself.
+    """
+    refusal = golden_recording_refusal(environ)
+    assert refusal is None, refusal
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_canonical(observed), encoding="utf-8", newline="\n")
+
+
 def test_chart_matches_swiss_goldens(swiss_ephemeris: int) -> None:
     """Planetary longitudes, ayanamsa and lagna against committed Swiss-data goldens.
 
@@ -214,13 +274,10 @@ def test_chart_matches_swiss_goldens(swiss_ephemeris: int) -> None:
 
     if os.environ.get(_UPDATE_ENV) == "1":
         # Recording mode for a deliberate dependency/data bump. Refused inside CI —
-        # a CI run must never rewrite the values it is checking.
-        assert not os.environ.get("CI"), (
-            f"{_UPDATE_ENV}=1 is refused when CI is set; re-record locally against "
-            "real Swiss data and commit the diff"
-        )
-        _GOLDENS.parent.mkdir(parents=True, exist_ok=True)
-        _GOLDENS.write_text(_canonical(observed), encoding="utf-8", newline="\n")
+        # a CI run must never rewrite the values it is checking. The refusal and
+        # the write both live in record_goldens(); see golden_recording_refusal()
+        # for why CI is read for presence rather than truthiness.
+        record_goldens(observed, os.environ)
 
     assert _GOLDENS.is_file(), (
         f"golden file missing at {_GOLDENS}. Produce it against REAL Swiss data:\n"
@@ -297,6 +354,198 @@ def test_goldens_are_canonical_and_nontrivial() -> None:
     assert raw.decode("utf-8") == _canonical(goldens), (
         "golden file is not in canonical form (sorted keys, 2-space indent, LF, "
         f"trailing newline) — re-record with {_UPDATE_ENV}=1"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE RE-RECORD REFUSAL, READ FOR PRESENCE
+# ---------------------------------------------------------------------------
+#
+# `CI=""` used to slip past this guard. The recording arm read
+# `assert not os.environ.get("CI")` — a TRUTHINESS test, which an empty-string
+# `CI` satisfies — so a CI run with `CI` exported empty could re-record the
+# engine-authored goldens and then "pass" against the values it had just
+# written. That is the shape of a control that quietly disables itself: the
+# assertion is present, reads correctly to a human, and does not fire.
+#
+# `ci/fetch_reference_corpus.py` already read its own `CI` for PRESENCE, and its
+# module docstring recorded the asymmetry as deliberate — a lost regression
+# signal here was judged survivable where a destroyed independent corpus was
+# not. The asymmetry is now closed in the safe direction instead: BOTH read for
+# presence. The cost of a false refusal is one `unset CI`; the cost of a false
+# permit is a golden file that agrees with whatever the engine said that day.
+#
+# Every test below drives the REAL functions the recording arm runs
+# (`golden_recording_refusal`, `record_goldens`) — never a re-implementation of
+# the rule here, which would keep passing after the real guard was neutered.
+
+
+def _environ(**overrides: str) -> dict[str, str]:
+    """A deliberately EMPTY base environment plus explicit overrides.
+
+    Never `os.environ.copy()`: on a GitHub runner the ambient `CI=true` would
+    make the "local" cases refuse for the wrong reason, and these tests would
+    pass while proving something else entirely.
+    """
+    return dict(overrides)
+
+
+def test_recording_is_refused_in_ci() -> None:
+    """A CI run must never rewrite the values it is checking."""
+    for environ in (
+        _environ(CI="true"),
+        _environ(CI="1"),
+        _environ(CI="true", **{_UPDATE_ENV: "1"}),
+    ):
+        reason = golden_recording_refusal(environ)
+        assert reason is not None, (
+            f"recording was permitted under {environ!r} — a CI run must never "
+            "re-record the Swiss goldens"
+        )
+        assert _CI_ENV in reason, "the refusal must name the variable it read"
+
+
+def test_recording_refusal_reads_ci_for_presence_not_truthiness() -> None:
+    """`CI=""` must refuse. This is the defect this guard was fixed for.
+
+    The previous form, `assert not os.environ.get("CI")`, passed on every falsy
+    string — `""` most obviously, and that is a value CI systems really do
+    export. `ci/fetch_reference_corpus.py::refusal_reason` has always read its
+    own `CI` for presence; this asserts the same semantics here, so a future
+    "simplification" back to truthiness reds.
+    """
+    for value in ("", "0", "false"):
+        reason = golden_recording_refusal(_environ(CI=value, **{_UPDATE_ENV: "1"}))
+        assert reason is not None, (
+            f"CI={value!r} was treated as 'not CI'. Read the variable for "
+            "PRESENCE, not truthiness — a falsy-but-set CI is still CI."
+        )
+
+
+def test_recording_proceeds_locally_when_ci_is_absent() -> None:
+    """The sanctioned deliberate re-record must still be possible off CI.
+
+    A guard that refused everywhere would be uncircumventable and useless: the
+    dependency/data bumps this repo takes deliberately have to be re-recordable.
+    """
+    assert golden_recording_refusal(_environ()) is None
+    assert golden_recording_refusal(_environ(**{_UPDATE_ENV: "1"})) is None
+
+
+def test_the_two_recorders_agree_on_how_ci_is_read() -> None:
+    """Both re-record guards in this repository read `CI` the same way.
+
+    The asymmetry between them was deliberate and documented once
+    (ci/fetch_reference_corpus.py's module docstring). It is now closed, and
+    this pins it closed from the goldens side: if either guard drifts back to a
+    truthiness read, exactly one of these two calls returns None and this reds.
+
+    Loaded by path, not `from ci import …`: `ci/` has no `__init__.py` by
+    design, and the accuracy job runs a bare console-script pytest that does not
+    put the CWD on sys.path.
+    """
+    import importlib.util
+
+    fetcher_path = pathlib.Path(__file__).resolve().parent.parent / "ci" / "fetch_reference_corpus.py"
+    assert fetcher_path.is_file(), f"{fetcher_path} is missing"
+    spec = importlib.util.spec_from_file_location("fetch_reference_corpus", fetcher_path)
+    fetcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fetcher)
+
+    empty_ci = _environ(CI="", **{_UPDATE_ENV: "1"})
+    assert golden_recording_refusal(empty_ci) is not None, (
+        "the Swiss-goldens guard permitted an empty-string CI"
+    )
+    assert fetcher.refusal_reason(
+        _environ(CI="", **{fetcher.UPDATE_ENV: "1"}), corpus_exists=True
+    ) is not None, "the JPL-corpus guard permitted an empty-string CI"
+
+
+def test_record_goldens_writes_nothing_when_it_refuses(tmp_path: pathlib.Path) -> None:
+    """The REFUSAL is enforced by the writer, not merely available beside it.
+
+    Drives the real `record_goldens` — the only function in this module that
+    touches the golden file — against a throwaway target. A predicate that
+    returns the right answer while the writer never consults it is exactly the
+    failure mode this repo keeps finding, so the assertion is about the FILE.
+    """
+    target = tmp_path / "swiss_ephemeris_goldens.json"
+    payload = {"sample_a": {"lagna": "Aries", "ayanamsa_value": 1.0, "longitudes": {}}}
+
+    with pytest.raises(AssertionError) as excinfo:
+        record_goldens(payload, _environ(CI="", **{_UPDATE_ENV: "1"}), target=target)
+
+    assert _CI_ENV in str(excinfo.value)
+    assert not target.exists(), (
+        "record_goldens refused and wrote the file anyway — the refusal must "
+        "happen BEFORE the write, not be reported after it"
+    )
+
+
+def test_record_goldens_writes_canonical_bytes_when_permitted(tmp_path: pathlib.Path) -> None:
+    """The permitted path must still produce exactly what the checker expects.
+
+    Positive control for the test above: without it, a `record_goldens` that
+    refused unconditionally would satisfy every refusal assertion here and
+    quietly break the one operation this arm exists to perform.
+    """
+    target = tmp_path / "nested" / "swiss_ephemeris_goldens.json"
+    payload = {"sample_a": {"lagna": "Aries", "ayanamsa_value": 1.0, "longitudes": {}}}
+
+    record_goldens(payload, _environ(**{_UPDATE_ENV: "1"}), target=target)
+
+    raw = target.read_bytes()
+    assert b"\r" not in raw, "the recorder must write LF-only bytes"
+    assert raw.decode("utf-8") == _canonical(payload)
+
+
+def test_the_recording_arm_itself_refuses_under_an_empty_ci(swiss_ephemeris: int) -> None:
+    """End-to-end: the real test node, in a subprocess, with `CI=""` set.
+
+    The tests above cover the predicate and the writer. This one covers the CALL
+    SITE — that `test_chart_matches_swiss_goldens` actually routes its recording
+    through `record_goldens` rather than keeping its own inline check. Deleting
+    the call site leaves every other test in this block green; it reds here.
+
+    Discriminating by construction: under the OLD truthiness guard this exact
+    invocation RECORDED and the node PASSED. Under the fixed guard it must fail
+    with the refusal. A skip (no Swiss data) would fail the message assertion
+    rather than pass vacuously — and this test takes the `swiss_ephemeris`
+    fixture, so it does not run at all without the data files.
+    """
+    environ = dict(os.environ)
+    environ[_UPDATE_ENV] = "1"
+    environ[_CI_ENV] = ""  # the exact value the old guard let through
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_swiss_ephemeris.py::test_chart_matches_swiss_goldens",
+            "-q",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=pathlib.Path(__file__).resolve().parent.parent,
+        env=environ,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0, (
+        "the recording arm accepted UPDATE_SWISS_GOLDENS=1 with CI set to the "
+        f"empty string and passed. Output:\n{output}"
+    )
+    assert "1 failed" in output, (
+        "expected the golden node to FAIL with a refusal; it did not run as "
+        f"expected (a skip means the subprocess found no Swiss data). Output:\n{output}"
+    )
+    assert _UPDATE_ENV in output and _CI_ENV in output, (
+        f"the failure was not the re-record refusal. Output:\n{output}"
     )
 
 

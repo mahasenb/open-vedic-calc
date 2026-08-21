@@ -137,12 +137,13 @@ def test_every_visible_graha_has_a_horizons_target() -> None:
 # implementation is a paragraph is the same shape as a control that quietly
 # disables itself — it looks enforced and is not.
 #
-# The refusal mirrors UPDATE_SWISS_GOLDENS (tests/test_swiss_ephemeris.py) with
-# ONE deliberate difference, called out in `test_ci_refusal_is_stricter_than_a
-# _truthiness_check` below: the goldens read `os.environ.get("CI")` for
-# truthiness, so `CI=""` slips through; this reads for PRESENCE. The asymmetry is
-# intentional and fails in the safe direction — a false refusal costs one `unset
-# CI`, a false permit destroys the only independent check in the repository.
+# The refusal mirrors UPDATE_SWISS_GOLDENS (tests/test_swiss_ephemeris.py), and
+# both now read `CI` for PRESENCE rather than truthiness — see
+# `test_ci_refusal_is_stricter_than_a_truthiness_check` below. The goldens guard
+# used to read `os.environ.get("CI")` for truthiness, so `CI=""` slipped through
+# there and not here; that asymmetry was recorded as deliberate and has since been
+# closed in the safe direction. A false refusal costs one `unset CI`; a false
+# permit destroys the only independent check in the repository.
 #
 # Every test below drives the REAL functions the script runs (`refusal_reason`,
 # `main`), never a re-implementation of their logic here. A duplicated copy of
@@ -207,11 +208,16 @@ def test_recording_is_refused_in_ci_even_with_the_flag() -> None:
 def test_ci_refusal_is_stricter_than_a_truthiness_check() -> None:
     """`CI=""` must still refuse.
 
-    `tests/test_swiss_ephemeris.py` guards the engine-recorded goldens with
-    `assert not os.environ.get("CI")`, which an empty-string `CI` satisfies. That
-    is survivable there (a lost regression signal); here it would let a CI run
-    overwrite the only externally-sourced evidence in the repo. This asserts the
-    PRESENCE reading, so a future "simplification" to truthiness reds here.
+    An empty-string `CI` is falsy, so a truthiness read treats it as "not CI" —
+    and CI systems really do export the variable empty. Here that would let a CI
+    run overwrite the only externally-sourced evidence in the repo. This asserts
+    the PRESENCE reading, so a future "simplification" to truthiness reds here.
+
+    The engine-recorded goldens were guarded by exactly that truthiness read
+    (`assert not os.environ.get("CI")`) until it was replaced by
+    `tests/test_swiss_ephemeris.py::golden_recording_refusal`, which reads for
+    presence as this does; `test_the_two_recorders_agree_on_how_ci_is_read` there
+    pins the two guards to the same semantics.
     """
     fetcher = _load_fetcher()
     reason = fetcher.refusal_reason(
