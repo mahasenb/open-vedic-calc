@@ -42,8 +42,33 @@ from pathlib import Path
 
 import yaml
 
+# Same two-line form as ci/tests/test_environment_convergence.py: .python-version
+# pins 3.11 (stdlib tomllib), but requires-python still admits 3.10, where the
+# dev extras declare `tomli` for exactly this.
+try:  # Python >= 3.11 — the interpreter this repo pins
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 — still within the requires-python floor
+    import tomli as tomllib
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _TEST_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "test.yml"
+
+
+def _load_ci_module(name: str):
+    """Import a ``ci/*.py`` script by path.
+
+    ``ci/`` has no ``__init__.py`` by design, and CI runs the bare
+    ``pytest ci/tests/ -q`` console script, which does not put the CWD on
+    ``sys.path`` (see CLAUDE.md) — so ``from ci import ...`` is not available.
+    Same importlib form as ci/tests/test_reference_corpus_fetcher.py.
+    """
+    import importlib.util
+
+    path = _REPO_ROOT / "ci" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 _JOB = "swiss-ephemeris"
 _FLAG = "REQUIRE_SWISS_EPHEMERIS"
 _FETCHER = "ci/fetch_swiss_ephemeris.py"
@@ -1687,22 +1712,24 @@ def test_enablement_snapshot_catches_forms_the_semantic_checks_do_not() -> None:
 _CORPUS_MODULE = "tests/test_independent_reference_corpus.py"
 _FIXTURE = "swiss_ephemeris"
 
-# pytest flags that REMOVE tests from a run by DESELECTING them, and that take a
-# value. The value must be skipped when reading positional targets, or `--ignore
-# tests/foo.py` leaves `tests/foo.py` looking like a target.
-_VALUE_TAKING_DESELECT_FLAGS = ("--ignore", "--ignore-glob", "--deselect", "-k", "-m")
-
-# Flags that remove tests from a run by a DIFFERENT mechanism: they deselect
-# nothing at all. `pytest tests/ --collect-only` collects every module the accuracy
-# gate needs, executes not one test body, and exits 0. A guard that models only
-# deselection answers "yes, it reaches every gated module" — correctly, and
-# irrelevantly. `--co` is pytest's documented short form of the same flag.
-_COLLECTION_ONLY_FLAGS = ("--collect-only", "--co")
-
-# Everything that costs the accuracy job its assertions, by either mechanism. The
-# job exists to RUN the whole suite against real data, so any of these appearing in
-# its suite step is narrowing.
-_NARROWING_FLAGS = _VALUE_TAKING_DESELECT_FLAGS + _COLLECTION_ONLY_FLAGS
+# ONE DEFINITION, TWO READERS. The flag tables live in ci/check_pytest_collection.py
+# — the standalone checker that catches the pytest-config vector this file
+# structurally cannot (see that module's docstring) — and are imported here rather
+# than copied. Two copies would drift, and the copy that stopped covering a flag
+# would be the one nobody re-read.
+#
+#   _VALUE_TAKING_DESELECT_FLAGS  deselecting flags that consume the next argv slot,
+#                                 so `--ignore tests/x.py` does not leave the path
+#                                 looking like a positional target.
+#   _COLLECTION_ONLY_FLAGS        `--collect-only` / `--co`: deselect nothing, run
+#                                 nothing. A guard modelling only deselection reports
+#                                 "yes, every gated module is reached" — correctly,
+#                                 and irrelevantly.
+#   _NARROWING_FLAGS              the union, which is what this file tests against.
+_COLLECTION_CHECKER = _load_ci_module("check_pytest_collection")
+_VALUE_TAKING_DESELECT_FLAGS = _COLLECTION_CHECKER.VALUE_TAKING_DESELECT_FLAGS
+_COLLECTION_ONLY_FLAGS = _COLLECTION_CHECKER.COLLECTION_ONLY_FLAGS
+_NARROWING_FLAGS = _COLLECTION_CHECKER.NARROWING_FLAGS
 
 
 def _swiss_gated_modules() -> list[str]:
@@ -2017,6 +2044,337 @@ def test_swiss_job_reaches_every_swiss_gated_module() -> None:
         "fast `test` job (which has no ephemeris data). This job is the only one that "
         "asserts them. A target that misses them means they now run NOWHERE — the gate "
         "reports green while the accuracy assertions it exists to run never execute."
+    )
+
+
+# ---------------------------------------------------------------------------
+# NARROWING THAT NEVER TOUCHES THE RUN LINE (PR #65 review, non-blocking item 1)
+# ---------------------------------------------------------------------------
+#
+# Every check above reads the suite step's `run:` body. pytest takes arguments
+# from two other places that a reader of that line cannot see:
+#
+#   1. `PYTEST_ADDOPTS` in the environment. GitHub Actions resolves `env:` at
+#      three levels — workflow, job, step — and any of them reaches the pytest
+#      process. `PYTEST_ADDOPTS: "-k nothing"` next to REQUIRE_SWISS_EPHEMERIS
+#      leaves the run line reading `pytest tests/ -q`, every existing guard green,
+#      and zero tests executed.
+#   2. `addopts` in pytest's own config. This repo configures pytest in
+#      pyproject.toml; `addopts = "-k not_corpus"` there narrows every pytest
+#      invocation in the repo, including the accuracy job's, with no workflow
+#      change at all.
+#
+# This is the deliberate-evasion class rather than the accidental-edit class the
+# run-line checks target, which is exactly why it is worth closing: an accidental
+# narrowing is at least visible in the diff of the line that runs the suite.
+#
+# PARSED, NOT GREPPED, on both arms — for the same reason the rest of this file
+# parses: `# PYTEST_ADDOPTS: "-k nothing"` in a comment, or the string inside an
+# `echo`, must not be mistaken for the real thing.
+
+_ADDOPTS_ENV = "PYTEST_ADDOPTS"
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
+
+
+def _sets_env_inline(tokens: list[str], name: str) -> bool:
+    """True when a command sets ``name`` as a shell environment assignment.
+
+    POSITION is what discriminates here, not the presence of the string. A real
+    assignment is either a leading ``VAR=value`` prefix on the command or an
+    argument to ``export``; ``echo "PYTEST_ADDOPTS=-k nothing"`` shlex-collapses to
+    a single token that still *starts* with the variable name, so a name-only
+    match would red on a harmless echo — the fail-closed-false-positive shape that
+    `_join_shell_continuations` exists to undo elsewhere in this file.
+    """
+    index = 0
+    while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
+        if tokens[index].split("=", 1)[0] == name:
+            return True
+        index += 1
+    if tokens and tokens[0] == "export":
+        return any(token.split("=", 1)[0] == name for token in tokens[1:])
+    return False
+
+
+def _addopts_env_declarations(document: dict, job: dict) -> list[str]:
+    """Every place ``PYTEST_ADDOPTS`` is set in scope for the accuracy job.
+
+    Workflow-, job- and step-level ``env:`` are all checked because GitHub Actions
+    resolves all three into the step's environment; leaving any of them out is a
+    hole the shape of the whole finding.
+    """
+    found: list[str] = []
+
+    workflow_env = document.get("env")
+    if isinstance(workflow_env, dict) and _ADDOPTS_ENV in workflow_env:
+        found.append(f"workflow-level env: {workflow_env[_ADDOPTS_ENV]!r}")
+
+    job_env = job.get("env")
+    if isinstance(job_env, dict) and _ADDOPTS_ENV in job_env:
+        found.append(f"job-level env: {job_env[_ADDOPTS_ENV]!r}")
+
+    for step in _steps(job):
+        label = step.get("name") or "<unnamed step>"
+        step_env = step.get("env")
+        if isinstance(step_env, dict) and _ADDOPTS_ENV in step_env:
+            found.append(f"step {label!r} env: {step_env[_ADDOPTS_ENV]!r}")
+        run = step.get("run")
+        if run and any(
+            _sets_env_inline(tokens, _ADDOPTS_ENV) for tokens in _commands(str(run))
+        ):
+            found.append(f"step {label!r} run: inline {_ADDOPTS_ENV}= assignment")
+
+    return found
+
+
+# The pyproject arm is the standalone checker's, imported rather than duplicated —
+# see _COLLECTION_CHECKER above. These aliases keep the assertions below readable
+# while leaving exactly one implementation of the parsing.
+_addopts_tokens = _COLLECTION_CHECKER.addopts_tokens
+_narrowing_addopts = _COLLECTION_CHECKER.narrowing_addopts
+
+
+def test_addopts_parser_discriminates() -> None:
+    """Fixtures both addopts arms must get right — each is something a textual
+    scan of the workflow or of pyproject.toml gets wrong."""
+    # --- the environment arm -------------------------------------------------
+    # A real leading assignment, and a real `export`, are found.
+    assert _sets_env_inline(
+        shlex.split('PYTEST_ADDOPTS=-k nothing uv run pytest tests/'), _ADDOPTS_ENV
+    )
+    assert _sets_env_inline(shlex.split('export PYTEST_ADDOPTS="-k nothing"'), _ADDOPTS_ENV)
+    # Two assignments in a row: the scan must not stop at the first.
+    assert _sets_env_inline(
+        shlex.split('REQUIRE_SWISS_EPHEMERIS=1 PYTEST_ADDOPTS=-x pytest tests/'), _ADDOPTS_ENV
+    )
+    # An ECHO of the same string is not an assignment.
+    assert not _sets_env_inline(
+        shlex.split('echo "PYTEST_ADDOPTS=-k nothing"'), _ADDOPTS_ENV
+    )
+    assert not _sets_env_inline(shlex.split("pytest tests/ -q"), _ADDOPTS_ENV)
+
+    def job_and_document(text: str) -> tuple[dict, dict]:
+        document = yaml.safe_load(text)
+        job = _job(document, _JOB)
+        assert job is not None
+        return document, job
+
+    # The three env levels GitHub Actions resolves, each of which reaches pytest.
+    for text, where in (
+        (
+            'env:\n  PYTEST_ADDOPTS: "-k nothing"\n'
+            "jobs:\n  swiss-ephemeris:\n    steps: []\n",
+            "workflow-level",
+        ),
+        (
+            "jobs:\n  swiss-ephemeris:\n"
+            '    env:\n      PYTEST_ADDOPTS: "-k nothing"\n    steps: []\n',
+            "job-level",
+        ),
+        (
+            "jobs:\n  swiss-ephemeris:\n    steps:\n"
+            "      - name: Run the full suite against real Swiss data\n"
+            '        env:\n          PYTEST_ADDOPTS: "-k nothing"\n'
+            "        run: pytest tests/ -q\n",
+            "step",
+        ),
+    ):
+        document, job = job_and_document(text)
+        assert _addopts_env_declarations(document, job), (
+            f"a {where} PYTEST_ADDOPTS was not detected"
+        )
+
+    # A COMMENT mentioning it is not a declaration — the whole reason this parses.
+    document, job = job_and_document(
+        "jobs:\n  swiss-ephemeris:\n    steps:\n"
+        '      # env:\n      #   PYTEST_ADDOPTS: "-k nothing"\n'
+        "      - run: pytest tests/ -q\n"
+    )
+    assert _addopts_env_declarations(document, job) == []
+
+    # Nor is an echo of it inside a run body.
+    document, job = job_and_document(
+        "jobs:\n  swiss-ephemeris:\n    steps:\n"
+        '      - run: echo "PYTEST_ADDOPTS=-k nothing"\n'
+    )
+    assert _addopts_env_declarations(document, job) == []
+
+    # An inline assignment on the real command IS one.
+    document, job = job_and_document(
+        "jobs:\n  swiss-ephemeris:\n    steps:\n"
+        '      - run: PYTEST_ADDOPTS="-k nothing" pytest tests/ -q\n'
+    )
+    assert _addopts_env_declarations(document, job)
+
+    # --- the pyproject arm ---------------------------------------------------
+    narrowing_forms = (
+        '[tool.pytest.ini_options]\naddopts = "-k not_corpus"\n',
+        '[tool.pytest.ini_options]\naddopts = "-m \'not accuracy\'"\n',
+        '[tool.pytest.ini_options]\naddopts = "--ignore=tests/test_independent_reference_corpus.py"\n',
+        '[tool.pytest.ini_options]\naddopts = ["-q", "--deselect", "tests/test_swiss_ephemeris.py"]\n',
+        '[tool.pytest.ini_options]\naddopts = "--collect-only"\n',
+        # A single list entry holding two arguments, which pytest shell-splits.
+        '[tool.pytest.ini_options]\naddopts = ["-k not_corpus"]\n',
+    )
+    for text in narrowing_forms:
+        tokens = _addopts_tokens(tomllib.loads(text))
+        assert _narrowing_addopts(tokens), f"narrowing addopts not detected: {text!r}"
+
+    legitimate_forms = (
+        "",
+        "[tool.pytest.ini_options]\n",
+        '[tool.pytest.ini_options]\naddopts = "-q --strict-markers"\n',
+        '[tool.pytest.ini_options]\naddopts = ["-q", "--color=no"]\n',
+        # Only in a COMMENT — invisible to a parser, which is the point.
+        '[tool.pytest.ini_options]\n# addopts = "-k not_corpus"\n',
+        # A marker DEFINITION is not a marker SELECTION.
+        '[tool.pytest.ini_options]\nmarkers = ["accuracy: swiss data"]\n',
+    )
+    for text in legitimate_forms:
+        tokens = _addopts_tokens(tomllib.loads(text))
+        assert _narrowing_addopts(tokens) == [], (
+            f"legitimate pyproject was flagged as narrowing: {text!r}"
+        )
+
+
+def test_swiss_job_does_not_inject_pytest_addopts() -> None:
+    """`PYTEST_ADDOPTS` anywhere in scope for the accuracy job is refused.
+
+    Deliberately a PRESENCE check rather than an "is this particular addopts
+    narrowing" check. Deciding whether an arbitrary addopts string removes tests
+    means reimplementing pytest's own argument parsing — an unbounded surface, and
+    the same race this file's module comment records losing three times. The
+    accuracy job has no legitimate need to inject pytest arguments through the
+    environment: whatever it should pass belongs on the run line, in the diff,
+    where every other check in this file can see it.
+    """
+    document = yaml.safe_load(_TEST_WORKFLOW.read_text(encoding="utf-8"))
+    job = _job(document, _JOB)
+    assert job is not None
+    test_addopts_parser_discriminates()
+
+    declarations = _addopts_env_declarations(document, job)
+    assert not declarations, (
+        f"{_ADDOPTS_ENV} is set in scope for the `{_JOB}` job: {declarations}. pytest "
+        "reads arguments from that variable, so it can narrow or disable the run "
+        "while the suite step's run line still reads `pytest tests/ -q` and every "
+        "other guard in this file stays green. Put arguments on the run line, where "
+        "they are visible in the diff and covered by "
+        "test_swiss_job_reaches_every_swiss_gated_module."
+    )
+
+
+def test_pytest_config_does_not_narrow_collection() -> None:
+    """pytest's own `addopts` must not filter what the accuracy job collects.
+
+    `addopts` in pyproject.toml applies to EVERY pytest invocation in the repo,
+    including this job's, with no workflow change at all — so a narrowing value
+    there disarms the accuracy gate through a file nothing in this guard's
+    workflow-parsing arm would ever read.
+
+    Parsed with tomllib, never grepped: `# addopts = "-k not_corpus"` is a comment
+    and must stay invisible.
+    """
+    document = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    tokens = _addopts_tokens(document)
+    narrowing = _narrowing_addopts(tokens)
+    assert not narrowing, (
+        f"pyproject.toml's [tool.pytest.ini_options] addopts carries narrowing "
+        f"flag(s) {narrowing} (parsed: {tokens}). That applies to every pytest run "
+        f"in this repo, so it removes assertions from the `{_JOB}` accuracy job "
+        "without touching the workflow at all."
+    )
+
+    # FAIL CLOSED on a config file neither this guard nor the standalone checker
+    # parses. pytest reads ini options from several files; only pyproject.toml
+    # exists here. If another appears it must be covered deliberately rather than
+    # quietly left out of a check that claims to cover the configuration.
+    unparsed = _COLLECTION_CHECKER.unparsed_config_files(_REPO_ROOT)
+    assert not unparsed, (
+        f"{unparsed} exist(s) in the repo root. pytest reads `addopts` from those "
+        "files too, and only pyproject.toml is parsed — so this would report green "
+        "while a narrowing addopts sat somewhere nothing looks. Extend "
+        "ci/check_pytest_collection.py to parse them."
+    )
+
+
+_COLLECTION_CHECKER_SCRIPT = "ci/check_pytest_collection.py"
+
+
+def test_a_workflow_step_runs_the_standalone_collection_check() -> None:
+    """The standalone checker is inert unless a workflow actually runs it.
+
+    `test_pytest_config_does_not_narrow_collection` above covers the pyproject arm
+    from inside pytest, and CANNOT cover the two cases where the narrowing config
+    stops pytest running the guard itself (measured: `addopts = "--collect-only"`
+    exits 0 having executed nothing; `addopts = "-k 'not narrow'"` exits 0 with the
+    guard deselected). ci/check_pytest_collection.py closes those — but only while
+    some step actually invokes it, and only while that step is a PLAIN python
+    command rather than another pytest invocation, which the same config would
+    disarm in exactly the same way.
+
+    This is the same argument as the module docstring's: a check nothing runs is a
+    check that is not there. `test_ci_runs_gate_regression_suite.py` makes it for
+    `ci/tests/`; this makes it for the one check that has to live outside pytest.
+    """
+    invoking_steps: list[tuple[Path, dict, str]] = []
+    for workflow_path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        document = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            continue
+        for job in (document.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                run = str(step.get("run", ""))
+                if not run:
+                    continue
+                if _invokes(run, "python", _COLLECTION_CHECKER_SCRIPT):
+                    invoking_steps.append((workflow_path, step, run))
+
+    assert invoking_steps, (
+        f"no workflow step invokes {_COLLECTION_CHECKER_SCRIPT}. That script is the "
+        "only check covering a pytest configuration that stops pytest running the "
+        "tests -- including this file. Unrun, it protects nothing."
+    )
+
+    # It must not be smuggled in THROUGH pytest: a narrowing addopts would disarm
+    # it exactly as it disarms every other test.
+    plain_python = [
+        (path, step, run)
+        for path, step, run in invoking_steps
+        if not any(
+            "pytest" in tokens
+            for tokens in _commands(run)
+            if _COLLECTION_CHECKER_SCRIPT in " ".join(tokens)
+        )
+    ]
+    assert plain_python, (
+        f"{_COLLECTION_CHECKER_SCRIPT} is only ever invoked through pytest. The whole "
+        "point of it is to run where a narrowing pytest configuration cannot reach; "
+        "running it under pytest reintroduces the hole it exists to close."
+    )
+
+    # At least one invoking step must be reachable on a real push/PR, and must
+    # self-test the detector first -- same ordering rule as the ephemeris fetcher's
+    # `--self-test`: a detector that has stopped discriminating must never get as
+    # far as certifying the real configuration.
+    reachable = [
+        (path, step, run)
+        for path, step, run in plain_python
+        if all(_runs_for_event(step, event) for event in ("push", "pull_request"))
+    ]
+    assert reachable, (
+        f"every step invoking {_COLLECTION_CHECKER_SCRIPT} is skipped by its own `if:` "
+        "for push and pull_request, so it never runs on a real change"
+    )
+    assert any(
+        _invokes(run, "python", _COLLECTION_CHECKER_SCRIPT, "--self-test")
+        for _path, _step, run in reachable
+    ), (
+        f"no reachable step runs `{_COLLECTION_CHECKER_SCRIPT} --self-test`. A "
+        "detector that has stopped discriminating must not be able to certify the "
+        "real configuration -- the same ordering ci/fetch_swiss_ephemeris.py uses."
     )
 
 
