@@ -52,6 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history, because this job runs `pytest ci/tests/` and
+          # ci/tests/test_stable_anchor_citations.py VERIFIES the tree's one
+          # SHA-pinned citation at its pinned commit (`git cat-file`). Measured:
+          # a depth-1 clone cannot resolve that commit at all, and the guard
+          # fails closed rather than skipping — so a shallow checkout here would
+          # red the build, not quietly disarm the check.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           # Read from .python-version, never inline. uv.lock FORKS at

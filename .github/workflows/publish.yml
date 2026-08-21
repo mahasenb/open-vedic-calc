@@ -41,6 +41,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history, for the same reason test.yml's `test` job takes it:
+          # this job runs `pytest ci/tests/`, and the stable-anchor guard
+          # verifies the tree's SHA-pinned citation at its pinned commit, which
+          # a depth-1 clone does not contain.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           # One declaration of the interpreter, shared with test.yml and both
