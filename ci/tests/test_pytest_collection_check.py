@@ -276,6 +276,24 @@ _WORKFLOW_DECLARATIONS = (
     'jobs:\n  test:\n    steps:\n      - env:\n          PYTEST_ADDOPTS: "--collect-only"\n        run: pytest tests/ -q\n',
     'jobs:\n  test:\n    steps:\n      - run: PYTEST_ADDOPTS="--collect-only" pytest tests/ -q\n',
     'jobs:\n  test:\n    steps:\n      - run: export PYTEST_ADDOPTS="-k nothing"\n',
+    # THE CROSS-STEP MECHANISM (PR #66 round-2 review, blocking finding).
+    # GitHub Actions persists a `>> $GITHUB_ENV` write to every SUBSEQUENT step in
+    # the job, so this is the form that actually reaches a sibling pytest step. The
+    # two forms round 2 modelled — a leading `VAR=` prefix and `export` — are
+    # shell-LOCAL: each `run:` is a fresh shell, so neither ever escapes its own
+    # body. The checker caught the weak forms and missed the effective one.
+    'jobs:\n  test:\n    steps:\n      - run: echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"\n',
+    'jobs:\n  test:\n    steps:\n      - run: echo PYTEST_ADDOPTS=--co >> $GITHUB_ENV\n',
+    'jobs:\n  test:\n    steps:\n      - run: printf "PYTEST_ADDOPTS=%s" --collect-only >> "$GITHUB_ENV"\n',
+    # The reviewer's exact placement: one line appended to the swiss job's existing
+    # install step, poisoning the accuracy step that follows it.
+    'jobs:\n  swiss-ephemeris:\n    steps:\n      - name: Install the FROZEN dependency set\n        run: |\n          python -m pip install --upgrade uv\n          uv sync --frozen --extra dev\n          echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"\n      - name: Run the full suite against real Swiss data\n        env:\n          REQUIRE_SWISS_EPHEMERIS: "1"\n        run: uv run --frozen python -m pytest tests/ -q\n',
+    # A bare MENTION, with no assignment at all, is refused too: presence, not
+    # semantics. Distinguishing a harmless echo from a poisoning one means modelling
+    # shell redirection, and modelling is exactly what let the $GITHUB_ENV form
+    # through. A run body has no more legitimate reason to name the variable than an
+    # `env:` block does.
+    'jobs:\n  test:\n    steps:\n      - run: echo "PYTEST_ADDOPTS"\n',
     # A non-narrowing VALUE is still refused here: presence is the rule for a
     # workflow declaration, because deciding narrowing-ness of an arbitrary value
     # means reimplementing pytest's argument parser.
@@ -288,10 +306,12 @@ _WORKFLOW_CLEAN = (
     'jobs:\n  test:\n    steps:\n      - run: pytest tests/ -q\n',
     # Only in a COMMENT — invisible to a parser, which is why this parses.
     'jobs:\n  test:\n    steps:\n      # env:\n      #   PYTEST_ADDOPTS: "--collect-only"\n      - run: pytest tests/ -q\n',
-    # ECHOED, not assigned. Position discriminates, not the presence of the string.
-    'jobs:\n  test:\n    steps:\n      - run: echo "PYTEST_ADDOPTS=--collect-only"\n',
-    # A similarly-named variable is not this one.
+    # A similarly-named variable is not this one — `env:` keys are matched exactly,
+    # so the presence rule that now governs RUN BODIES does not leak into env blocks.
     'jobs:\n  test:\n    env:\n      PYTEST_ADDOPTS_NOTES: "see docs"\n    steps:\n      - run: pytest tests/ -q\n',
+    # An ordinary run body that happens to invoke pytest is still fine — the rule is
+    # about naming the variable, not about running tests.
+    'jobs:\n  test:\n    steps:\n      - run: |\n          uv sync --frozen --extra dev\n          uv run --frozen pytest tests/ -q\n',
 )
 
 
@@ -370,10 +390,52 @@ def test_self_test_covers_the_env_and_workflow_arms(monkeypatch) -> None:
     )
 
     checker = _load_checker()
-    monkeypatch.setattr(checker, "sets_env_inline", lambda tokens, name: False)
+    monkeypatch.setattr(checker, "run_body_names_addopts", lambda run: False)
     assert checker.main(["--self-test"]) == 1, (
-        "the self-test passed with the inline-assignment detector neutered"
+        "the self-test passed with the run-body detector neutered — it does not "
+        "cover the $GITHUB_ENV arm, so the CI step's self-test proves nothing about "
+        "the only form that persists across steps"
     )
+
+
+def test_the_github_env_idiom_is_refused_in_the_real_workflow_shape(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The round-2 blocking finding, as its own named regression.
+
+    `echo "PYTEST_ADDOPTS=…" >> "$GITHUB_ENV"` is GitHub Actions' STANDARD way to
+    set an environment variable for later steps, and it was the one form the
+    tokenising detector could not see: `shell_commands` renders it as
+    `['echo', 'PYTEST_ADDOPTS=--collect-only', '>>', '$GITHUB_ENV']`, where the
+    assignment is an ARGUMENT to echo — neither a leading prefix nor an `export`
+    arg. Measured before the fix, with this line appended to the swiss job's install
+    step in the real test.yml: checker exit 0 "OK", 149 guard tests passed, and the
+    accuracy step would then have run under `--collect-only` (912 collected, 0
+    executed, exit 0).
+
+    Kept separate from the parametrised fixtures so the finding cannot be dropped by
+    editing a tuple.
+    """
+    checker = _load_checker()
+    poisoned = (
+        "jobs:\n"
+        "  swiss-ephemeris:\n"
+        "    steps:\n"
+        "      - name: Install the FROZEN dependency set\n"
+        "        run: |\n"
+        "          uv sync --frozen --extra dev\n"
+        '          echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"\n'
+        "      - name: Run the full suite against real Swiss data\n"
+        "        env:\n"
+        '          REQUIRE_SWISS_EPHEMERIS: "1"\n'
+        "        run: uv run --frozen python -m pytest tests/ -q\n"
+    )
+    found = checker.problems(_workflow(_tree(tmp_path), poisoned), environ={})
+    assert found, (
+        "the $GITHUB_ENV cross-step idiom was permitted — this is the round-2 "
+        "blocking finding, unfixed"
+    )
+    assert any("PYTEST_ADDOPTS" in problem for problem in found)
 
 
 def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> None:
