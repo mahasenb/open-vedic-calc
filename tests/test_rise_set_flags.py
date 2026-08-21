@@ -16,8 +16,9 @@ thirty muhurtas and the whole muhurat/lagna-shuddhi scan with it.
 Until this module existed the engine stated that word nowhere. It inherited
 ``jhora.panchanga.drik.RISE_FLAGS`` / ``SET_FLAGS``, which the astronomy library
 builds at ITS import time from ``jhora.utils.set_flags_for_rise_set()``, which in
-turn reads three ``jhora.const.RISE_SET_*`` module globals. Measured with the
-frozen resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2):
+turn reads three ``jhora.const.RISE_SET_*`` module globals. Measured on pyjhora
+4.8.6 and re-measured unchanged on the now-pinned 4.8.7 (pyswisseph 2.10.3.2
+throughout):
 
     RISE_FLAGS = 897    SET_FLAGS = 898
 
@@ -120,7 +121,8 @@ from bphs_core import utils
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The words measured in the frozen resolve (pyjhora 4.8.6, pyswisseph 2.10.3.2).
+# The words measured in the frozen resolve (pyjhora 4.8.7, pyswisseph 2.10.3.2);
+# identical on the preceding 4.8.6, so the bump did not move them.
 # Repeated here rather than imported so that a change to the declaration has to be
 # made in two places, one of which is a test -- the same friction the position
 # word and the lunar node model use.

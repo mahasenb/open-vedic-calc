@@ -207,36 +207,124 @@ class TestServedValue:
 
 
 class TestTheOverrideIsLoadBearing:
-    def test_the_library_never_reports_the_shadow_grahas_at_all(self):
-        """The library filters both nodes out of ``planets_in_retrograde``.
+    """The library and the declaration now DISAGREE, and the declaration wins.
 
-        So the served value cannot come from it, and the declaration is the only
-        thing standing between this engine and reporting both shadow grahas as
-        permanently DIRECT. Structural, not a sampling artefact: it holds under
-        both ephemeris runtimes.
+    This class used to assert the opposite mechanism, and the pyjhora 4.8.6 ->
+    4.8.7 bump is what changed it. Measured on the two resolves:
 
-        If a future dependency bump makes this go red, the library started
-        reporting the nodes -- a deliberate-review event, exactly like the other
-        pyjhora levers. The declared behaviour still wins; what changes is that
-        the change is no longer invisible.
+        4.8.6  ``_planet_list = {... if p not in [const._RAHU, const._KETU]}``
+        4.8.7  ``_planet_list = {... if p not in [const._SUN, const._MOON]}``
+
+    i.e. the library stopped filtering the two nodes out of
+    ``planets_in_retrograde`` and started reporting their COMPUTED direction --
+    its own 4.8.7 docstring now says "Rahu/Ketu as True nodes - retrograde,
+    stationary or even direct". (Sun and Moon took their place in the filter,
+    which changes nothing: their longitude speed is never negative, so they were
+    never appended anyway.)
+
+    That makes the override MORE load-bearing than before, not less. Measured on
+    the 4.8.7 resolve over 400 instants from 1990-01-01 at 37-day steps: the
+    library reports Rahu retrograde on 72.25% and **direct on 27.75%**, while the
+    engine serves retrograde on 100% of charts. Under 4.8.6 the override turned
+    an absence into True; now it overrules a live, contrary answer on roughly a
+    quarter of all instants.
+
+    Nothing served moved on the bump -- that is the point of declaring it. Had
+    the flag been inherited, 4.8.7 would have flipped Rahu/Ketu retrogression on
+    ~28% of charts with nothing in the diff to say so.
+    """
+
+    def _library_direct_dates(self, count: int) -> tuple[list, int]:
+        """Dates where the library calls Rahu DIRECT, plus the sweep size.
+
+        Discovered rather than hardcoded, deliberately. The true node's speed
+        SIGN near a turning point is ephemeris-source-dependent (this file's
+        module docstring records +0.128 deg/day under Swiss and -0.0014 under
+        Moshier at the same instant), so a pinned list of "direct" instants would
+        be a runtime-dependent fixture -- exactly what this file forbids. A
+        discovered set is stable under both runtimes because only its membership
+        near the turning points moves, never the fact that it is large.
         """
         from jhora.panchanga import drik
 
         rahu_pid = utils.PLANETS.index("Rahu")
-        ketu_pid = utils.PLANETS.index("Ketu")
         place = utils.make_place("Sample City", 7.0, 80.0, 5.5)
 
-        seen = set()
-        for i in range(40):
-            jd = utils.swe.julday(1990, 1, 1, 0.0) + i * 37
-            seen.update(drik.planets_in_retrograde(jd, place))
+        direct = []
+        for i in range(count):
+            date = dt.date(1990, 1, 1) + dt.timedelta(days=i * 37)
+            jd = utils.swe.julday(date.year, date.month, date.day, 12.0)
+            if rahu_pid not in drik.planets_in_retrograde(jd, place):
+                direct.append(date)
+        return direct, count
 
-        assert rahu_pid not in seen and ketu_pid not in seen, (
-            "the astronomy library now reports the shadow grahas in "
-            "planets_in_retrograde; re-establish deliberately whether the "
-            "declared override still describes what this engine wants to serve"
+    def test_the_library_now_reports_the_shadow_grahas(self):
+        """Pin the NEW upstream behaviour, so the next move is visible too.
+
+        Asserted as a disagreement that exists, not as an absence: the previous
+        version of this test asserted the nodes never appeared, and an assertion
+        of that shape goes green both when the library filters them out and when
+        the sweep silently stops discovering anything.
+        """
+        direct, swept = self._library_direct_dates(200)
+
+        assert direct, (
+            "the astronomy library reported Rahu retrograde on every one of the "
+            f"{swept} sampled instants. Either it has gone back to filtering the "
+            "nodes out of planets_in_retrograde, or it switched to the mean node "
+            "(which is retrograde 100% of the time) -- both are deliberate-review "
+            "events for the lunar node model, not something to absorb here."
         )
-        assert seen, (
-            "the library reported NO retrograde grahas at all across the sweep -- "
-            "this check has zero discovered inputs and is not evidence of anything"
+        # A floor, not just non-emptiness: measured 27.75% across 400 instants,
+        # so a sweep that discovered only one or two would mean the sampling had
+        # degenerated rather than that the disagreement is genuinely rare.
+        assert len(direct) >= swept // 10, (
+            f"only {len(direct)} of {swept} sampled instants had the library "
+            "calling Rahu direct; measured on the pinned resolve this is ~28%"
         )
+
+    def test_the_declaration_overrules_the_library_where_they_disagree(self):
+        """End-to-end, on the exact dates the library calls Rahu DIRECT.
+
+        This is the assertion the old absence-based test could not make. It
+        drives a real ``Chart`` on instants where the dependency actively
+        reports the opposite of the declaration, so it fails if the override
+        were ever reduced to passing the library's answer through.
+        """
+        direct, _swept = self._library_direct_dates(200)
+        assert direct, "precondition: no disagreeing instants were discovered"
+
+        checked = 0
+        for date in direct[:6]:
+            rasi = _snapshot(date).rasi_chart
+            for graha in ("Rahu", "Ketu"):
+                assert rasi[graha].is_retrograde, (
+                    f"{graha} is served as DIRECT on {date}, where the astronomy "
+                    "library also calls the node direct -- the declared override "
+                    "in PERPETUALLY_RETROGRADE_GRAHAS is no longer reaching the "
+                    "served chart, so this engine is now inheriting its "
+                    "retrogression from the dependency"
+                )
+                checked += 1
+
+        assert checked >= 12, (
+            f"only {checked} served values were checked on disagreeing dates -- "
+            "a loop that examined nothing would satisfy every assertion above"
+        )
+
+    def test_the_override_is_unconditional_at_the_boundary(self):
+        """``graha_is_retrograde`` ignores ``computed`` for the declared names.
+
+        The two tests above go through a Chart; this pins the boundary function
+        itself, including the case the library now produces -- ``computed=True``
+        -- so the override cannot decay into "True only when the library is
+        silent", which is all 4.8.6 ever exercised.
+        """
+        for graha in sorted(utils.PERPETUALLY_RETROGRADE_GRAHAS):
+            assert utils.graha_is_retrograde(graha, computed=False) is True
+            assert utils.graha_is_retrograde(graha, computed=True) is True
+
+        # And the pass-through still passes through, or the override would be
+        # indistinguishable from a field hardcoded True for every graha.
+        assert utils.graha_is_retrograde("Saturn", computed=False) is False
+        assert utils.graha_is_retrograde("Saturn", computed=True) is True

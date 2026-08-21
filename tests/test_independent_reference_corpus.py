@@ -38,27 +38,34 @@ L2  ``test_served_sidereal_longitudes_match_jpl`` — 75 arcsec.
     ``utils.graha_sidereal_longitude``, recomposed to tropical by adding the
     ayanamsa, against the same Horizons value. This is LOOSER than L1 by two
     orders of magnitude, and the reason is a CONVENTION difference, not error:
-    pyjhora's ``PLANET_FLAGS`` (measured under the FROZEN resolve, pyjhora 4.8.6:
-    **66386** = FLG_SWIEPH | FLG_TRUEPOS | FLG_NONUT | FLG_SPEED | FLG_NOGDEFL |
+    the engine's declared ``POSITION_FLAGS`` (measured under the FROZEN resolve,
+    pyjhora 4.8.7: **65810** = FLG_SWIEPH | FLG_TRUEPOS | FLG_SPEED |
     FLG_SIDEREAL) sets **FLG_TRUEPOS**, so the served positions are geometric — no
     light-time, no aberration — while Horizons' ObsEcLon is apparent.
 
     Two measured facts about that constant, both load-bearing:
 
-    * It is **version-dependent**. pyjhora 4.8.7 reads 65810 — the same value minus
-      FLG_NONUT (64) and FLG_NOGDEFL (512). A patch-level bump moves it. (An earlier
-      draft of this docstring recorded 65810, because it was measured on 4.8.7
-      instead of the pinned resolve. The number here is the frozen one.)
+    * It is **version-dependent**. pyjhora 4.8.6 built 66386 — the same value plus
+      FLG_NONUT (64) and FLG_NOGDEFL (512); 4.8.7 builds 65810. A patch-level bump
+      moved it, and the declaration was re-derived with the bump. (Two earlier
+      drafts of this docstring recorded the wrong one of the pair, in opposite
+      directions — read the number off the pinned resolve, never off memory.)
     * Those two bits are nevertheless **inert on this path**: swapping 66386 for
       65810 moves the served sidereal longitude by a measured **0.0000 arcsec**
       across every graha and epoch in this corpus. FLG_NONUT is masked by
       FLG_SIDEREAL (sidereal positions are referred to the mean equinox, and the
       ayanamsa is returned without nutation); FLG_NOGDEFL is masked by FLG_TRUEPOS,
       which already suppresses light-time, aberration and deflection together.
+      swisseph applies both unasked and says so in its retflag: requesting 65810
+      returns 67410, carrying FLG_NONUT and FLG_NOGDEFL nobody asked for. That is
+      why this tolerance did not move when the pin did.
 
     The coupling is what matters: two of the three flags are inert ONLY because the
     third is set. If FLG_TRUEPOS ever clears, every served longitude moves by ~50
-    arcsec and the other two become live in the same instant.
+    arcsec and the other two become live in the same instant. Since the two are no
+    longer named in the declared word, that coupling is enforced rather than merely
+    observed — ``utils.apply_position_flags`` refuses to start if a masking flag
+    leaves the declaration while the flag it masks is absent.
 
     Measured decomposition of the residual across this corpus:
     geometric-vs-apparent alone 50.8162 arcsec, nutation handling alone 15.4169

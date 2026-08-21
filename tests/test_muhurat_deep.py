@@ -96,8 +96,11 @@ _HHMM = re.compile(r"[0-2]\d:[0-5]\d")
 # readers passed over it because re-reading a tally is not re-deriving it.
 #
 # Re-record only on a deliberate, reviewed dependency bump (pyjhora is pinned
-# ``==4.8.6``), and re-derive the label correspondence when you do — a blind
-# re-record would launder exactly the reorder this pins.
+# ``==4.8.7``), and re-derive the label correspondence when you do — a blind
+# re-record would launder exactly the reorder this pins. Re-checked unchanged on
+# the 4.8.6 -> 4.8.7 bump: that release revised the node retrogression and
+# speed-info limbs, and left ``jhora.const.muhurthas_of_the_day`` untouched, so
+# this table was verified rather than re-recorded.
 _MUHURTA_POSITIONAL_SIGNATURE = (
     ("Rudra",       "rudra",           0),
     ("Ahi",         "aahi",            0),

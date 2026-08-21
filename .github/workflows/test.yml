@@ -199,7 +199,7 @@ jobs:
       - name: Install the FROZEN dependency set
         # uv sync --frozen, not `pip install -e .`: the committed golden values are
         # only reproducible against a pinned resolve (pyswisseph 2.10.3.2, pyjhora
-        # 4.8.6 — the same set the shipped image installs). A floating resolve would
+        # 4.8.7 — the same set the shipped image installs). A floating resolve would
         # turn a dependency's own numeric change into a mystery golden failure.
         run: |
           python -m pip install --upgrade uv

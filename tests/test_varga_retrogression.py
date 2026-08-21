@@ -7,7 +7,8 @@ the flag the rasi chart serves -- for every graha, in every varga -- and it must
 be the astronomically correct one. Extend this file, never weaken it.
 
 WHY THIS FILE EXISTS -- the coverage gap it closes, measured 2026-08-09 on the
-frozen resolve (pyjhora 4.8.6 / pyswisseph 2.10.3.2) against the real Swiss data
+then-frozen resolve (pyjhora 4.8.6 / pyswisseph 2.10.3.2; re-run unchanged on the
+now-pinned 4.8.7) against the real Swiss data
 files. Before this file, nothing in this suite observed a CLASSICAL graha's
 ``is_retrograde`` in ANY divisional chart. Sever the propagation at the varga
 construction site -- replace ``computed=pid in retro_planets`` with

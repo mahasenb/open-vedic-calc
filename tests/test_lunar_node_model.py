@@ -5,8 +5,10 @@ WHY THIS MODULE EXISTS
 Rahu and Ketu can be computed from either the TRUE (osculating) lunar node — the
 actual instantaneous intersection of the Moon's orbital plane with the ecliptic —
 or the MEAN node, a smoothed analytical fit to that intersection. The two differ
-by a lot. Measured in this repo with the frozen dependency set (pyswisseph
-2.10.3.2, pyjhora 4.8.6) against the real Swiss ephemeris data files, scanning
+by a lot. Measured in this repo with the then-frozen dependency set (pyswisseph
+2.10.3.2, pyjhora 4.8.6 — these are properties of swisseph's two node bodies, so
+the later 4.8.7 bump left them untouched and pyswisseph is unmoved at 2.10.3.2)
+against the real Swiss ephemeris data files, scanning
 1800-01-01..2400-12-31 (the engine's supported birth-date span, app/schemas.py)
 one day at a time and refining the worst day at one-hour steps:
 
@@ -33,14 +35,34 @@ THREE LEVERS, AND THE OBVIOUS ONE IS NOT THE ONE THAT SERVES
 ------------------------------------------------------------
 Measured while writing this, not read from documentation. `jhora.const._RAHU`
 (and its `_use_true_nodes_for_rahu_ketu` flag) is the lever everything about the
-library's naming suggests. Setting it to the mean node and computing a real
-chart returns the TRUE node anyway, unchanged to the last digit: the chart path
-is `charts.rasi_chart` -> `drik.dhasavarga(jd, place, 1)`, and dhasavarga
-declares `set_rahu_ketu_as_true_nodes=True` as a LITERAL parameter default, so it
-rebuilds the body table from that literal and never consults the constants.
-`bphs_core.utils.apply_lunar_node_model` therefore pins the constants AND the
-mutable `drik.planet_list`, and VERIFIES the serving literal it cannot set —
-refusing to start if the library ever disagrees with the declaration.
+library's naming suggests. Under pyjhora 4.8.6, setting it to the mean node and
+computing a real chart returned the TRUE node anyway, unchanged to the last
+digit: the chart path is `charts.rasi_chart` -> `drik.dhasavarga(jd, place, 1)`,
+and dhasavarga declared `set_rahu_ketu_as_true_nodes=True` as a LITERAL parameter
+default, so it rebuilt the body table from that literal and never consulted the
+constants. `bphs_core.utils.apply_lunar_node_model` therefore pins the constants
+AND the mutable `drik.planet_list`, and VERIFIES the serving default it cannot
+set — refusing to start if the library ever disagrees with the declaration.
+
+THAT THIRD LEVER CHANGED SHAPE IN pyjhora 4.8.7, and the applier already
+anticipated it. The default is now `set_rahu_ketu_as_true_nodes=None` and the
+body that rebuilt the table is commented out upstream ("it is altering/forcing
+other than configured values"), so dhasavarga now DEFERS to the constants that
+lever 1 pins. `_serving_path_node_default` treats `None` as acceptable for
+exactly this reason, and the served node is unchanged — measured on the 4.8.7
+resolve, Rahu at 2000-01-01 12:00 UT is 100.100800 deg, equal to swisseph's TRUE
+node and 3911.8 arcsec from its MEAN node.
+
+One consequence is worth stating plainly rather than discovering later. Under
+4.8.6, declaring `LUNAR_NODE_MODEL = "mean"` hard-failed at import, because the
+literal would have kept serving true nodes under a mean banner. Under 4.8.7 it
+no longer hard-fails — measured: it serves 101.187424 deg, the actual mean node.
+That is not a lost guard so much as a guard whose reason expired: the
+banner-vs-reality contradiction it detected can no longer arise, because the
+engine now serves whatever it declares. The friction that keeps the model from
+moving on a one-word edit is unchanged and lives here —
+`test_the_declared_lunar_node_model_is_the_true_node` pins the literal, and the
+Swiss goldens move by ~1 deg on both shadow grahas.
 
 THE CHOICE: TRUE NODE
 ---------------------

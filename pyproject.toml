@@ -19,7 +19,15 @@ dependencies = [
     # change in this repository. See bphs_core/utils.py (LUNAR_NODE_MODEL) and
     # tests/test_lunar_node_model.py; a bump belongs in its own reviewed change
     # that re-runs the Swiss goldens.
-    "pyjhora==4.8.6",
+    #
+    # It also supplies the position-flag word, and THAT is the one this pin has
+    # already caught moving: 4.8.6 built 66386 and 4.8.7 builds 65810 (a
+    # difference of 576 = FLG_NOGDEFL | FLG_NONUT), with no file here changed and
+    # no golden able to see it, because the served longitudes are bit-identical
+    # under FLG_TRUEPOS. The 4.8.6 -> 4.8.7 bump was taken deliberately, and the
+    # declaration re-derived, in the reviewed change that moved this line; see
+    # bphs_core/utils.py (POSITION_FLAGS) and tests/test_position_flags.py.
+    "pyjhora==4.8.7",
     "numpy>=1.23.0",
     # pyjhora undeclared runtime deps -- imported by jhora/utils.py at module
     # load; do not remove while pyjhora is a dependency.

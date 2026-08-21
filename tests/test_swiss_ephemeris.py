@@ -38,7 +38,7 @@ how the accuracy job passes, so:
     job, its fetch step, or that env var goes missing.
 
 The goldens are produced by the same frozen dependency set the image ships
-(``uv sync --frozen``: pyswisseph 2.10.3.2, pyjhora 4.8.6) against checksum-pinned
+(``uv sync --frozen``: pyswisseph 2.10.3.2, pyjhora 4.8.7) against checksum-pinned
 data files, so they are reproducible. A deliberate dependency or data bump that moves
 a value is expected to fail here first and be re-recorded in the same review.
 """
