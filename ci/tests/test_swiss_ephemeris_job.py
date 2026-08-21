@@ -787,7 +787,7 @@ def test_commands_joins_shell_line_continuations() -> None:
     assert _has_token_sequence("uv sync \\\n  --frozen --extra dev", "uv", "sync", "--frozen")
 
     # A narrowing flag on the continuation line must still be found.
-    assert _deselecting_flags(
+    assert _narrowing_flags(
         "pytest tests/ -q \\\n  --ignore=tests/test_independent_reference_corpus.py"
     ) == ["--ignore"]
 
@@ -1686,9 +1686,23 @@ def test_enablement_snapshot_catches_forms_the_semantic_checks_do_not() -> None:
 
 _CORPUS_MODULE = "tests/test_independent_reference_corpus.py"
 _FIXTURE = "swiss_ephemeris"
-# pytest flags that REMOVE tests from a run. The accuracy job exists to run the whole
-# suite against real data, so any of these in its suite step is treated as narrowing.
-_DESELECTING_FLAGS = ("--ignore", "--ignore-glob", "--deselect", "-k", "-m")
+
+# pytest flags that REMOVE tests from a run by DESELECTING them, and that take a
+# value. The value must be skipped when reading positional targets, or `--ignore
+# tests/foo.py` leaves `tests/foo.py` looking like a target.
+_VALUE_TAKING_DESELECT_FLAGS = ("--ignore", "--ignore-glob", "--deselect", "-k", "-m")
+
+# Flags that remove tests from a run by a DIFFERENT mechanism: they deselect
+# nothing at all. `pytest tests/ --collect-only` collects every module the accuracy
+# gate needs, executes not one test body, and exits 0. A guard that models only
+# deselection answers "yes, it reaches every gated module" — correctly, and
+# irrelevantly. `--co` is pytest's documented short form of the same flag.
+_COLLECTION_ONLY_FLAGS = ("--collect-only", "--co")
+
+# Everything that costs the accuracy job its assertions, by either mechanism. The
+# job exists to RUN the whole suite against real data, so any of these appearing in
+# its suite step is narrowing.
+_NARROWING_FLAGS = _VALUE_TAKING_DESELECT_FLAGS + _COLLECTION_ONLY_FLAGS
 
 
 def _swiss_gated_modules() -> list[str]:
@@ -1730,7 +1744,10 @@ def _pytest_targets(run: str) -> list[str]:
                 skip_next = False
                 continue
             if token.startswith("-"):
-                if "=" not in token and token in _DESELECTING_FLAGS:
+                # Only the VALUE-TAKING flags consume the next argv slot.
+                # `--collect-only` takes no value, so skipping after it would
+                # silently swallow a real positional target.
+                if "=" not in token and token in _VALUE_TAKING_DESELECT_FLAGS:
                     skip_next = True
                 continue
             targets.append(token)
@@ -1738,8 +1755,15 @@ def _pytest_targets(run: str) -> list[str]:
     return []
 
 
-def _deselecting_flags(run: str) -> list[str]:
-    """Narrowing flags present on the pytest command, however they are spelled."""
+def _narrowing_flags(run: str) -> list[str]:
+    """Flags on the pytest command that cost the run assertions, however spelled.
+
+    Covers both mechanisms: deselection (`--ignore`, `-k`, ...) and
+    collection-only (`--collect-only`, `--co`), which deselects nothing and runs
+    nothing. Matched on the flag NAME after splitting an `=`, so `--ignore=x` and
+    `--ignore x` are both caught while `--color=no` (a prefix of nothing here) and a
+    positional path containing the string are not.
+    """
     found: list[str] = []
     for tokens in _commands(run):
         if "pytest" not in tokens:
@@ -1748,7 +1772,7 @@ def _deselecting_flags(run: str) -> list[str]:
             if not token.startswith("-"):
                 continue
             name = token.split("=", 1)[0]
-            if name in _DESELECTING_FLAGS:
+            if name in _NARROWING_FLAGS:
                 found.append(name)
     return found
 
@@ -1768,7 +1792,7 @@ def _job_reaches(job: dict, module: str) -> bool:
     if step is None:
         return False
     run = str(step.get("run", ""))
-    if _deselecting_flags(run):
+    if _narrowing_flags(run):
         return False
     return any(_target_reaches(target, module) for target in _pytest_targets(run))
 
@@ -1858,6 +1882,32 @@ jobs:
           uv run --frozen python -m pytest tests/test_swiss_ephemeris.py -q
 """
 
+# `--collect-only` (and its documented short form `--co`) is a different mechanism
+# from every fixture above: it DESELECTS NOTHING. The whole tree is still the
+# target, every gated module is still collected, and pytest exits 0 having
+# executed no test body and asserted nothing whatsoever. A guard that only models
+# deselection reports this job as reaching every module it needs to reach — which
+# is true, and completely beside the point. (PR #65 review, non-blocking item 4.)
+_FIXTURE_TARGET_COLLECT_ONLY = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ -q --collect-only
+"""
+
+_FIXTURE_TARGET_COLLECT_ONLY_SHORT = """
+jobs:
+  swiss-ephemeris:
+    steps:
+      - name: Run the full suite against real Swiss data
+        env:
+          REQUIRE_SWISS_EPHEMERIS: "1"
+        run: uv run --frozen python -m pytest tests/ --co -q
+"""
+
 
 def test_reachability_parser_discriminates() -> None:
     """Fixtures the coverage check must get right — each one keeps the job, the fetch
@@ -1890,6 +1940,21 @@ def test_reachability_parser_discriminates() -> None:
     assert not _job_reaches(job_of(_FIXTURE_TARGET_CONTINUED_BUT_IGNORES_CORPUS), corpus)
     # A narrowed real command is not rescued by the full command appearing in an echo.
     assert not _job_reaches(job_of(_FIXTURE_TARGET_ONLY_ECHOED), corpus)
+
+    # `--collect-only` deselects NOTHING — the whole tree is still the target and
+    # every gated module is still collected — yet no test body runs and the job
+    # exits 0 having asserted nothing. Both spellings must be rejected.
+    for fixture in (_FIXTURE_TARGET_COLLECT_ONLY, _FIXTURE_TARGET_COLLECT_ONLY_SHORT):
+        assert not _job_reaches(job_of(fixture), corpus), (
+            "a --collect-only invocation was accepted: it collects every module and "
+            "runs none of them, so the accuracy gate asserts nothing while green"
+        )
+    assert _narrowing_flags("pytest tests/ -q --collect-only") == ["--collect-only"]
+    assert _narrowing_flags("pytest tests/ --co -q") == ["--co"]
+    # ...and it must not be confused with a legitimate flag that merely starts the
+    # same way, or with a positional target that contains the string.
+    assert _narrowing_flags("pytest tests/ -q --color=no") == []
+    assert _narrowing_flags("pytest tests/test_collect_only.py -q") == []
 
     # The space-separated `--ignore <path>` form must not leave the path looking like a
     # target: without the skip_next branch this would read as a positional argument.
@@ -1934,11 +1999,14 @@ def test_swiss_job_reaches_every_swiss_gated_module() -> None:
     assert step is not None, f"the `{_JOB}` job has no suite step (see the check above)"
     run = str(step.get("run", ""))
 
-    narrowing = _deselecting_flags(run)
+    narrowing = _narrowing_flags(run)
     assert not narrowing, (
-        f"the `{_JOB}` job's suite step carries deselecting pytest flag(s) {narrowing}. "
-        "This job exists to run the WHOLE suite against real ephemeris data; anything "
-        f"that removes tests from it can silently disarm an accuracy module. run:\n{run}"
+        f"the `{_JOB}` job's suite step carries narrowing pytest flag(s) {narrowing}. "
+        "This job exists to RUN the WHOLE suite against real ephemeris data; anything "
+        "that removes tests from it can silently disarm an accuracy module. Note "
+        f"{list(_COLLECTION_ONLY_FLAGS)} deselect nothing and still count: they collect "
+        "every gated module, execute no test body, and exit 0 — the gate reports green "
+        f"having asserted nothing at all. run:\n{run}"
     )
 
     unreached = [module for module in gated if not _job_reaches(job, module)]
