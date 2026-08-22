@@ -53,11 +53,58 @@ Refused, therefore:
   codepage, so the verdict depends on the machine it ran on;
 * text mode with a *raising* ``errors=`` policy (including the default, which
   is ``strict``) — rows 2 and 3 above;
-* ``subprocess.getoutput`` / ``getstatusoutput`` in any form — they decode with
-  the locale and accept no ``encoding`` parameter at all, so neither shape is
-  reachable;
+* text mode with an ``encoding=`` other than UTF-8 — shape (B)'s whole
+  justification is that ASCII survives a lossy decode, and that is codec
+  specific; see ``_ADMITTED_CODECS`` for the cp932/cp936/utf-16 counterexamples;
+* ``subprocess.getoutput`` / ``getstatusoutput`` and ``os.popen`` in any form —
+  they decode with the locale and accept no ``encoding`` parameter at all, so
+  neither shape is reachable;
 * a ``**kwargs`` splat on a subprocess call — the property cannot be proved by
-  reading the call, and a guard that cannot prove its property must fail closed.
+  reading the call, and a guard that cannot prove its property must fail closed;
+* a call whose text-mode keywords cannot be read — ``text=<expr>`` and friends.
+  Text mode is decided by TRUTHINESS, so an unreadable value may well select it.
+
+**Text mode is read as the engine reads it.** CPython's ``Popen.__init__`` sets
+``self.text_mode = encoding or errors or text or universal_newlines`` — an
+``or`` chain over truth values, not a comparison against ``True``. An earlier
+version of this guard tested ``literal(flag) is True`` and so classified
+``text=1``, ``text=2``, ``text="yes"``, ``universal_newlines=1`` and any
+non-literal ``text=<expr>`` as **bytes mode, i.e. safe**, while the engine put
+every one of them in text mode and handed back ``stdout=None``. That is this
+guard committing the exact defect it exists to catch. See ``_Site.text_mode``.
+
+KNOWN BOUNDS (documented, not assumed away)
+===========================================
+Stated because a guard that overclaims its reach is worse than one whose limits
+are written down. **Binding forms that ARE resolved:** ``import subprocess``,
+``import subprocess as sp``, ``from subprocess import run``,
+``from subprocess import run as r``, ``from subprocess import *``, and a plain
+rebinding ``sp = subprocess``. **Binding forms that are NOT, and would be
+invisible to this guard:**
+
+* ``getattr(subprocess, "run")(...)`` — the attribute name is a runtime value;
+* ``importlib.import_module("subprocess").run(...)`` — likewise;
+* a rebinding that is not a simple ``name = name`` assignment, one placed
+  textually *before* the import it aliases, or one built dynamically.
+
+Those are deliberate-evasion shapes rather than things anyone writes by
+accident, and closing them means executing the module rather than parsing it.
+They are refused as a *design* boundary, not overlooked. Note this repository
+has **no linter at all**, so nothing else would flag them either.
+
+Further bounds:
+
+* Scope is ``git ls-files '*.py'`` — the tracked tree, not a directory walk.
+* The guard reads the *call site*. A subprocess call whose keyword arguments are
+  assembled elsewhere and splatted in is refused rather than analysed.
+* It does not police what the caller does with bytes afterwards. ``bytes.decode()``
+  defaults to UTF-8 strict by language guarantee, not by locale, so shape (A) is
+  safe whether or not the caller spells the encoding out.
+* It reads keyword *literals*. A non-literal value in any decoding keyword is
+  refused rather than guessed at.
+* Only ``subprocess`` and ``os.popen`` are watched (``_WATCHED_MODULES``). Other
+  ways to reach a locale-decoded pipe — ``pty``, ``asyncio.subprocess``, a
+  third-party wrapper — are out of scope and would need their own entry.
 
 THE LOSSY REGISTER (arm 2)
 ==========================
@@ -80,23 +127,17 @@ identity is not a safety property — measured, ``errors="strict"`` inside a
 carefully written helper dies on the reader thread exactly as it does anywhere
 else, and ``errors="replace"`` outside one is exactly as crash-free.
 
-KNOWN BOUNDS (documented, not assumed away)
-===========================================
-* Scope is ``git ls-files '*.py'`` — the tracked tree, not a directory walk.
-* The guard reads the *call site*. A subprocess call whose keyword arguments are
-  assembled elsewhere and splatted in is refused rather than analysed.
-* It does not police what the caller does with bytes afterwards. ``bytes.decode()``
-  defaults to UTF-8 strict by language guarantee, not by locale, so shape (A) is
-  safe whether or not the caller spells the encoding out.
-* It reads keyword *literals*. A non-literal ``errors=<expr>`` cannot be proved
-  non-raising and is refused.
 """
 
 from __future__ import annotations
 
 import ast
+import codecs
+import json
 import pathlib
 import subprocess
+import sys
+import textwrap
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
@@ -104,12 +145,54 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _DISPATCH = frozenset(
     {"run", "check_output", "check_call", "call", "Popen"}
 )
-# These two decode with the locale and take no `encoding` parameter at all, so
-# neither admissible shape is reachable through them.
+# These decode with the locale and take no `encoding` parameter at all, so
+# neither admissible shape is reachable through them. `os.popen` is the same
+# hazard class wearing a different module name: it returns a text-mode pipe
+# opened with the locale encoding and offers no way to pin one.
 _LOCALE_ONLY_DISPATCH = frozenset({"getoutput", "getstatusoutput"})
+_OS_LOCALE_DISPATCH = frozenset({"popen"})
 
-# Keywords that put the call into text mode.
-_TEXT_FLAGS = ("text", "universal_newlines")
+# The four keywords the engine ORs together to decide text mode, in its own
+# order: `encoding or errors or text or universal_newlines`
+# (CPython `subprocess.Popen.__init__`). `encoding`/`errors` select text mode
+# implicitly, which is how a site can be locale-dependent while carrying no
+# `text=True` for a reader to notice.
+_TEXT_MODE_KEYS = ("encoding", "errors", "text", "universal_newlines")
+
+# The ONLY codec admitted for shape (B), by canonical codec name.
+#
+# Shape (B) is crash-free but LOSSY, and every register entry justifies its
+# lossiness with "UTF-8 is self-synchronising, so ASCII bytes always decode to
+# themselves". That argument is CODEC-SPECIFIC, and the verdict must not accept
+# codecs it is false for. Measured on the locked interpreter, decoding
+# `b"\x82" + b"UPDATE_INDEPENDENT_CORPUS"` with errors="replace" -- i.e. one
+# stray lead byte in front of an ASCII marker a real site asserts on:
+#
+#     utf-8    -> '�UPDATE_INDEPENDENT_CORPUS'   marker survives
+#     cp932    -> '６PDATE_INDEPENDENT_CORPUS'    marker DESTROYED
+#     cp936    -> '俇PDATE_INDEPENDENT_CORPUS'    marker DESTROYED
+#     utf-16   -> '喂䑐呁...'             marker DESTROYED
+#
+# The double-byte codecs consume the following ASCII byte as a trail byte, and
+# utf-16 re-pairs the whole stream. So a future `encoding="cp932",
+# errors="replace"` site would be classified lossy, receive a register entry
+# reciting the ASCII-survival argument, and that argument would be FALSE.
+#
+# Single-byte codecs (cp1252, latin-1) also preserve ASCII, and `utf-8-sig`
+# canonicalises separately while behaving identically -- but admitting either
+# family buys nothing here and cp1252/latin-1 would reintroduce exactly the
+# locale-flavoured decoding this whole guard exists to remove. The allowlist is
+# therefore the one codec whose argument is actually proven; anything else must
+# extend the argument with its own measurement rather than inherit this one.
+_ADMITTED_CODECS = frozenset({"utf-8"})
+
+# Modules this guard watches, and which of their entry points matter.
+# Enumerated in one table so the dispatch is stated once and the docstring's
+# claims can be checked against it.
+_WATCHED_MODULES: dict[str, frozenset[str]] = {
+    "subprocess": _DISPATCH | _LOCALE_ONLY_DISPATCH,
+    "os": _OS_LOCALE_DISPATCH,
+}
 
 # `errors` policies that cannot raise on the reader thread. Anything else --
 # including the default, `strict` -- can, which is rows 2 and 3 of the table.
@@ -256,16 +339,27 @@ def _tracked_python_files() -> list[pathlib.Path]:
 class _Site:
     """One subprocess invocation, with everything needed to judge it."""
 
-    def __init__(self, relpath: str, node: ast.Call, dispatch: str, qualname: str):
+    def __init__(
+        self,
+        relpath: str,
+        node: ast.Call,
+        dispatch: str,
+        qualname: str,
+        module: str = "subprocess",
+    ):
         self.relpath = relpath
         self.line = node.lineno
         self.dispatch = dispatch
+        self.module = module
         self.qualname = qualname
         self.splat = any(kw.arg is None for kw in node.keywords)
         self.kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
 
     def __str__(self) -> str:
-        return f"{self.relpath}:{self.line} ({self.qualname} -> subprocess.{self.dispatch})"
+        return (
+            f"{self.relpath}:{self.line} "
+            f"({self.qualname} -> {self.module}.{self.dispatch})"
+        )
 
     def literal(self, key: str):
         """The literal value of a keyword, or the sentinel ``_NOT_LITERAL``."""
@@ -276,17 +370,61 @@ class _Site:
         except (ValueError, SyntaxError):
             return _NOT_LITERAL
 
-    @property
-    def in_text_mode(self) -> bool:
-        """Does this call decode inside subprocess at all?
+    def truthiness(self, key: str):
+        """``True`` / ``False`` / ``_NOT_LITERAL`` for one text-mode keyword.
 
-        Any of the four keywords puts the child's streams into text mode --
-        ``encoding``/``errors`` do so implicitly, which is exactly how a site
-        can be locale-dependent while carrying no ``text=True`` to grep for.
+        An ABSENT keyword is ``False``: it contributes nothing to the ``or``
+        chain the engine evaluates. A present one is judged by its truth value,
+        not by identity with ``True`` -- see ``text_mode`` below.
         """
-        if any(self.literal(flag) is True for flag in _TEXT_FLAGS):
+        if key not in self.kwargs:
+            return False
+        try:
+            return bool(ast.literal_eval(self.kwargs[key]))
+        except (ValueError, SyntaxError):
+            return _NOT_LITERAL
+
+    @property
+    def text_mode(self):
+        """``True`` / ``False`` / ``_NOT_LITERAL`` -- READ AS THE ENGINE READS IT.
+
+        CPython decides text mode by **truthiness**, in ``Popen.__init__``::
+
+            self.text_mode = encoding or errors or text or universal_newlines
+
+        so this must too. An earlier version of this guard tested
+        ``literal(flag) is True`` and therefore **failed open** on every shape
+        that is truthy without being the ``True`` singleton. Measured on the
+        locked interpreter against the hostile child in the module docstring:
+
+            text=1                -> stdout=None   (engine: text mode)
+            text=2                -> stdout=None
+            text="yes"            -> stdout=None
+            universal_newlines=1  -> stdout=None
+            text=0 / False / None -> bytes mode
+            encoding=None         -> bytes mode
+            errors=None           -> bytes mode
+
+        The identity test called the first four **safe**, which is precisely
+        the shape this guard exists to refuse -- the same failure the whole
+        change is built around ("an explicit encoding does not remove the
+        hazard"), turned on the guard itself.
+
+        Three-valued, and the ordering matters. A keyword that is *definitely
+        truthy* settles the question, so an unreadable value elsewhere cannot
+        make a certain text-mode call uncertain. Only when nothing is
+        definitely truthy does an unreadable value leave the mode unprovable --
+        and then this returns ``_NOT_LITERAL`` so the caller can fail closed,
+        symmetrically with how ``encoding=`` and ``errors=`` already treat a
+        non-literal. ``text=<variable>`` is ordinary Python, not a contrived
+        evasion, and this repository has no linter to catch it either.
+        """
+        states = [self.truthiness(key) for key in _TEXT_MODE_KEYS]
+        if any(state is True for state in states):
             return True
-        return "encoding" in self.kwargs or "errors" in self.kwargs
+        if any(state is _NOT_LITERAL for state in states):
+            return _NOT_LITERAL
+        return False
 
 
 _NOT_LITERAL = object()
@@ -299,24 +437,49 @@ class _CallCollector(ast.NodeVisitor):
         self.relpath = relpath
         self.sites: list[_Site] = []
         self._scope: list[str] = []
-        # Names bound to the subprocess MODULE (`import subprocess [as x]`).
-        self._module_aliases: set[str] = set()
+        # Names bound to a watched MODULE -> the module's real name.
+        # `import subprocess`, `import subprocess as sp`, `import os as _os`,
+        # and plain rebindings like `sp = subprocess`.
+        self._module_aliases: dict[str, str] = {}
         # Names bound directly to a dispatch function
-        # (`from subprocess import run [as r]`) -> the real dispatch name.
-        self._direct: dict[str, str] = {}
+        # (`from subprocess import run [as r]`, `from subprocess import *`)
+        # -> (module, real dispatch name).
+        self._direct: dict[str, tuple[str, str]] = {}
 
-    # -- binding resolution: aliasing must not be an escape hatch -----------
+    # -- binding resolution -------------------------------------------------
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            if alias.name == "subprocess":
-                self._module_aliases.add(alias.asname or "subprocess")
+            if alias.name in _WATCHED_MODULES:
+                self._module_aliases[alias.asname or alias.name] = alias.name
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.module == "subprocess":
+        if node.module in _WATCHED_MODULES:
+            watched = _WATCHED_MODULES[node.module]
             for alias in node.names:
-                if alias.name in _DISPATCH or alias.name in _LOCALE_ONLY_DISPATCH:
-                    self._direct[alias.asname or alias.name] = alias.name
+                if alias.name == "*":
+                    # `from subprocess import *` binds every public name, so
+                    # every dispatch name arrives unqualified and un-renamed.
+                    for name in watched:
+                        self._direct[name] = (node.module, name)
+                elif alias.name in watched:
+                    self._direct[alias.asname or alias.name] = (node.module, alias.name)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """`sp = subprocess` -- a rebinding, not an import, and not exotic.
+
+        Single-level and source-order: the visitor walks a module body in
+        order, so a rebinding placed after its import resolves. A rebinding
+        that precedes its import, or one built dynamically, does not -- see
+        KNOWN BOUNDS in the module docstring.
+        """
+        source = node.value
+        if isinstance(source, ast.Name) and source.id in self._module_aliases:
+            real = self._module_aliases[source.id]
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._module_aliases[target.id] = real
         self.generic_visit(node)
 
     # -- qualname tracking --------------------------------------------------
@@ -331,19 +494,25 @@ class _CallCollector(ast.NodeVisitor):
 
     # -- the calls themselves ----------------------------------------------
     def visit_Call(self, node: ast.Call) -> None:
-        dispatch = self._resolve(node.func)
-        if dispatch is not None:
+        resolved = self._resolve(node.func)
+        if resolved is not None:
+            module, dispatch = resolved
             self.sites.append(
-                _Site(self.relpath, node, dispatch, ".".join(self._scope) or "<module>")
+                _Site(
+                    self.relpath, node, dispatch,
+                    ".".join(self._scope) or "<module>", module,
+                )
             )
         self.generic_visit(node)
 
-    def _resolve(self, func: ast.expr) -> str | None:
+    def _resolve(self, func: ast.expr) -> tuple[str, str] | None:
+        """(module, dispatch) for a watched call, else None."""
         if isinstance(func, ast.Attribute):
             value = func.value
             if isinstance(value, ast.Name) and value.id in self._module_aliases:
-                if func.attr in _DISPATCH or func.attr in _LOCALE_ONLY_DISPATCH:
-                    return func.attr
+                module = self._module_aliases[value.id]
+                if func.attr in _WATCHED_MODULES[module]:
+                    return module, func.attr
             return None
         if isinstance(func, ast.Name):
             return self._direct.get(func.id)
@@ -364,6 +533,13 @@ def _all_sites() -> tuple[list[_Site], int]:
 
 def _verdict(site: _Site) -> tuple[str, str]:
     """Classify a site as ('bytes'|'lossy'|'violation', explanation)."""
+    if site.module == "os" and site.dispatch in _OS_LOCALE_DISPATCH:
+        return "violation", (
+            f"`os.{site.dispatch}` returns a text-mode pipe opened with the "
+            "LOCALE encoding and offers no way to pin one, so neither "
+            "admissible shape is reachable through it. Use `subprocess.run` in "
+            "bytes mode and decode in-process."
+        )
     if site.dispatch in _LOCALE_ONLY_DISPATCH:
         return "violation", (
             f"`subprocess.{site.dispatch}` decodes with the locale codepage and "
@@ -377,21 +553,51 @@ def _verdict(site: _Site) -> tuple[str, str]:
             "the call site, so this guard cannot prove the call is safe. Pass "
             "the decoding keywords explicitly."
         )
-    if not site.in_text_mode:
+
+    text_mode = site.text_mode
+    if text_mode is _NOT_LITERAL:
+        return "violation", (
+            "whether this call runs in text mode cannot be read at the call "
+            "site: one of "
+            f"{list(_TEXT_MODE_KEYS)} carries a non-literal value. The engine "
+            "decides on TRUTHINESS (`encoding or errors or text or "
+            "universal_newlines`), so a truthy value here selects text mode and "
+            "the decode moves onto the reader thread. A guard that cannot prove "
+            "its property fails closed -- spell the value out at the call site."
+        )
+    if not text_mode:
         return "bytes", "bytes mode -- the caller decodes, where failure is catchable"
 
     encoding = site.literal("encoding")
-    if encoding is None:
+    if not encoding or encoding is _NOT_LITERAL:
+        if encoding is _NOT_LITERAL:
+            return "violation", (
+                "`encoding=` is not a literal, so this guard cannot confirm which "
+                "codec is used. Spell it out at the call site."
+            )
         return "violation", (
-            "text mode with no explicit `encoding=`: the decode uses the LOCALE "
-            "codepage (cp1252 on a Windows checkout), so the result depends on "
-            "the machine. Measured: an undecodable byte kills the reader thread "
-            "and the caller is handed stdout=None with returncode=0."
+            "text mode with no explicit (or a falsy) `encoding=`: the decode "
+            "uses the LOCALE codepage (cp1252 on a Windows checkout), so the "
+            "result depends on the machine. Measured: an undecodable byte kills "
+            "the reader thread and the caller is handed stdout=None with "
+            "returncode=0."
         )
-    if encoding is _NOT_LITERAL:
+    try:
+        canonical = codecs.lookup(encoding).name
+    except (LookupError, TypeError):
         return "violation", (
-            "`encoding=` is not a literal, so this guard cannot confirm which "
-            "codec is used. Spell it out at the call site."
+            f"`encoding={encoding!r}` is not a codec Python knows, so this call "
+            "would raise at run time rather than decode."
+        )
+    if canonical not in _ADMITTED_CODECS:
+        return "violation", (
+            f"`encoding={encoding!r}` (canonically {canonical!r}) is not "
+            f"{sorted(_ADMITTED_CODECS)}. A lossy reader-thread decode is only "
+            "admitted for a codec where the register's justification actually "
+            "holds -- 'ASCII bytes always decode to themselves'. Measured, that "
+            "is FALSE for cp932, cp936 and utf-16: a single stray lead byte "
+            "consumes the following ASCII character, destroying a marker a test "
+            "asserts on. Use utf-8, or drop to bytes mode and decode in-process."
         )
 
     errors = site.literal("errors")
@@ -450,9 +656,10 @@ def test_the_classifier_separates_the_measured_shapes() -> None:
         ("import subprocess\nsubprocess.run(c, encoding='utf-8', errors='replace')", "lossy"),
         # `errors=` alone still implies text mode -- with the LOCALE codec.
         ("import subprocess\nsubprocess.run(c, errors='replace')", "violation"),
-        # the two that can never be made safe
+        # the ones that can never be made safe
         ("import subprocess\nsubprocess.getoutput(c)", "violation"),
         ("import subprocess\nsubprocess.getstatusoutput(c)", "violation"),
+        ("import os\nos.popen(c)", "violation"),
         # unprovable shapes fail closed
         ("import subprocess\nsubprocess.run(c, **kw)", "violation"),
         ("import subprocess\nsubprocess.run(c, text=True, encoding=E)", "violation"),
@@ -460,18 +667,143 @@ def test_the_classifier_separates_the_measured_shapes() -> None:
             "import subprocess\nsubprocess.run(c, text=True, encoding='utf-8', errors=E)",
             "violation",
         ),
-        # aliasing is not an escape hatch
+        # aliasing is not an escape hatch, for the forms KNOWN BOUNDS claims
         ("import subprocess as sp\nsp.run(c, text=True)", "violation"),
         ("from subprocess import run\nrun(c, text=True)", "violation"),
         ("from subprocess import run as r\nr(c, text=True)", "violation"),
         ("import subprocess as sp\nsp.Popen(c, text=True)", "violation"),
+        ("from subprocess import *\nrun(c, text=True)", "violation"),
+        ("import subprocess\nsp = subprocess\nsp.run(c, text=True)", "violation"),
+        ("import os as _o\n_o.popen(c)", "violation"),
+        # --- TRUTHINESS, as the engine reads it -----------------------------
+        # Measured: each of these puts the ENGINE in text mode (stdout=None).
+        # The identity test `literal(flag) is True` called them all bytes-safe.
+        ("import subprocess\nsubprocess.run(c, text=1)", "violation"),
+        ("import subprocess\nsubprocess.run(c, text=2)", "violation"),
+        ("import subprocess\nsubprocess.run(c, text='yes')", "violation"),
+        ("import subprocess\nsubprocess.run(c, universal_newlines=1)", "violation"),
+        # ...and each of these leaves it in BYTES mode, so they must not red.
+        ("import subprocess\nsubprocess.run(c, text=0)", "bytes"),
+        ("import subprocess\nsubprocess.run(c, text=False)", "bytes"),
+        ("import subprocess\nsubprocess.run(c, text=None)", "bytes"),
+        ("import subprocess\nsubprocess.run(c, encoding=None)", "bytes"),
+        ("import subprocess\nsubprocess.run(c, errors=None)", "bytes"),
+        # A non-literal cannot be proved falsy, so the mode is unprovable.
+        ("import subprocess\nsubprocess.run(c, text=flag)", "violation"),
+        ("import subprocess\nsubprocess.run(c, text=True if x else False)", "violation"),
+        ("import subprocess\nsubprocess.run(c, universal_newlines=flag)", "violation"),
+        # ...but a definitely-truthy keyword settles the mode, so an unreadable
+        # value elsewhere must not turn a provably-safe call into a refusal.
+        (
+            "import subprocess\nsubprocess.run(c, text=flag, encoding='utf-8', errors='replace')",
+            "lossy",
+        ),
+        # --- CODEC restriction (shape B's argument is UTF-8 specific) --------
+        ("import subprocess\nsubprocess.run(c, encoding='utf8', errors='replace')", "lossy"),
+        ("import subprocess\nsubprocess.run(c, encoding='UTF-8', errors='replace')", "lossy"),
+        ("import subprocess\nsubprocess.run(c, encoding='cp932', errors='replace')", "violation"),
+        ("import subprocess\nsubprocess.run(c, encoding='cp936', errors='replace')", "violation"),
+        ("import subprocess\nsubprocess.run(c, encoding='utf-16', errors='replace')", "violation"),
+        ("import subprocess\nsubprocess.run(c, encoding='latin-1', errors='replace')", "violation"),
+        (
+            "import subprocess\nsubprocess.run(c, encoding='not-a-codec', errors='replace')",
+            "violation",
+        ),
     ]
     for source, expected in cases:
         verdict, why = _classify_source(source)
         assert verdict == expected, (
             f"{source!r} classified {verdict!r}, expected {expected!r} ({why})"
         )
-    assert len(cases) >= 18, "the classifier table lost cases"
+    assert len(cases) >= 40, f"the classifier table lost cases ({len(cases)})"
+
+
+def test_the_classifier_agrees_with_the_REAL_ENGINE_about_text_mode() -> None:
+    """Cross-check the truthiness rule against ``subprocess`` itself.
+
+    Every table above is a CLAIM about the engine, and the blocking defect this
+    replaced was exactly a claim that had drifted from it: the guard tested
+    ``literal(flag) is True`` while ``Popen.__init__`` evaluates
+    ``encoding or errors or text or universal_newlines``. A table can be wrong
+    in the same direction as the code it checks; the engine cannot.
+
+    So each shape is really run. The probe emits pure ASCII, which every codec
+    decodes, so the question asked is only "did the engine hand back ``str`` or
+    ``bytes``" -- the text-mode decision itself, with no dependence on the
+    platform-specific way an *undecodable* byte fails (a dead reader thread and
+    ``stdout=None`` on Windows; a raise in the caller on POSIX).
+
+    The experiment itself runs in a CHILD interpreter, because varying the
+    keywords means splatting a dict -- a shape this guard refuses, and rightly:
+    it caught this very test when it was written the other way. The call made
+    from here is therefore an ordinary compliant bytes-mode one.
+    """
+    experiment = textwrap.dedent(
+        """
+        import json, subprocess, sys
+
+        SHAPES = [
+            ("{}", {}),
+            ("text=True", {"text": True}),
+            ("text=1", {"text": 1}),
+            ("text=2", {"text": 2}),
+            ("text='yes'", {"text": "yes"}),
+            ("universal_newlines=1", {"universal_newlines": 1}),
+            ("text=0", {"text": 0}),
+            ("text=False", {"text": False}),
+            ("text=None", {"text": None}),
+            ("encoding=None", {"encoding": None}),
+            ("errors=None", {"errors": None}),
+            ("encoding='utf-8'", {"encoding": "utf-8"}),
+            ("errors='replace'", {"errors": "replace"}),
+        ]
+        emit = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok\\\\n')"]
+        observed = []
+        for label, kwargs in SHAPES:
+            done = subprocess.run(emit, capture_output=True, timeout=60, **kwargs)
+            observed.append([label, isinstance(done.stdout, str)])
+        print("RESULT " + json.dumps(observed))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", experiment], capture_output=True, timeout=300
+    )
+    assert completed.returncode == 0, (
+        "the engine cross-check child failed:\n"
+        + completed.stderr.decode("utf-8", "replace")
+    )
+    payload = [
+        line
+        for line in completed.stdout.decode("utf-8").splitlines()
+        if line.startswith("RESULT ")
+    ]
+    assert payload, (
+        "the child produced no RESULT line, so nothing was measured:\n"
+        + completed.stdout.decode("utf-8", "replace")
+    )
+    observed = json.loads(payload[-1][len("RESULT "):])
+
+    disagreements = []
+    for label, engine_text_mode in observed:
+        rendered = "" if label == "{}" else ", " + label
+        source = f"import subprocess\nsubprocess.run(c{rendered})"
+        collector = _CallCollector("<engine-crosscheck>")
+        collector.visit(ast.parse(source))
+        assert len(collector.sites) == 1, source
+        guard_text_mode = collector.sites[0].text_mode
+
+        if guard_text_mode is not engine_text_mode:
+            disagreements.append(
+                f"  {label:<22} engine text_mode={engine_text_mode}, "
+                f"guard says {guard_text_mode!r}"
+            )
+    assert not disagreements, (
+        "the guard does not read text mode the way the engine applies it:\n"
+        + "\n".join(disagreements)
+        + "\n\nCPython: `self.text_mode = encoding or errors or text or "
+        "universal_newlines` -- truthiness, not identity with True."
+    )
+    assert len(observed) >= 13, f"the engine cross-check lost shapes ({len(observed)})"
 
 
 def test_a_call_to_something_else_named_run_is_not_a_subprocess_site() -> None:
@@ -506,7 +838,7 @@ def test_the_sweep_actually_examined_the_tree() -> None:
         f"only {len(sites)} subprocess call sites were found (floor "
         f"{_MIN_CALL_SITES}) -- the collector has stopped matching."
     )
-    decoding = [s for s in sites if s.in_text_mode]
+    decoding = [s for s in sites if s.text_mode is True]
     assert len(decoding) >= _MIN_DECODING_SITES, (
         f"only {len(decoding)} decoding sites were found (floor "
         f"{_MIN_DECODING_SITES}). If decoding sites were legitimately removed, "
