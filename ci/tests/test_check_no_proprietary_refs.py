@@ -629,8 +629,34 @@ class TestSubprocessDecodingIsPinnedStructurally:
             f"turned into a clean verdict."
         )
 
-    def test_git_access_is_funnelled_through_the_pinned_helper(self):
-        """One place to pin, so a second git call cannot be added unpinned."""
+    # The four keywords CPython ORs together to decide text mode, in
+    # `subprocess.Popen.__init__`: `encoding or errors or text or
+    # universal_newlines`. Naming all four, not just `text`, because `encoding=`
+    # and `errors=` select text mode implicitly -- a call can be locale-free and
+    # still put its decode on the reader thread.
+    _TEXT_MODE_KEYWORDS = frozenset({"encoding", "errors", "text", "universal_newlines"})
+
+    def test_git_access_is_funnelled_through_the_pinned_helper_or_runs_in_bytes_mode(
+        self,
+    ):
+        """Every git call is pinned by the helper, or is shape (A): bytes mode.
+
+        The escape hatch used to be "names an explicit ``encoding=``", and that
+        was the wrong exemption -- the sibling guard
+        ``ci/tests/test_subprocess_decoding.py`` measures precisely why: an
+        explicit encoding does NOT remove the hazard, it only changes which
+        codec dies on the reader thread, so ``encoding="cp1252"`` would have
+        satisfied the old rule while decoding at a codepage's discretion.
+
+        The exemption is now BYTES MODE, which is stricter: no text-mode keyword
+        at all, so the decode happens in this process where its failure is
+        catchable. ``_git_scan_paths`` is the call that needs it -- a filename is
+        not necessarily valid UTF-8, and the listing is decoded (and refused) in
+        the gate's own frame. ``_run_git_log`` stays the one route for COMMIT
+        MESSAGES specifically, because those additionally need
+        ``i18n.logOutputEncoding`` pinned at git's end, which a file listing has
+        no equivalent of.
+        """
         tree = ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
         helper = next(
             (
@@ -644,16 +670,30 @@ class TestSubprocessDecodingIsPinnedStructurally:
         inside = {id(call) for call in _subprocess_run_calls(helper)}
         assert inside, "_run_git_log no longer runs git"
 
-        stray = [
-            call.lineno
+        strays = [
+            call
             for call in _subprocess_run_calls(tree)
             if id(call) not in inside
-            and "encoding" not in {kw.arg for kw in call.keywords}
         ]
-        assert not stray, (
-            f"subprocess.run call(s) at line(s) {stray} bypass _run_git_log without "
-            f"naming an explicit encoding -- route git access through the helper so "
-            f"the output-encoding pin and the strict decode apply to it too"
+        # Floor: the exemption below is vacuously satisfied by no stray calls,
+        # and this gate does carry one.
+        assert strays, (
+            "no subprocess.run call outside _run_git_log -- if the file-listing "
+            "call has gone, the scan set is no longer asked of git"
+        )
+        in_text_mode = [
+            call.lineno
+            for call in strays
+            if {kw.arg for kw in call.keywords} & self._TEXT_MODE_KEYWORDS
+        ]
+        assert not in_text_mode, (
+            f"subprocess.run call(s) at line(s) {in_text_mode} bypass "
+            f"_run_git_log AND run in text mode. Any of "
+            f"{sorted(self._TEXT_MODE_KEYWORDS)} selects text mode, which moves "
+            f"the decode onto a reader thread where a UnicodeDecodeError kills "
+            f"the thread and hands back stdout=None with returncode=0. Either "
+            f"route the call through the pinned helper, or read bytes and decode "
+            f"in this process."
         )
 
 
@@ -785,4 +825,272 @@ class TestFileScanDecoding:
         assert not issubclass(module.FileDecodeError, OSError), (
             "FileDecodeError must not be an OSError subclass, or main's file "
             "loop would swallow the refusal and continue"
+        )
+
+
+# ---------------------------------------------------------------------------
+# File-scan SCOPE
+# ---------------------------------------------------------------------------
+def _repo_with(tmp_path: Path, name: str, files: dict[str, str], commit: bool = True):
+    """A throwaway git repo holding *files*, all but the ignored ones committed."""
+    root = _init_repo(tmp_path / name)
+    for relative, content in files.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+    if commit:
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "fixture"], cwd=root, check=True
+        )
+    return root
+
+
+class TestFileScanScopeComesFromGit:
+    """The scan set is asked of git, not assembled by walking the filesystem.
+
+    A walk answers "what is on this disk", which is not the question. It is
+    wrong in BOTH directions at once, and both were measured on this repository
+    rather than reasoned about:
+
+    * **Fail open.** ``_SKIP_DIRS`` drops a directory by NAME, so a tracked file
+      under any of those names ships unscanned. Nothing tracked sits under one
+      today, which is precisely why the hole is invisible: it opens on the
+      commit that adds the first such file, and the gate reports ``OK:``.
+    * **Scope inflation.** Measured 2026-08-26 in the shared root checkout of
+      this repository: the walk enumerated **221** scannable files against a
+      tracked-plus-untracked set of **106** -- **115** extra, **111** of them
+      another branch's working tree under ``.claude/worktrees/``. So the local
+      gate's verdict depended on which unrelated branches happened to be checked
+      out beside it, and a leak in someone else's worktree reddened this one.
+
+    ``git ls-files --cached --others --exclude-standard`` answers the real
+    question: everything that ships, plus everything that is one ``git add``
+    away from shipping, minus everything git is told to ignore. ``-z`` because a
+    path holding non-ASCII bytes is otherwise QUOTED and octal-escaped -- the
+    fail-open ``ci/check_pytest_collection.py`` was measured committing.
+    """
+
+    def test_a_tracked_file_under_a_skipped_directory_name_is_scanned(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """The fail-OPEN direction: ``_SKIP_DIRS`` matched by name, not by status.
+
+        RED before the switch: the walk skips every path component named
+        ``data``, so this tracked, shipping file was never read and the gate
+        printed ``OK: no proprietary consumer references found.`` over a leak.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path,
+            "skipdir",
+            {
+                "README.md": "nothing here\n",
+                "data/notes.md": f"leak: {_SYNTHETIC_TOKEN}\n",
+            },
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "a TRACKED file holding the token was never scanned, because a "
+            "directory in its path is named in _SKIP_DIRS -- the gate reported "
+            "clean on a file this repo ships"
+        )
+        assert "data/notes.md" in captured.err.replace("\\", "/")
+        assert "OK:" not in captured.out
+
+    def test_a_git_ignored_file_is_out_of_scope(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """The scope-inflation direction: an ignored file does not ship.
+
+        RED before the switch, for the opposite reason to the test above: the
+        walk read a build artefact git is told to ignore and failed the gate on
+        it. That is how the local gate came to depend on what else was on the
+        disk.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path,
+            "ignored",
+            {
+                "README.md": "nothing here\n",
+                ".gitignore": "build/\n",
+                "build/generated.md": f"leak: {_SYNTHETIC_TOKEN}\n",
+            },
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 0, (
+            "the gate failed on a file git is told to ignore, which this repo "
+            f"does not ship: {captured.err}"
+        )
+        assert "OK:" in captured.out
+
+    def test_an_untracked_but_committable_file_is_still_scanned(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """``--others --exclude-standard`` is the half that keeps local coverage.
+
+        Tracked-only would be a REGRESSION against the walk: the gate's whole
+        point is to run before the push that would publish the leak, and at that
+        moment the offending file is typically still untracked. This is the
+        don't-lose-what-the-walk-had control.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path, "untracked", {"README.md": "nothing here\n"}
+        )
+        (root / "draft.md").write_text(
+            f"leak: {_SYNTHETIC_TOKEN}\n", encoding="utf-8", newline="\n"
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "an untracked file one `git add` away from shipping was not scanned"
+        )
+        assert "draft.md" in captured.err
+
+    def test_the_enumeration_names_which_source_answered(
+        self, gate_with_synthetic_token, tmp_path
+    ):
+        """git where git can answer, the walk where it cannot -- and it SAYS which.
+
+        A silent fallback is how a guard ends up measuring something other than
+        what its docstring claims.
+        """
+        module = gate_with_synthetic_token
+        repo = _repo_with(tmp_path, "sourced", {"README.md": "clean\n"})
+        paths, source = module.scan_paths(repo)
+        assert source == "git", f"a real checkout was enumerated by {source!r}"
+        assert "README.md" in paths
+
+        loose = tmp_path / "not-a-repo"
+        loose.mkdir()
+        (loose / "README.md").write_text("clean\n", encoding="utf-8")
+        _paths, fallback_source = module.scan_paths(loose)
+        assert fallback_source == "walk", (
+            "outside a git checkout the enumeration must fall back to the walk, "
+            f"not answer nothing: got {fallback_source!r}"
+        )
+
+    def test_git_being_unavailable_falls_back_rather_than_scanning_nothing(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """"git cannot answer" is not "there is nothing to scan".
+
+        Simulating the FAILURE shape (git absent), never inventing a success
+        shape: the leak must still be found, by the walk.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path, "nogit", {"notes.md": f"leak: {_SYNTHETIC_TOKEN}\n"}
+        )
+
+        def _no_git(*_args, **_kwargs):
+            raise OSError("git not found")
+
+        monkeypatch.setattr(module.subprocess, "run", _no_git)
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        assert module.main() == 1, "the fallback did not scan the tree at all"
+        assert "notes.md" in capsys.readouterr().err
+
+    def test_an_empty_scan_set_is_a_refusal_not_a_pass(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """A scan that examined nothing must never print ``OK:``.
+
+        This is a NEW failure mode the switch itself introduces and therefore
+        has to close in the same change: a walk of a populated tree cannot come
+        back empty, but ``git ls-files`` answers rc 0 with no output in a repo
+        that has nothing committed and nothing to add -- which would have been a
+        clean verdict over a scan of zero files.
+        """
+        module = gate_with_synthetic_token
+        root = _init_repo(tmp_path / "empty")
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, "a scan of zero files reported success"
+        assert "OK:" not in captured.out
+        assert "no files" in captured.err.lower() or "zero" in captured.err.lower(), (
+            f"the refusal must say the scan examined nothing: {captured.err}"
+        )
+
+    def test_the_listing_is_asked_for_in_a_form_that_cannot_be_re_encoded(
+        self, gate_without_env_token
+    ):
+        """``-z``, and bytes mode -- read structurally, not from a comment.
+
+        Both halves are the lesson ``ci/check_pytest_collection.py`` paid for:
+        without ``-z`` git QUOTES a non-ASCII path and octal-escapes its bytes,
+        and a text-mode read hands the decode to a thread where its failure is
+        invisible. This gate may not commit the defect its sibling guards
+        police.
+        """
+        module = gate_without_env_token
+        source = _GATE_PATH.read_bytes().decode("utf-8")
+        tree = ast.parse(source)
+
+        listings = [
+            call
+            for call in _subprocess_run_calls(tree)
+            if any(
+                isinstance(arg, ast.Constant) and arg.value == "ls-files"
+                for element in call.args
+                if isinstance(element, ast.List)
+                for arg in element.elts
+            )
+        ]
+        assert len(listings) == 1, (
+            f"expected exactly one `git ls-files` call site, found {len(listings)}"
+        )
+        argv = [
+            arg.value
+            for element in listings[0].args
+            if isinstance(element, ast.List)
+            for arg in element.elts
+            if isinstance(arg, ast.Constant)
+        ]
+        assert "-z" in argv, (
+            f"`git ls-files` is invoked without -z: {argv}. git quotes a path "
+            "holding non-ASCII bytes and renders each byte as a backslash-octal "
+            "escape, so the record read back is not the path on disk."
+        )
+        keywords = {kw.arg for kw in listings[0].keywords}
+        assert not (keywords & {"text", "encoding", "errors", "universal_newlines"}), (
+            f"the listing is read in text mode ({sorted(keywords)}) -- the decode "
+            "then happens on a reader thread where its failure is invisible"
+        )
+        # The premise of the assertion above: the decode happens in-process.
+        assert "_git_scan_paths" in module.__dict__
+
+    def test_this_repository_is_itself_enumerated_from_git(
+        self, gate_without_env_token
+    ):
+        """Non-vacuity: every assertion above is true of an empty scan set."""
+        module = gate_without_env_token
+        paths, source = module.scan_paths(module._REPO_ROOT)
+        assert source == "git", f"this checkout was enumerated by {source!r}"
+        assert "CLAUDE.md" in paths
+        assert len(paths) >= 100, (
+            f"only {len(paths)} paths enumerated for this repository -- the "
+            "enumeration is broken, not the tree"
         )
