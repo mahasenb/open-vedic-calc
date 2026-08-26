@@ -82,23 +82,42 @@ guard committing the exact defect it exists to catch. See ``_Site.text_mode``.
 KNOWN BOUNDS (documented, not assumed away)
 ===========================================
 Stated because a guard that overclaims its reach is worse than one whose limits
-are written down. **Binding forms that ARE resolved:** ``import subprocess``,
-``import subprocess as sp``, ``from subprocess import run``,
-``from subprocess import run as r``, ``from subprocess import *``, and a plain
-rebinding ``sp = subprocess``. **Binding forms that are NOT, and would be
-invisible to this guard:**
+are written down — and an UNDERSTATED bound is a wrong bound too, because it
+invites somebody to build a guard that already exists.
 
-* ``r = subprocess.run`` then ``r(...)`` — a bare-name rebinding of the
-  *function* rather than the module. Measured: the collector yields **zero**
-  sites for it, while its resolved twin ``sp = subprocess`` then ``sp.run(...)``
-  yields one. Closing it is a few lines (bind the target when the assigned value
-  is an ``Attribute`` on a watched module), and is deliberately **not** done in
-  the change that documents it — it is named here so the boundary is honest
-  rather than implied;
+**Binding forms that ARE resolved** are enumerated as data, not as prose, in
+``_RESOLVED_BINDING_FORMS`` and measured by
+``test_every_resolved_binding_form_yields_a_site``: the import spellings
+(plain, ``as``, ``from … import``, ``from … import … as``, ``from … import *``),
+a module rebinding ``sp = subprocess``, and a DISPATCH rebinding
+``r = subprocess.run``. Both rebindings are transitive (``sp2 = sp``,
+``r2 = r``), both hold through a module alias (``r = sp.run``), and both resolve
+**independently of scope** — a rebinding inside a function body resolves exactly
+as a module-scope one does. An earlier revision of this block recorded the
+dispatch form as reachable-but-unclosed and described the rebindings as
+module-body-only; the first was closed here and the second was never true.
+Keeping the list in a table rather than in this paragraph is what stops it
+drifting from the code again.
+
+**Binding forms that are NOT resolved, and would be invisible to this guard**
+— measured on every run by
+``test_the_documented_open_binding_forms_are_still_open``, so this list cannot
+silently become an overclaim in either direction:
+
 * ``getattr(subprocess, "run")(...)`` — the attribute name is a runtime value;
 * ``importlib.import_module("subprocess").run(...)`` — likewise;
-* a rebinding that is not a simple ``name = name`` assignment, one placed
-  textually *before* the import it aliases, or one built dynamically.
+* a rebinding that is not a simple ``name = name`` / ``name = module.attr``
+  assignment, one placed textually *before* the import it aliases, or one built
+  dynamically.
+
+The sibling guard on the neutrality gate,
+``ci/tests/test_check_no_proprietary_refs.py::TestTheRunCallCollectorSeesEveryBinding``,
+answers the first two by REFUSING what it cannot resolve rather than by
+enumerating further. That trade is available to it because its subject is ONE
+file whose every ``.run(...)`` should reach the subprocess module; this guard's
+subject is the whole tree, where an unrelated ``obj.run(...)`` is ordinary code,
+so refusing every unprovable receiver here would be noise rather than a control.
+Two guards with different reaches must not be read as one.
 
 Those are deliberate-evasion shapes rather than things anyone writes by
 accident, and closing them means executing the module rather than parsing it.
@@ -521,19 +540,47 @@ class _CallCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        """`sp = subprocess` -- a rebinding, not an import, and not exotic.
+        """A rebinding, not an import, and not exotic -- of the MODULE or of the
+        DISPATCH.
 
-        Single-level and source-order: the visitor walks a module body in
-        order, so a rebinding placed after its import resolves. A rebinding
-        that precedes its import, or one built dynamically, does not -- see
-        KNOWN BOUNDS in the module docstring.
+        Two shapes, and the second is the one this collector used to miss::
+
+            sp = subprocess        # rebinds the module   -> sp.run(...)
+            r  = subprocess.run    # rebinds the DISPATCH  -> r(...)
+
+        The first leaves an ``Attribute`` at the call site for ``_resolve`` to
+        walk; the second leaves a bare ``Name``, so nothing downstream had an
+        attribute to resolve and the call vanished from the sweep entirely.
+        Measured before this arm landed: ``r = subprocess.run`` then
+        ``r(cmd, text=True)`` yielded ZERO sites, while its module-rebinding
+        twin yielded one -- a text-mode read the guard reported nothing about.
+
+        Both are single-level per statement but TRANSITIVE across statements
+        (``sp2 = sp``, ``r2 = r``), and both are resolved in SOURCE ORDER and
+        independently of SCOPE -- a rebinding inside a function body resolves
+        exactly as a module-scope one does (measured; the earlier wording here
+        said "the visitor walks a module body", which understated the reach).
+        A rebinding placed textually *before* its import, or built
+        dynamically, does not resolve -- see KNOWN BOUNDS in the module
+        docstring, and ``test_the_documented_open_binding_forms_are_still_open``
+        which measures that those bounds are still where the prose says.
         """
         source = node.value
+        targets = [t for t in node.targets if isinstance(t, ast.Name)]
         if isinstance(source, ast.Name) and source.id in self._module_aliases:
             real = self._module_aliases[source.id]
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    self._module_aliases[target.id] = real
+            for target in targets:
+                self._module_aliases[target.id] = real
+        elif isinstance(source, ast.Name) and source.id in self._direct:
+            # `r2 = r` -- a further rebinding of an already-direct name.
+            for target in targets:
+                self._direct[target.id] = self._direct[source.id]
+        elif isinstance(source, ast.Attribute) and isinstance(source.value, ast.Name):
+            # `r = subprocess.run` / `r = sp.run` -- the dispatch itself.
+            module = self._module_aliases.get(source.value.id)
+            if module is not None and source.attr in _WATCHED_MODULES[module]:
+                for target in targets:
+                    self._direct[target.id] = (module, source.attr)
         self.generic_visit(node)
 
     # -- qualname tracking --------------------------------------------------
@@ -1033,6 +1080,133 @@ def test_a_call_to_something_else_named_run_is_not_a_subprocess_site() -> None:
         "the collector fired on a name that is not the subprocess module: "
         f"{[str(s) for s in collector.sites]}"
     )
+
+
+# Every binding construct this collector claims to RESOLVE, as data rather than
+# as prose. The module docstring's KNOWN BOUNDS points here instead of carrying
+# its own list, so the claim and the check cannot drift apart -- the failure the
+# sibling gate's docstring made when it recorded a bound the code had outgrown.
+#
+# Each source must yield EXACTLY ONE site. A form that stops resolving yields
+# zero and reds here rather than going quietly unscanned, which is the whole
+# hazard: a call this collector does not see is a call the tree-wide arms below
+# make an affirmative "bytes, safe" claim about without looking.
+_RESOLVED_BINDING_FORMS: list[tuple[str, str]] = [
+    ("plain import", "import subprocess\nsubprocess.run(c, text=True)"),
+    ("import as", "import subprocess as sp\nsp.run(c, text=True)"),
+    ("from import", "from subprocess import run\nrun(c, text=True)"),
+    ("from import as", "from subprocess import run as r\nr(c, text=True)"),
+    ("star import", "from subprocess import *\nrun(c, text=True)"),
+    (
+        "module rebinding",
+        "import subprocess\nsp = subprocess\nsp.run(c, text=True)",
+    ),
+    (
+        "module rebinding, transitive",
+        "import subprocess\nsp = subprocess\nsp2 = sp\nsp2.run(c, text=True)",
+    ),
+    (
+        "module rebinding, function-local",
+        "import subprocess\ndef f():\n    sp = subprocess\n    return sp.run(c, text=True)",
+    ),
+    # --- the two forms this table was extended for ------------------------
+    # `r = subprocess.run` rebinds the DISPATCH FUNCTION rather than the
+    # module, so the receiver sweep never sees an Attribute to resolve.
+    # Measured on the commit before this arm landed, planting all four probe
+    # shapes in a tracked file and running `_all_sites()`: the two module
+    # rebindings were collected (2 sites, both correctly refused) and BOTH
+    # dispatch rebindings yielded ZERO -- the guard reported clean about a
+    # `text=True` git read it had not looked at.
+    (
+        "dispatch rebinding",
+        "import subprocess\nr = subprocess.run\nr(c, text=True)",
+    ),
+    (
+        "dispatch rebinding, through a module alias",
+        "import subprocess as sp\nr = sp.run\nr(c, text=True)",
+    ),
+    (
+        "dispatch rebinding, function-local",
+        "import subprocess\ndef f():\n    r = subprocess.run\n    return r(c, text=True)",
+    ),
+    (
+        "dispatch rebinding, transitive",
+        "import subprocess\nr = subprocess.run\nr2 = r\nr2(c, text=True)",
+    ),
+    (
+        "dispatch rebinding of a locale-only entry point",
+        "import subprocess\ng = subprocess.getoutput\ng(c)",
+    ),
+    # `os.popen` is watched for the same reason and takes the same forms.
+    ("os.popen", "import os\nos.popen(c)"),
+    ("os.popen, module rebinding", "import os\n_o = os\n_o.popen(c)"),
+    ("os.popen, dispatch rebinding", "import os\np = os.popen\np(c)"),
+]
+
+
+def test_every_resolved_binding_form_yields_a_site() -> None:
+    """The RESOLVED half of KNOWN BOUNDS, checked rather than asserted in prose.
+
+    A binding form that stops resolving does not fail loudly on its own: the
+    call simply vanishes from the sweep, and every arm downstream stays green
+    about a site nothing examined. So the resolved list is a table here, and
+    each entry is measured.
+    """
+    missed = []
+    for label, source in _RESOLVED_BINDING_FORMS:
+        collector = _CallCollector("<synthetic>")
+        collector.visit(ast.parse(source))
+        if len(collector.sites) != 1:
+            missed.append(f"{label}: {len(collector.sites)} site(s) from {source!r}")
+    assert not missed, (
+        "the collector no longer resolves binding form(s) it claims to:\n  "
+        + "\n  ".join(missed)
+        + "\nA form it cannot resolve is not refused -- it is silently unscanned."
+    )
+
+
+def test_a_dispatch_rebinding_is_judged_not_merely_seen() -> None:
+    """Seeing the site is half of it; the verdict must still refuse the shape.
+
+    Collecting a call and then classifying it ``bytes`` would be the same
+    fail-open one layer along, so this pins the verdict too -- and pins the
+    SAFE spelling as still safe, so the arm cannot be satisfied by refusing
+    everything.
+    """
+    assert _classify_source(
+        "import subprocess\nr = subprocess.run\nr(c, text=True)"
+    )[0] == "violation"
+    assert _classify_source(
+        "import subprocess\nr = subprocess.run\nr(c, capture_output=True)"
+    )[0] == "bytes"
+
+
+def test_the_documented_open_binding_forms_are_still_open() -> None:
+    """The forms KNOWN BOUNDS calls unresolved must really be unresolved.
+
+    Recorded as data so the bound cannot quietly become an overclaim in either
+    direction: if one of these is ever closed, this reds and the docstring is
+    corrected in the same commit rather than years later.
+    """
+    open_forms = [
+        ("getattr", 'import subprocess\ngetattr(subprocess, "run")(c, text=True)'),
+        (
+            "importlib",
+            'import importlib\nimportlib.import_module("subprocess").run(c, text=True)',
+        ),
+        (
+            "rebinding before its import",
+            "sp = subprocess\nimport subprocess\nsp.run(c, text=True)",
+        ),
+    ]
+    for label, source in open_forms:
+        collector = _CallCollector("<synthetic>")
+        collector.visit(ast.parse(source))
+        assert collector.sites == [], (
+            f"{label} now resolves ({[str(s) for s in collector.sites]}). That is "
+            "an improvement, but KNOWN BOUNDS in this module's docstring still "
+            "records it as unresolved -- correct the docstring in this commit."
+        )
 
 
 # ---------------------------------------------------------------------------
