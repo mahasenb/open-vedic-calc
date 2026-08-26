@@ -8,8 +8,19 @@ product's issue tracker, or its internals — the two are kept at arm's length, 
 separate repos, on purpose. Leaking the consumer's name into this public history
 is what this check prevents.
 
-It scans tracked source files AND commit messages in the pushed range against a
-LIST of forbidden patterns:
+It scans this repository's files AND commit messages in the pushed range against
+a LIST of forbidden patterns.
+
+The FILE scan's scope comes from ``git ls-files -z --cached --others
+--exclude-standard`` — everything that ships, plus everything one ``git add``
+away from shipping, minus everything git is told to ignore. It used to come from
+a filesystem walk with a directory-name blacklist, which was wrong in both
+directions at once: a tracked file under any blacklisted NAME shipped unscanned,
+and the walk read whatever else happened to be on the disk (measured in this
+repository's shared root checkout: 221 files walked against 106 real ones, 111
+of the extras belonging to another branch's working tree). A walk is kept only
+as the fallback for a tree git cannot describe, and a scan that examines zero
+files is a REFUSAL rather than a clean verdict.
 
 - A legacy base pattern, the standalone token ``astro`` (case-insensitive, word
   boundary, excluding the ``astro.com`` Swiss Ephemeris URL). Legitimate domain
@@ -144,6 +155,9 @@ _SCAN_EXT = {
     ".py", ".md", ".yml", ".yaml", ".toml", ".txt", ".sh", ".ps1",
     ".cfg", ".ini", ".json", ".dockerfile",
 }
+# Only the WALK fallback below uses these. The primary enumeration asks git,
+# which needs no directory blacklist because `--exclude-standard` already knows
+# what this repository ignores.
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", "data", ".mypy_cache"}
 # The gate itself necessarily names the forbidden legacy token to describe it.
@@ -165,6 +179,92 @@ def _scan_text(
             if pattern.search(line):
                 out.append(f"{label}:{i}: {line.strip()}")
                 break
+
+
+def _git_scan_paths(root: Path) -> list[str] | None:
+    """The scan set, asked of git — or ``None`` when git cannot answer.
+
+    ``--cached --others --exclude-standard`` is the union this gate needs, and
+    each third of it is load-bearing:
+
+    * ``--cached`` — everything this repository ships. A filesystem walk misses
+      any of it that sits under a directory whose NAME is blacklisted, and a
+      name-keyed blacklist cannot tell a build artefact from a tracked file.
+    * ``--others`` — everything one ``git add`` away from shipping. The gate's
+      whole purpose is to run before the push that would publish a leak, and at
+      that moment the offending file is usually still untracked, so dropping
+      this half would be a regression against the walk it replaces.
+    * ``--exclude-standard`` — minus whatever this repository is configured to
+      ignore, because an ignored file is not published and a verdict that
+      depends on the disk's build artefacts is not reproducible.
+
+    ``-z`` is not optional. Without it git QUOTES any path holding non-ASCII
+    bytes (``core.quotePath`` defaults on), wrapping it in literal double quotes
+    and rendering each byte as a backslash-octal escape — the measured fail-open
+    that ``ci/check_pytest_collection.py`` shipped. ``-z`` NUL-separates exact
+    records instead, whatever bytes a path holds.
+
+    Bytes mode, decoded here: a text-mode read hands the decode to a reader
+    thread where a ``UnicodeDecodeError`` kills the thread and returns
+    ``stdout=None``, and a filename need not be valid UTF-8. An undecodable
+    listing therefore answers ``None`` — "git cannot answer" — which the caller
+    turns into a walk, never into an empty scan.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, check=False, cwd=root,
+        )
+    except OSError:
+        return None  # no git on this machine; the caller falls back to the walk
+    if result.returncode != 0:
+        return None  # not a checkout, or git refused: same answer, same fallback
+    try:
+        listing = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # With -z the records are exact: never strip them, since a leading or
+    # trailing space is a legal filename character.
+    return [record for record in listing.split("\0") if record]
+
+
+def _walked_scan_paths(root: Path) -> list[str]:
+    """Fallback enumeration for a tree git cannot describe.
+
+    This is the gate's original scope and it is kept ONLY as a fallback: it
+    answers "what is on this disk", which is a different question from "what
+    does this repository publish". Measured 2026-08-26 in this repository's
+    shared root checkout, it enumerated 221 scannable files against a
+    tracked-plus-untracked set of 106, 111 of the extras belonging to an
+    unrelated branch's working tree under ``.claude/worktrees/``.
+    """
+    found: list[str] = []
+    for path in root.rglob("*"):
+        if any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        if not path.is_file():
+            continue
+        found.append(path.relative_to(root).as_posix())
+    return found
+
+
+def scan_paths(root: Path) -> tuple[list[str], str]:
+    """(relative paths, which enumerator answered: ``"git"`` or ``"walk"``).
+
+    The source is returned rather than logged so a test can assert WHICH
+    enumeration ran. A fallback nobody can observe is how a guard ends up
+    measuring something other than what it claims to.
+    """
+    from_git = _git_scan_paths(root)
+    if from_git is not None:
+        return from_git, "git"
+    return _walked_scan_paths(root), "walk"
+
+
+def _is_scannable(relative: str) -> bool:
+    name = relative.rsplit("/", 1)[-1]
+    suffix = ("." + name.rsplit(".", 1)[-1]).lower() if "." in name else ""
+    return suffix in _SCAN_EXT or name.lower() == "dockerfile"
 
 
 def _run_git_log(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
@@ -241,16 +341,17 @@ def main(commit_range: str | None = None) -> int:
     violations: list[str] = []
     refusals: list[str] = []
 
-    for path in _REPO_ROOT.rglob("*"):
-        if any(part in _SKIP_DIRS for part in path.parts):
+    candidates, scan_source = scan_paths(_REPO_ROOT)
+    scanned = 0
+    for label in candidates:
+        if not _is_scannable(label):
             continue
+        path = _REPO_ROOT / label
         if not path.is_file():
-            continue
+            continue  # a tracked path deleted from the working tree
         if path.resolve() == _SELF:
             continue  # don't scan the gate's own description of the legacy token
-        if path.suffix.lower() not in _SCAN_EXT and path.name.lower() != "dockerfile":
-            continue
-        label = str(path.relative_to(_REPO_ROOT))
+        scanned += 1
         try:
             raw = path.read_bytes()
         except OSError:
@@ -266,6 +367,19 @@ def main(commit_range: str | None = None) -> int:
             refusals.append(str(exc))
             continue
         _scan_text(label, text, violations)
+
+    if scanned == 0:
+        # A new failure mode the git enumeration introduces, so it is closed in
+        # the same change: a walk of a populated tree cannot come back empty,
+        # but `git ls-files` answers rc 0 with no output in a repository holding
+        # nothing yet -- which would otherwise have been a clean verdict over a
+        # scan of zero files. "No violations found" is vacuously true of a scan
+        # that examined nothing.
+        refusals.append(
+            f"the file scan examined no files at all (enumerated by the "
+            f"{scan_source!r} source under {_REPO_ROOT}), so a clean verdict "
+            f"would be vacuous"
+        )
 
     # Commit message(s) in the pushed range (cheap guard against a leak buried
     # in an intermediate commit of a multi-commit push, not just HEAD).
@@ -312,7 +426,10 @@ def main(commit_range: str | None = None) -> int:
     if violations or refusals:
         return 1
 
-    print("OK: no proprietary consumer references found.")
+    print(
+        f"OK: no proprietary consumer references found "
+        f"({scanned} file(s) scanned, enumerated by {scan_source})."
+    )
     return 0
 
 
