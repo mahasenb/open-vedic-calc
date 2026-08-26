@@ -22,6 +22,38 @@ of the extras belonging to another branch's working tree). A walk is kept only
 as the fallback for a tree git cannot describe, and a scan that examines zero
 files is a REFUSAL rather than a clean verdict.
 
+And EVERY enumerated file is scanned. There is no longer an extension
+allowlist. The set used to be ``{.py .md .yml .yaml .toml .txt .sh .ps1 .cfg
+.ini .json .dockerfile}`` plus the exact name ``Dockerfile``, and an allowlist is
+fail-OPEN in the same shape the directory blacklist was: a file whose extension
+nobody thought of ships unscanned, and the gate prints ``OK:`` about a file it
+never opened. Measured 2026-08-26 against this repository, that left EIGHT
+tracked files outside the scan -- ``Dockerfile.test`` (a suffix the exact-name
+``Dockerfile`` test does not match), ``.env.example``, ``.github/CODEOWNERS``,
+``.gitattributes``, ``.gitignore``, ``.python-version``, ``LICENSE`` and
+``uv.lock``. The first three are prose a human writes about the deployment and
+about who owns which path -- exactly the register in which a downstream consumer
+gets named.
+
+LOCK FILES ARE IN, deliberately. ``uv.lock`` is 375,480 bytes over 1,881 lines;
+it is tracked, and a raw file view publishes it identically to the code. It
+records dependency NAMES and index URLs, so a private package name or a private
+index host would land there -- machine-generated from a file this gate already
+scans, which means such a leak can arrive without a human ever typing it into a
+scanned file. Measured on this tree: it decodes strictly and matches nothing, so
+including it costs one more regex pass.
+
+BINARY IS A REFUSAL, NEVER A SKIP. Dropping the allowlist means a file the gate
+cannot read as text now reaches the decode, and the answer there is the one the
+rest of this gate already gives: an undecodable file joins ``refusals``, is named
+on stderr, and exits non-zero. It is NOT skipped, because "I could not read it"
+must never be recorded as "there was nothing in it" -- that is the same silent
+pass the strict decode below exists to remove. Measured 2026-08-26 over the whole
+scan set: 0 files carry a NUL byte in their first 8 KiB and 0 fail a strict UTF-8
+decode, so strictness costs nothing today. When a genuinely binary file does
+arrive the gate reddens, and the operator makes a deliberate decision rather than
+inheriting an exemption from an extension list nobody re-reads.
+
 - A legacy base pattern, the standalone token ``astro`` (case-insensitive, word
   boundary, excluding the ``astro.com`` Swiss Ephemeris URL). Legitimate domain
   words are allowed: ``astrology``/``astronomy``/``astronomical`` (a different
@@ -151,15 +183,11 @@ def _build_forbidden_patterns(env: dict[str, str] | None = None) -> list[re.Patt
 _FORBIDDEN: list[re.Pattern[str]] = _build_forbidden_patterns()
 _BRAND_PATTERNS: list[re.Pattern[str]] = _build_brand_patterns()
 
-_SCAN_EXT = {
-    ".py", ".md", ".yml", ".yaml", ".toml", ".txt", ".sh", ".ps1",
-    ".cfg", ".ini", ".json", ".dockerfile",
-}
 # Only the WALK fallback below uses these. The primary enumeration asks git,
 # which needs no directory blacklist because `--exclude-standard` already knows
 # what this repository ignores.
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
-              ".pytest_cache", "data", ".mypy_cache"}
+              ".pytest_cache", "data", ".mypy_cache", ".ruff_cache"}
 # The gate itself necessarily names the forbidden legacy token to describe it.
 _SELF = Path(__file__).resolve()
 # Anchor the scan to the repo root (parent of ci/), not the process CWD — running
@@ -261,12 +289,6 @@ def scan_paths(root: Path) -> tuple[list[str], str]:
     return _walked_scan_paths(root), "walk"
 
 
-def _is_scannable(relative: str) -> bool:
-    name = relative.rsplit("/", 1)[-1]
-    suffix = ("." + name.rsplit(".", 1)[-1]).lower() if "." in name else ""
-    return suffix in _SCAN_EXT or name.lower() == "dockerfile"
-
-
 def _run_git_log(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
     """Run ``git log`` with its output encoding pinned, returning RAW BYTES.
 
@@ -344,8 +366,6 @@ def main(commit_range: str | None = None) -> int:
     candidates, scan_source = scan_paths(_REPO_ROOT)
     scanned = 0
     for label in candidates:
-        if not _is_scannable(label):
-            continue
         path = _REPO_ROOT / label
         if not path.is_file():
             continue  # a tracked path deleted from the working tree
@@ -410,6 +430,11 @@ def main(commit_range: str | None = None) -> int:
             "non-ASCII character would not survive that substitution, so "
             "scanning a lossy decode could report 'clean' on a real leak. "
             "Rewrite the offending file(s) or commit message(s) as UTF-8.\n"
+            "\nIf the named file is genuinely BINARY, note that skipping it is "
+            "not on offer: this gate scans every file git enumerates, and "
+            "'I could not read it' may not be recorded as 'there was nothing "
+            "in it'. Either git-ignore it (it is then out of scope because it "
+            "is not published) or remove it.\n"
         )
 
     if violations:
