@@ -8,6 +8,21 @@ it four different ways. Two of them were wrong in the same way, and the shape of
 the error is worth naming because it is the third time this workspace has paid
 for it: they enumerated ``.github/workflows/*.yml``.
 
+SCOPE OF THE "ONE DEFINITION" CLAIM -- stated precisely, because the loose
+version is false. This module is the single answer for the four ``ci/tests/``
+guards, and for nothing else. **Two production checkers still enumerate the
+workflow directory themselves** and are deliberately NOT migrated here:
+``ci/check_workflow_token_scopes.py`` (``workflow_files``) and
+``ci/check_pytest_collection.py`` (the ``$GITHUB_ENV``/``PYTEST_ADDOPTS`` scan).
+Measured: both read ``directory.iterdir()`` filtered on ``{".yml", ".yaml"}``, so
+the half-enumeration defect above is ABSENT from both -- what they lack is
+``--exclude-standard`` (a developer's ignored scratch workflow is in scope) and
+``--others`` (an untracked one is not), plus an empty-list return when the
+directory is absent, which is the "zero found equals zero violations" shape and
+is unreachable while the directory exists in-tree. So the honest count is SIX
+readers, four unified here and two independent, rather than "four implementations
+reduced to one".
+
 GitHub Actions runs a ``.yaml`` file exactly as it runs a ``.yml`` one. A
 ``*.yml`` glob therefore makes an affirmative "no violations" claim about a file
 it never opened -- the same fail-open shape as an extension allowlist in the

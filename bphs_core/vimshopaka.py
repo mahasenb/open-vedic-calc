@@ -41,12 +41,18 @@ from dataclasses import dataclass, field
 # hard-fails if the library will not carry them. `bphs_core/__init__.py` imports
 # it first for exactly this reason and carries the same suppression.
 #
-# Today that package init makes this line redundant, since importing any module
-# here runs it first. It is kept because "redundant" is a property of today's
-# import graph rather than a guarantee, the same defense-in-depth reasoning
-# CLAUDE.md records for `Chart._compute` re-asserting the ayanamsa on top of the
-# decorator that already applied it. Deleting it to satisfy a linter would be a
-# change to an accuracy engine's import order with no test that failed first.
+# That package init makes this line redundant, and the redundancy is a LANGUAGE
+# GUARANTEE rather than a property of today's import graph: Python always
+# executes a package's `__init__` before any of its submodules. (An earlier
+# revision of this comment claimed the weaker thing, which overstated the risk
+# being guarded against -- worth correcting, since a reason that is wrong is a
+# reason nobody can check.)
+#
+# It is kept anyway, on the same defense-in-depth footing CLAUDE.md records for
+# `Chart._compute` re-asserting the ayanamsa on top of the decorator that already
+# applied it: deleting it to satisfy a linter would be a change to an accuracy
+# engine's import order driven by a lint preference, with no test that failed
+# first. The suppression costs one line; the deletion buys nothing.
 from . import utils  # noqa: F401
 from .chart import ChartSnapshot
 

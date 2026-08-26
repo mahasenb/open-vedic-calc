@@ -207,7 +207,6 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _LOCK = _REPO_ROOT / "uv.lock"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _PYTHON_VERSION_FILE = _REPO_ROOT / ".python-version"
-_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _DOCKERFILES = (_REPO_ROOT / "Dockerfile", _REPO_ROOT / "Dockerfile.test")
 
 # The four pins whose drift would matter most. The set is NOT homogeneous, and
@@ -405,8 +404,11 @@ def _workflow_files() -> list[pathlib.Path]:
     coverage: ``--exclude-standard`` keeps a developer's ignored scratch
     workflow from deciding this guard's verdict, and ``--others`` brings an
     untracked one in at the commit that introduces it rather than one commit
-    later. Delegated so the repository has ONE answer to "what are the
-    workflows" -- there were three, and two of them read ``*.yml`` only.
+    later. Delegated so the four ``ci/tests/`` guards share ONE answer to "what
+    are the workflows" -- three had their own, and two of those read ``*.yml``
+    only. The claim is scoped to ``ci/tests/`` on purpose: two production
+    checkers still enumerate the directory themselves, as
+    ``ci/workflow_scope.py``'s docstring records.
     """
     return _workflow_scope.workflow_paths(_REPO_ROOT)
 
