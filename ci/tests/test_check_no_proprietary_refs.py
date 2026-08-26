@@ -12,6 +12,7 @@ import ast
 import importlib.util
 import re
 import subprocess
+import symtable
 import sys
 from pathlib import Path
 
@@ -600,21 +601,221 @@ class TestCommitMessageDecodingIsPinned:
         assert any("perfectly ordinary" in m for m in messages)
 
 
-def _subprocess_run_calls(tree: ast.AST) -> list[ast.Call]:
-    """Every ``subprocess.run(...)`` call in the parsed module.
+_SUBPROCESS = "subprocess"
+_DISPATCH = "run"
+
+
+class _RunCallCollector(ast.NodeVisitor):
+    """Every ``subprocess.run`` call in the gate, under ANY name it is bound to.
+
+    WHAT THIS REPLACED, AND WHY IT HAD TO
+    =====================================
+    The previous matcher accepted exactly one spelling: an ``ast.Attribute``
+    named ``run`` whose value is an ``ast.Name`` with ``id == "subprocess"``.
+    Measured at this base commit, planting
+
+        sp = subprocess
+        def _alias_probe_commit_read(cwd):
+            return sp.run(["git", "log", "--format=%B", "-1"],
+                          capture_output=True, check=False, cwd=cwd)
+
+    in the gate -- an unpinned commit-message read, bypassing ``_run_git_log``
+    entirely, which is precisely what Arm B exists to refuse -- left ALL FOUR
+    arms of the structural class GREEN. One rebinding defeated three controls at
+    once. The sibling ``ci/tests/test_subprocess_decoding.py`` already resolved
+    this form for the whole tree; the gate's own guard did not.
+
+    ENUMERATE BINDINGS, THEN FAIL CLOSED ON WHAT IS LEFT
+    ====================================================
+    Enumerating binding constructs can never be finished -- that is the lesson
+    the sibling records in its KNOWN BOUNDS, where ``r = subprocess.run`` is
+    named as reachable-but-unclosed. So this collector does BOTH halves:
+
+    * **Resolve** the constructs it models: ``import subprocess``,
+      ``import subprocess as sp``, ``from subprocess import run``,
+      ``from subprocess import run as r``, ``from subprocess import *``,
+      ``sp = subprocess`` (transitively), and ``r = subprocess.run``. That last
+      one is the form the sibling records in its own KNOWN BOUNDS as measured
+      and deliberately left open; it is closed HERE, for this one file. The
+      sibling's tree-wide collector still carries it, and saying so is the
+      point -- two guards claiming different reaches must not be read as one.
+    * **Refuse** everything it cannot prove innocent. ANY call whose callee is
+      an attribute named ``run`` and whose receiver is not a name resolved to
+      the subprocess module is recorded as UNRESOLVED, and the arm below fails
+      on a non-empty unresolved list. So
+      ``importlib.import_module("subprocess").run(...)`` and a receiver this
+      collector has simply never seen do not slip past -- they red.
+      ``getattr(subprocess, "run")(...)`` needs its own arm and has one: it
+      produces no ``Attribute`` node at all, so the receiver sweep is blind to
+      it, and any ``getattr`` whose first argument resolves to the module is
+      refused outright. That hole was found by this class's own probe list
+      rather than reasoned about, which is the argument for writing the
+      evasions down as test data instead of as prose.
+
+    The refusal half is what makes the ATTRIBUTE form complete without an
+    exhaustive binding enumeration: the guard does not have to know how a name
+    came to hold the module, only that it cannot prove the name does not.
+
+    KNOWN BOUNDS, stated rather than claimed away
+    =============================================
+    * A BARE-name call (``r(...)``) is resolved only when this collector saw the
+      binding. A name bound by a construct it does not model would be called
+      without comment -- so ``test_no_module_scope_binding_construct_is_unmodelled``
+      cross-checks the module-scope binding set against ``symtable``, the
+      interpreter's own symbol table, and reds if the tree ever contains a
+      binding construct this visitor does not record. That converts "we think we
+      enumerated them" into a measured equality.
+    * Bindings are tracked at MODULE scope and in source order. A rebinding
+      placed textually before its import, or built dynamically, is not resolved
+      -- and, for the attribute form, is refused rather than missed.
+    * Scope is this one file, read as a call SITE. It cannot prove what ``git``
+      does at run time.
+    """
+
+    def __init__(self) -> None:
+        self.module_names: set[str] = set()
+        self.direct_names: set[str] = set()
+        self.resolved: list[tuple[ast.Call, str]] = []
+        self.unresolved: list[tuple[ast.Call, str, str]] = []
+        self.module_scope_bindings: set[str] = set()
+        self._scope: list[str] = []
+
+    # -- binding provenance -------------------------------------------------
+    def _bind(self, name: str) -> None:
+        if not self._scope:
+            self.module_scope_bindings.add(name)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._bind(alias.asname or alias.name.split(".")[0])
+            if alias.name == _SUBPROCESS:
+                self.module_names.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name == "*":
+                if node.module == _SUBPROCESS:
+                    # A star import binds every public name, so the dispatch
+                    # arrives unqualified and un-renamed.
+                    self.direct_names.add(_DISPATCH)
+                    self._bind(_DISPATCH)
+                continue
+            self._bind(alias.asname or alias.name)
+            if node.module == _SUBPROCESS and alias.name == _DISPATCH:
+                self.direct_names.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def _is_module_ref(self, value: ast.expr) -> bool:
+        return isinstance(value, ast.Name) and value.id in self.module_names
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        value = node.value
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            self._bind(target.id)
+            if self._is_module_ref(value):
+                self.module_names.add(target.id)           # sp = subprocess
+            elif isinstance(value, ast.Name) and value.id in self.direct_names:
+                self.direct_names.add(target.id)           # r2 = r
+            elif (
+                isinstance(value, ast.Attribute)
+                and value.attr == _DISPATCH
+                and self._is_module_ref(value.value)
+            ):
+                self.direct_names.add(target.id)           # r = subprocess.run
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            self._bind(node.target.id)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            self._bind(node.target.id)
+        self.generic_visit(node)
+
+    def _bind_targets(self, target: ast.expr) -> None:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name):
+                self._bind(sub.id)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._bind_targets(node.target)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._bind_targets(item.optional_vars)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self._bind(node.name)
+        self.generic_visit(node)
+
+    # -- qualname tracking --------------------------------------------------
+    def _push(self, node) -> None:
+        self._bind(node.name)
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    visit_FunctionDef = _push
+    visit_AsyncFunctionDef = _push
+    visit_ClassDef = _push
+
+    # -- the calls themselves ----------------------------------------------
+    def visit_Call(self, node: ast.Call) -> None:
+        where = ".".join(self._scope) or "<module scope>"
+        func = node.func
+        # `getattr(subprocess, "run")(...)` produces NO Attribute node at all --
+        # the dispatch name is a runtime value -- so the receiver sweep below
+        # cannot see it. Any getattr whose first argument is a resolved module
+        # reference is therefore refused outright, whatever attribute it names:
+        # this gate has no legitimate reason to reach into subprocess that way,
+        # and "the guard could not read it" is not evidence of safety.
+        if (
+            isinstance(func, ast.Name)
+            and func.id == "getattr"
+            and node.args
+            and self._is_module_ref(node.args[0])
+        ):
+            self.unresolved.append(
+                (node, where, f"getattr({node.args[0].id}, ...) -- runtime dispatch")
+            )
+        if isinstance(func, ast.Attribute) and func.attr == _DISPATCH:
+            if self._is_module_ref(func.value):
+                self.resolved.append((node, where))
+            else:
+                receiver = (
+                    func.value.id
+                    if isinstance(func.value, ast.Name)
+                    else f"<{type(func.value).__name__} expression>"
+                )
+                self.unresolved.append((node, where, f"{receiver}.{_DISPATCH}(...)"))
+        elif isinstance(func, ast.Name) and func.id in self.direct_names:
+            self.resolved.append((node, where))
+        self.generic_visit(node)
+
+
+def _collect_run_calls(tree: ast.AST) -> _RunCallCollector:
+    """Walk *tree* once and hand back the collector, bindings and all.
 
     AST, never grep: a comment or a string literal mentioning the call must not
     be able to satisfy -- or defeat -- this guard.
     """
-    found: list[ast.Call] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "run":
-            if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
-                found.append(node)
-    return found
+    collector = _RunCallCollector()
+    collector.visit(tree)
+    return collector
+
+
+def _subprocess_run_calls(tree: ast.AST) -> list[ast.Call]:
+    """Every ``subprocess.run(...)`` call, under any name the module is bound to."""
+    return [call for call, _ in _collect_run_calls(tree).resolved]
 
 
 class TestSubprocessDecodingIsPinnedStructurally:
@@ -766,13 +967,15 @@ class TestSubprocessDecodingIsPinnedStructurally:
 
     @staticmethod
     def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
-        owner: dict[int, str] = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for call in _subprocess_run_calls(node):
-                owner.setdefault(id(call), node.name)
-        return owner
+        """Which function holds each resolved call.
+
+        Taken from the collector rather than by re-walking each ``FunctionDef``
+        subtree: the bindings that resolve an aliased call live at MODULE scope,
+        so a per-subtree walk starts with an empty alias table and would resolve
+        exactly the calls the naive matcher used to -- reintroducing the hole in
+        the one place Arm B reads to decide who is allowed an unpinned call.
+        """
+        return {id(call): where for call, where in _collect_run_calls(tree).resolved}
 
     # --- Arm A: the NEAR end, on every call including the helper's own --------
     def test_every_subprocess_call_in_the_gate_runs_in_bytes_mode(self):
@@ -824,11 +1027,19 @@ class TestSubprocessDecodingIsPinnedStructurally:
             None,
         )
         assert helper is not None, "the pinned git helper _run_git_log is gone"
-        inside = {id(call) for call in _subprocess_run_calls(helper)}
+        # Collected from the WHOLE tree and filtered by enclosing function, not
+        # by re-walking the helper's subtree: the bindings that resolve an
+        # aliased call live at module scope, so a subtree walk resolves only the
+        # bare `subprocess.run` spelling and would put an aliased stray on the
+        # "inside the helper" side of this test by failing to see it at all.
+        collector = _collect_run_calls(tree)
+        inside = {
+            id(call) for call, where in collector.resolved if where == "_run_git_log"
+        }
         assert inside, "_run_git_log no longer runs git"
 
         owner = self._enclosing_functions(tree)
-        strays = [c for c in _subprocess_run_calls(tree) if id(c) not in inside]
+        strays = [call for call, _ in collector.resolved if id(call) not in inside]
 
         # Floor, and it names WHICH call rather than merely counting: "at least
         # one stray exists" was satisfiable by any number of unpinned calls.
@@ -878,7 +1089,14 @@ class TestSubprocessDecodingIsPinnedStructurally:
             None,
         )
         assert helper is not None, "the pinned git helper _run_git_log is gone"
-        calls = _subprocess_run_calls(helper)
+        # Same reason as Arm B: filter the whole-tree collection by enclosing
+        # function rather than walking the helper's subtree without its module
+        # scope.
+        calls = [
+            call
+            for call, where in _collect_run_calls(tree).resolved
+            if where == "_run_git_log"
+        ]
         assert calls, "_run_git_log no longer runs git"
         for call in calls:
             argv = self._literal_argv(call)
@@ -1493,4 +1711,224 @@ class TestEveryEnumeratedFileIsScanned:
             f"enumerated and then skipped still counts towards the clean "
             f"verdict, which is the gate reporting OK: about a file it never "
             f"read."
+        )
+
+
+# ---------------------------------------------------------------------------
+# The collector itself: a rebinding must not be a way out of three controls
+# ---------------------------------------------------------------------------
+# The reviewer's probe, verbatim: an UNPINNED commit-message read reached through
+# a module alias. `_run_git_log` is bypassed, so `-c i18n.logOutputEncoding=UTF-8`
+# never applies -- exactly what Arm B exists to refuse. Measured at the base
+# commit, all four arms of TestSubprocessDecodingIsPinnedStructurally stayed
+# GREEN with this sitting in the gate.
+_ALIAS_PROBE = """
+
+sp = subprocess
+
+
+def _alias_probe_commit_read(cwd):
+    return sp.run(["git", "log", "--format=%B", "-1"],
+                  capture_output=True, check=False, cwd=cwd)
+"""
+
+
+class TestTheRunCallCollectorSeesEveryBinding:
+    """Resolve what can be enumerated; REFUSE what cannot.
+
+    Enumerating binding constructs can never be finished, which is why the
+    sibling guard records ``r = subprocess.run`` in its KNOWN BOUNDS as
+    reachable-but-unclosed. This collector closes that one AND adds the half
+    that does not depend on enumeration: an attribute call named ``run`` whose
+    receiver it cannot prove is not the subprocess module is REFUSED.
+    """
+
+    # (description, source) -- each binds the dispatch under a different name.
+    _MODELLED = [
+        ("import subprocess", "import subprocess\nsubprocess.run([1])\n"),
+        ("import subprocess as sp", "import subprocess as sp\nsp.run([1])\n"),
+        ("sp = subprocess", "import subprocess\nsp = subprocess\nsp.run([1])\n"),
+        (
+            "chained rebinding",
+            "import subprocess\nsp = subprocess\nq = sp\nq.run([1])\n",
+        ),
+        ("from subprocess import run", "from subprocess import run\nrun([1])\n"),
+        (
+            "from subprocess import run as r",
+            "from subprocess import run as r\nr([1])\n",
+        ),
+        ("from subprocess import *", "from subprocess import *\nrun([1])\n"),
+        (
+            "r = subprocess.run",
+            "import subprocess\nr = subprocess.run\nr([1])\n",
+        ),
+        (
+            "aliased inside a function",
+            "import subprocess as sp\ndef f(c):\n    return sp.run([1], cwd=c)\n",
+        ),
+    ]
+
+    def test_every_modelled_binding_form_is_resolved(self):
+        """Each spelling below reaches ``subprocess.run``; each must be collected.
+
+        The last of them, ``r = subprocess.run``, is the form the sibling guard
+        names in its own KNOWN BOUNDS as measured-but-not-closed. It is closed
+        here.
+        """
+        missed = []
+        for description, source in self._MODELLED:
+            collector = _collect_run_calls(ast.parse(source))
+            if len(collector.resolved) != 1:
+                missed.append(
+                    f"{description}: resolved {len(collector.resolved)} call(s), "
+                    f"expected 1"
+                )
+        assert not missed, (
+            "binding forms that reach subprocess.run and were not collected:\n  "
+            + "\n  ".join(missed)
+        )
+
+    def test_an_unprovable_receiver_is_REFUSED_rather_than_missed(self):
+        """The half that does not rest on enumeration being complete.
+
+        A receiver this collector has never seen bound is not evidence of
+        safety. Each of these is recorded as UNRESOLVED, which Arm D fails on --
+        so the answer to a shape nobody modelled is a red build, not silence.
+        """
+        unprovable = [
+            ("getattr dispatch", 'import subprocess\ngetattr(subprocess, "run")([1])\n'),
+            (
+                "dynamic import",
+                'import importlib\nimportlib.import_module("subprocess").run([1])\n',
+            ),
+            ("a receiver never seen bound", "mystery.run([1])\n"),
+            (
+                "a rebinding that precedes its import",
+                "sp = subprocess\nimport subprocess\nsp.run([1])\n",
+            ),
+        ]
+        silent = []
+        for description, source in unprovable:
+            collector = _collect_run_calls(ast.parse(source))
+            if not collector.unresolved and not collector.resolved:
+                silent.append(description)
+        assert not silent, (
+            "shapes that reach a `.run(...)` call and were neither resolved nor "
+            f"refused -- they would pass unremarked: {silent}"
+        )
+
+    def test_a_benign_run_method_is_not_mistaken_for_the_dispatch(self):
+        """Don't-over-claim: refusal must be reported as refusal, not as a hit.
+
+        ``unittest.TextTestRunner().run(suite)`` is an attribute call named
+        ``run`` that has nothing to do with subprocess. The collector must not
+        put it in ``resolved`` -- a guard that reports it as a subprocess call
+        would be lying about what it found, even though refusing it is correct.
+        """
+        collector = _collect_run_calls(
+            ast.parse("import unittest\nrunner = unittest.TextTestRunner()\n"
+                      "runner.run(suite)\n")
+        )
+        assert collector.resolved == [], (
+            "a non-subprocess `.run(...)` was reported as a subprocess call"
+        )
+        assert collector.unresolved, (
+            "it must still be REFUSED -- this guard cannot prove the receiver is "
+            "not subprocess, and unprovable means refused"
+        )
+
+    def test_the_alias_probe_would_now_red_arm_B(self):
+        """The measured evasion, reproduced against the REAL gate source.
+
+        Not against a synthetic snippet: the probe is appended to this gate's
+        actual text, so what is asserted is that the arm which stayed green at
+        the base commit now fails. Arm B's rule is an EQUALITY on the set of
+        functions making an unpinned call, so the probe's function appearing in
+        that set is precisely what reddens it.
+
+        The gate file on disk is not touched.
+        """
+        source = _GATE_PATH.read_text(encoding="utf-8") + _ALIAS_PROBE
+        collector = _collect_run_calls(ast.parse(source))
+
+        owners = {where for _, where in collector.resolved}
+        assert "_alias_probe_commit_read" in owners, (
+            f"the aliased git read was not collected at all: {sorted(owners)}. "
+            "That is the base-commit behaviour -- one rebinding defeating three "
+            "controls at once."
+        )
+        strays = owners - {"_run_git_log"}
+        registered = set(TestSubprocessDecodingIsPinnedStructurally._PIN_FREE_CALLERS)
+        assert strays != registered, (
+            "Arm B compares the set of functions making an unpinned git call "
+            f"against {sorted(registered)}; with the probe present that set is "
+            f"{sorted(strays)}, which must differ or the arm stays green"
+        )
+
+
+class TestTheGateItselfHasNoUnresolvableRunCall:
+    """Arm D: the refusal list must be empty for the gate as it stands."""
+
+    def test_no_run_call_in_the_gate_is_unresolvable(self):
+        collector = _collect_run_calls(
+            ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
+        )
+        refused = [
+            f"line {call.lineno} in {where}(): {why}"
+            for call, where, why in collector.unresolved
+        ]
+        assert not refused, (
+            "call(s) in the gate whose `.run(...)` receiver this guard cannot "
+            "prove is not the subprocess module:\n  " + "\n  ".join(refused)
+            + "\nUnprovable is refused, never assumed innocent. Spell the call "
+            "as `subprocess.run(...)`, or bind the module with a form the "
+            "collector models."
+        )
+        # Non-vacuity: an empty refusal list is also what a collector that found
+        # nothing at all would produce.
+        assert len(collector.resolved) >= 2, (
+            f"only {len(collector.resolved)} resolved call(s) -- this gate makes "
+            "two (the commit-message read and the file listing), so the "
+            "collector is broken rather than the gate clean"
+        )
+
+    def test_no_module_scope_binding_construct_is_unmodelled(self):
+        """The completeness claim, MEASURED against the interpreter's own tables.
+
+        The refusal sweep covers the attribute form without needing a complete
+        binding enumeration, but a BARE-name call (``r(...)``) is resolved only
+        when the collector saw the binding. So the claim "this visitor records
+        every module-scope binding in this file" has to be checked rather than
+        asserted, and ``symtable`` is the checker: it is built by the compiler
+        and knows every construct that binds a name.
+
+        Measured on this gate: 28 names, identical both ways. A construct the
+        visitor does not model -- a walrus at module scope, a match capture, a
+        starred unpack -- shows up here as a divergence on the commit that adds
+        it, rather than as a name that can quietly hold ``subprocess.run``.
+        """
+        source = _GATE_PATH.read_text(encoding="utf-8")
+        collector = _collect_run_calls(ast.parse(source))
+        table = symtable.symtable(source, _GATE_PATH.name, "exec")
+        by_symtable = {
+            symbol.get_name()
+            for symbol in table.get_symbols()
+            if symbol.is_assigned() or symbol.is_imported()
+        }
+
+        assert by_symtable, "symtable reported no module-scope bindings at all"
+        missing = by_symtable - collector.module_scope_bindings
+        assert not missing, (
+            f"symtable reports module-scope binding(s) this visitor never "
+            f"recorded: {sorted(missing)}. A name bound by a construct the "
+            f"collector does not model can hold subprocess.run and be CALLED "
+            f"BARE, which the attribute-refusal sweep does not see. Model the "
+            f"construct, or record it in KNOWN BOUNDS."
+        )
+        # The other direction is a correctness check on the visitor, not a
+        # coverage one: a name it thinks is bound at module scope but which the
+        # compiler does not is a scope-tracking bug.
+        assert not (collector.module_scope_bindings - by_symtable), (
+            f"the visitor recorded module-scope binding(s) symtable does not: "
+            f"{sorted(collector.module_scope_bindings - by_symtable)}"
         )
