@@ -18,7 +18,6 @@ request is even sent.
 import json
 import os
 
-import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")

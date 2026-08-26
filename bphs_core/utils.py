@@ -1309,24 +1309,24 @@ def make_place(name: str, lat: float, lon: float, tz_offset: float) -> drik.Plac
 def nakshatra_pada_lord(longitude: float) -> str:
     """Return the Vimshottari Nakshatra Pada Lord for a sidereal longitude.
 
-    In pure BPHS, a Nakshatra (13°20') is divided into 4 equal padas (quarters) 
+    In pure BPHS, a Nakshatra (13°20') is divided into 4 equal padas (quarters)
     of 3°20' each. There are 108 padas in total (27 nakshatras * 4).
     These 108 padas map sequentially to the 12 signs from Aries to Pisces (9 full cycles).
     The Pada Lord is the lord of the Navamsha sign for that pada.
     """
     longitude = longitude % 360
-    
+
     # Each pada is exactly 3°20' (200 minutes = 3.33333333333 degrees)
     # Total padas = 108. 360 / 108 = 10/3
     pada_size = 10.0 / 3.0
-    
+
     # Calculate absolute pada index (0 to 107)
     absolute_pada = int(longitude / pada_size)
-    
+
     # The signs cycle Aries to Pisces (0 to 11) repeatedly.
     # Pada 0 (Ashwini 1) is Aries.
     sign_index = absolute_pada % 12
-    
+
     navamsha_sign = SIGNS[sign_index]
     return get_sign_lord(navamsha_sign)
 

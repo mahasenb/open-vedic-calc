@@ -4,6 +4,7 @@ Fill in coordinates/dates with any well-documented public birth data
 (e.g., historical figures) to make the goldens verifiable.
 """
 import os
+
 import pytest
 
 # Set the auth environment variables before any app import in the test suite.

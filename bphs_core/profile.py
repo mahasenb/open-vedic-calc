@@ -8,21 +8,19 @@ from transits.py).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional
 
+from . import utils
 from .chart import ChartSnapshot
 from .compat import (
-    NAKSHATRA_GANA,
-    NAKSHATRA_YONI,
     _VARNA_LEVEL,
     _VARNA_NAMES,
     _VASYA_GROUP,
-    _nakshatra_nadi,
+    NAKSHATRA_GANA,
+    NAKSHATRA_YONI,
     _mangal_dosha_raw,
+    _nakshatra_nadi,
 )
-from . import utils
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +264,7 @@ def sade_sati_lifetime(snapshot: ChartSnapshot, birth_date: date) -> list[dict]:
     use a dedicated binary-search ingress finder (e.g. ``get_sade_sati_info`` in
     transits.py) on the specific boundary of interest.
     """
-    from .transits import _transit_longitude, _jd_from_date
+    from .transits import _jd_from_date, _transit_longitude
 
     moon = snapshot.rasi_chart.get("Moon")
     if not moon or moon.sign not in utils.SIGNS:

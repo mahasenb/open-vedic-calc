@@ -1,45 +1,79 @@
 import math
 import os
 import subprocess
-from datetime import datetime, time, date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from . import ephemeris_guard  # noqa: F401 -- boot guard: raises at import if a
-                              # real deployment is on the Moshier fallback.
-from .auth import require_token
-from .schemas import (
-    PersonalDataIn, DashaRequest, TransitRequest,
-    ChartResponse, StrengthResponse, DashaPeriodOut,
-    YogaOut, TransitResponse, TransitPlanetPlacement, GocharaVedha,
-    SpecialPointsResponse, JaiminiKaraka, SourceInfo,
-    PlanetPlacement, ShadbalaItem, BhavabalaItem, VimshopakaItem,
-    RashiDrishti, RashiDrishtiPlanet, InduLagnaOut, SphutaOut,
-    MuhurtRequest, MuhurtResponse,
-    LagnaShuddhiRequest, LagnaShuddhiResponse, LagnaShuddhiSample, TimeWindow,
-    LagnaShuddhiAlternative,
-    FamilyLagnaShuddhiRequest, FamilyLagnaShuddhiResponse, FamilyMemberSample,
-    JobSubmitted, LagnaShuddhiJobStatus, FamilyLagnaShuddhiJobStatus,
-    CompatRequest, CompatResponse, KutaScore, MangalDoshaResult, DashaOverlap,
-    ProfileResponse,
-)
-from .jobs import job_store
-from bphs_core.chart import Chart, PersonalData, ChartSnapshot, PlanetData
-from bphs_core import strength as strength_mod
-from bphs_core import dashas as dashas_mod
-from bphs_core import yogas as yogas_mod
-from bphs_core import transits as transits_mod
-from bphs_core import special_points as sp_mod
-from bphs_core import vimshopaka as vimshopaka_mod
-from bphs_core import rashi_drishti as rashi_drishti_mod
-from bphs_core import muhurat as muhurat_mod
-from bphs_core import lagna_shuddhi as lagna_shuddhi_mod
-from bphs_core import utils
 from bphs_core import compat as compat_mod
+from bphs_core import dashas as dashas_mod
+from bphs_core import lagna_shuddhi as lagna_shuddhi_mod
+from bphs_core import muhurat as muhurat_mod
+from bphs_core import rashi_drishti as rashi_drishti_mod
+from bphs_core import special_points as sp_mod
+from bphs_core import strength as strength_mod
+from bphs_core import transits as transits_mod
+from bphs_core import utils
+from bphs_core import vimshopaka as vimshopaka_mod
+from bphs_core import yogas as yogas_mod
+from bphs_core.chart import Chart, ChartSnapshot, PersonalData, PlanetData
+
+# Boot guard, imported for its IMPORT-TIME EFFECT: it raises at import if a real
+# deployment is running on the Moshier fallback rather than the baked Swiss data,
+# so the service dies instead of serving charts computed on the wrong engine.
+# The comment sits ABOVE the import rather than continuing beside it because
+# import sorting moves the statement and leaves a trailing continuation line
+# stranded behind it -- which is how this note briefly came to read as a stray
+# sentence between two imports.
+from . import ephemeris_guard  # noqa: F401
+from .auth import require_token
+from .jobs import job_store
+from .schemas import (
+    BhavabalaItem,
+    ChartResponse,
+    CompatRequest,
+    CompatResponse,
+    DashaOverlap,
+    DashaPeriodOut,
+    DashaRequest,
+    FamilyLagnaShuddhiJobStatus,
+    FamilyLagnaShuddhiRequest,
+    FamilyLagnaShuddhiResponse,
+    FamilyMemberSample,
+    GocharaVedha,
+    InduLagnaOut,
+    JaiminiKaraka,
+    JobSubmitted,
+    KutaScore,
+    LagnaShuddhiAlternative,
+    LagnaShuddhiJobStatus,
+    LagnaShuddhiRequest,
+    LagnaShuddhiResponse,
+    LagnaShuddhiSample,
+    MangalDoshaResult,
+    MuhurtRequest,
+    MuhurtResponse,
+    PersonalDataIn,
+    PlanetPlacement,
+    ProfileResponse,
+    RashiDrishti,
+    RashiDrishtiPlanet,
+    ShadbalaItem,
+    SourceInfo,
+    SpecialPointsResponse,
+    SphutaOut,
+    StrengthResponse,
+    TimeWindow,
+    TransitPlanetPlacement,
+    TransitRequest,
+    TransitResponse,
+    VimshopakaItem,
+    YogaOut,
+)
 
 
 def _resolve_version() -> str:
@@ -502,12 +536,12 @@ def profile_endpoint(p: PersonalDataIn):
 @app.post("/v1/muhurat", response_model=MuhurtResponse, dependencies=AUTH)
 def muhurat_endpoint(req: MuhurtRequest):
     _, s = _get_chart(req)
-    
+
     # Extract natal Moon's nakshatra and sign from Rasi chart
     moon_pd = s.rasi_chart.get("Moon")
     birth_nak = moon_pd.nakshatra if moon_pd else None
     birth_sign = moon_pd.sign if moon_pd else None
-    
+
     # Parse date range
     start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
     end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
@@ -519,7 +553,7 @@ def muhurat_endpoint(req: MuhurtRequest):
     days = []
     curr = start_dt
     place = utils.make_place(req.name, req.latitude, req.longitude, req.timezone_offset_hours)
-    
+
     while curr <= end_dt:
         day_data = muhurat_mod.compute_muhurat_for_day(
             place=place,
@@ -529,7 +563,7 @@ def muhurat_endpoint(req: MuhurtRequest):
         )
         days.append(day_data)
         curr += timedelta(days=1)
-        
+
     return MuhurtResponse(days=days)
 
 

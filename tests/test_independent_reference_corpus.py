@@ -140,7 +140,6 @@ import json
 import math
 import pathlib
 
-import pytest
 import swisseph as swe
 
 from bphs_core import utils

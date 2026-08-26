@@ -32,8 +32,7 @@ import datetime
 import pytest
 
 from bphs_core import compat
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
-
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
 
 # ---------------------------------------------------------------------------
 # Minimal chart builder (mirrors tests/test_calc_regressions.py)

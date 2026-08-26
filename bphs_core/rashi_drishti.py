@@ -17,8 +17,8 @@ Source: Jaimini Upadesa Sutras 1.1; BPHS ch. on Rasi Drishti.
 """
 from dataclasses import dataclass, field
 
-from .chart import ChartSnapshot
 from . import utils
+from .chart import ChartSnapshot
 
 # Sign quality (chara/sthira/dwiswabhava) by zodiacal index 0..11.
 _MOVABLE = {"Aries", "Cancer", "Libra", "Capricorn"}

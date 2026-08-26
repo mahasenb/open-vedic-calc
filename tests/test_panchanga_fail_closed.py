@@ -46,10 +46,9 @@ from datetime import date
 
 import pytest
 
-from bphs_core import muhurat as m
 from bphs_core import lagna_shuddhi as ls
+from bphs_core import muhurat as m
 from bphs_core import utils
-
 
 PLACE = utils.make_place("Sample City", 7.0, 80.0, 5.5)
 TARGET = date(2026, 5, 26)

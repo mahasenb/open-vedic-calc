@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import fnmatch
 import re
-import shlex
 import subprocess
 from pathlib import Path
 

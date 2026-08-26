@@ -49,6 +49,12 @@ dev = [
     "pytest-cov>=5.0.0",
     "pyyaml>=6.0.0",
     "pip-audit>=2.7.0",
+    # The linter. Pinned to an exact version for the same reason every other
+    # tool here is: a floating linter turns "someone else released a rule" into
+    # a red build on an unrelated PR, and a new rule arriving unannounced is a
+    # moving part in a gate. dependabot's `pip` ecosystem bumps it, which is the
+    # moment to read what the new rules do.
+    "ruff==0.14.6",
     # ci/tests/test_environment_convergence.py parses uv.lock to compare the
     # RESOLVED set against what is installed. stdlib tomllib arrives in 3.11,
     # which .python-version now pins — but requires-python still admits 3.10
@@ -64,6 +70,52 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bphs_core*", "app*"]
+
+[tool.ruff]
+# This repository had NO Python linter at all. That absence was load-bearing in
+# at least one place: ci/tests/test_subprocess_decoding.py records, in its KNOWN
+# BOUNDS, that the evasion shapes it cannot reach would not be flagged by
+# anything else either, "note this repository has no linter at all".
+#
+# Target the interpreter .python-version declares, rather than inferring one:
+# the same single-declaration rule that governs every other environment input
+# here (ci/tests/test_environment_convergence.py asserts the pair).
+target-version = "py311"
+
+[tool.ruff.lint]
+# CONSERVATIVE BY CHOICE. pycodestyle errors and warnings, pyflakes, and import
+# ordering -- the rules that catch a mistake rather than express a preference.
+# Nothing opinionated (no bugbear, no pyupgrade, no naming rules): a lint gate
+# whose first act is to rewrite a working tree teaches contributors to run it
+# with --fix and stop reading it.
+#
+# WHAT "E" ACTUALLY BUYS HERE, measured rather than assumed. Under ruff 0.14.6
+# the pycodestyle WHITESPACE rules -- E1xx, E2xx, E3xx, including E225
+# missing-whitespace-around-operator -- are PREVIEW-ONLY and are not enabled by
+# `select = ["E"]`. Measured: `x=1` and `y = ( 1, 2 )` pass under `--select E`
+# and produce three findings under `--select E --preview`. So the active
+# pycodestyle set is E4 (imports), E7 (statements) and E9 (runtime/IO errors),
+# with E5 excluded below. Preview is deliberately NOT turned on: a preview rule
+# can change between patch releases, which would put back exactly the moving
+# part the exact `ruff==` pin removes.
+select = ["E", "F", "W", "I"]
+
+# E501 (line-too-long) is DISABLED, and the reason is recorded rather than left
+# as a bare entry. Measured on this tree at the default width: 533 violations,
+# and 57 even at 120 columns. Essentially all of them are prose -- this
+# repository deliberately writes long single-line paragraphs in comments and
+# docstrings, because that prose is where its measurements and rationale live,
+# and ci/tests/test_stable_anchor_citations.py PARSES those chunks as its
+# corpus. Reflowing 533 lines of it would be a large diff through text other
+# guards read, in exchange for a property that is a preference rather than a
+# defect. Line length is the one pycodestyle rule that cannot catch a mistake.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# `bphs_core`, `app` and `tests` are this project's own packages. Without this,
+# `tests` in particular is resolved as third-party and sorted into the wrong
+# block, which would make the gate demand an ordering that is simply wrong.
+known-first-party = ["app", "bphs_core", "tests"]
 
 [tool.coverage.run]
 branch = true

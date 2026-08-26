@@ -2,9 +2,10 @@
 from datetime import datetime, time
 
 from bphs_core.chart import Chart, PersonalData
-from bphs_core import rashi_drishti as rd
 from bphs_core.rashi_drishti import (
-    get_rashi_drishti_table, get_planet_rashi_drishti, RASHI_DRISHTI_TABLE,
+    RASHI_DRISHTI_TABLE,
+    get_planet_rashi_drishti,
+    get_rashi_drishti_table,
 )
 from tests.conftest import SAMPLE_A
 

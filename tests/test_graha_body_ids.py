@@ -35,14 +35,13 @@ from pathlib import Path
 
 import pytest
 import swisseph as swe
-
-from tests.conftest import *  # noqa: F401,F403 — env vars before app imports
+from jhora.panchanga import drik
 
 from bphs_core import lagna_shuddhi as ls
 from bphs_core import transits as tr
 from bphs_core import utils
 from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
-from jhora.panchanga import drik
+from tests.conftest import *  # noqa: F401,F403 — env vars before app imports
 
 # The instant used throughout: 2026-05-26 08:00 IST (the suite's standard
 # electional test instant). All positions below are runtime-computed at this JD.

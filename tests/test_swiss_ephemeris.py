@@ -58,9 +58,7 @@ import swisseph as swe
 
 from bphs_core import utils  # sets the ephemeris path + Lahiri mode on import
 from bphs_core.chart import Chart, PersonalData
-
 from tests.conftest import (
-    REQUIRE_SWISS_EPHEMERIS_ENV as _REQUIRE_ENV,
     SAMPLE_A,
     SAMPLE_B,
     SAMPLE_C,

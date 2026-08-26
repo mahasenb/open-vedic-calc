@@ -172,3 +172,54 @@ def test_the_yml_control_still_holds(tmp_path):
     root = _fixture_repo(tmp_path, "ci.yml")
     commands = _all_run_commands(root)
     assert any("ci/tests" in command for command in commands), commands
+
+
+# ---------------------------------------------------------------------------
+# The linter is wired, and it decides the job
+# ---------------------------------------------------------------------------
+def test_some_workflow_step_runs_the_linter():
+    """A lint gate no workflow runs is inert, exactly like the suite above.
+
+    This repository had no Python linter at all, which
+    ``ci/tests/test_subprocess_decoding.py`` records in its KNOWN BOUNDS as the
+    reason its own unreachable evasion shapes would not be caught by anything
+    else either. Adding ruff only removes that sentence if some workflow
+    actually invokes it.
+    """
+    commands = _all_run_commands()
+    assert any(
+        "ruff" in command and "check" in command for command in commands
+    ), (
+        "no workflow step runs `ruff check`, so the lint configuration in "
+        "pyproject.toml is inert -- violations would land with nothing "
+        f"reporting them. Run commands seen: {commands}"
+    )
+
+
+def test_the_linter_decides_the_job_rather_than_reporting_to_nobody():
+    """Fail CLOSED: no ``--exit-zero``, no ``--fix``, no piping the rc away.
+
+    An advisory linter is a lint result nobody has to act on, which is a lint
+    result nobody reads -- the same "a control must never run silently at
+    reduced strength" rule the PR-text checker's secret handling follows. And
+    ``--fix`` in CI would REWRITE the tree and then report success on the
+    rewrite, certifying code that is not what the contributor pushed.
+    """
+    ruff_commands = [
+        command
+        for command in _all_run_commands()
+        if "ruff" in command and "check" in command
+    ]
+    assert ruff_commands, "no `ruff check` step to inspect"
+    softened = [
+        command
+        for command in ruff_commands
+        if "--exit-zero" in command
+        or "--fix" in command
+        or "|| true" in command
+        or "continue-on-error" in command
+    ]
+    assert not softened, (
+        "a ruff step that cannot fail the job, or that rewrites the tree "
+        f"before judging it: {softened}"
+    )

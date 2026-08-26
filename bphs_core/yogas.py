@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from .chart import ChartSnapshot
+
 from . import utils
+from .chart import ChartSnapshot
 
 DUSTHANA = {6, 8, 12}
 KENDRA = {1, 4, 7, 10}

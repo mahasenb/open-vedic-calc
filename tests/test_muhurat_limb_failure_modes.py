@@ -44,7 +44,6 @@ import pytest
 from bphs_core import muhurat as m
 from bphs_core import utils
 
-
 PLACE = utils.make_place("Sample City", 7.0, 80.0, 5.5)
 TARGET = dt.date(2026, 5, 26)
 
@@ -525,8 +524,8 @@ class TestTheEndpointSurfacesTheFailure:
         assert day["degraded_limbs"] == []
 
     def test_limb_failure_is_not_served_as_a_200(self, monkeypatch):
-        from tests.test_coverage import client
         from bphs_core import muhurat as mod
+        from tests.test_coverage import client
         _patch_first_failure(monkeypatch, "gauri_choghadiya")
         assert mod.drik is m.drik  # one shared module object, so the patch applies
         # gauri_choghadiya feeds the chogadiya windows — a recommendation-

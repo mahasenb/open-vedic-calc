@@ -1,5 +1,5 @@
-import pytest
 from bphs_core import utils
+
 
 def test_nakshatra_pada_lord_ashwini():
     # Ashwini starts at 0°00' Aries (0.0° absolute)
@@ -7,7 +7,7 @@ def test_nakshatra_pada_lord_ashwini():
     assert utils.nakshatra_pada_lord(0.0) == "Mars"
     assert utils.nakshatra_pada_lord(1.0) == "Mars"
     assert utils.nakshatra_pada_lord(3.33) == "Mars"
-    
+
     # Second pada of Ashwini (3°20' to 6°40') is Taurus (Venus)
     assert utils.nakshatra_pada_lord(3.34) == "Venus"
     assert utils.nakshatra_pada_lord(6.66) == "Venus"

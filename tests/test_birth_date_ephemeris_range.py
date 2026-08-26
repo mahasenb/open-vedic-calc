@@ -60,9 +60,9 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
-from bphs_core import utils
 from app.main import app
 from app.schemas import MAX_EPHEMERIS_DATE, MIN_EPHEMERIS_DATE
+from bphs_core import utils
 from tests.conftest import SAMPLE_A, SAMPLE_B
 
 _ONE_DAY = datetime.timedelta(days=1)

@@ -24,7 +24,7 @@ os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
 import app.main as main_mod
 from app.main import app
-from app.schemas import LagnaShuddhiResponse, FamilyLagnaShuddhiResponse
+from app.schemas import FamilyLagnaShuddhiResponse, LagnaShuddhiResponse
 from tests.conftest import SAMPLE_A, SAMPLE_B
 
 client = TestClient(app, headers={"X-Calc-Service-Token": "test"})

@@ -34,8 +34,21 @@ table cross-checked against ``jhora.const.dhasavarga_amsa_vimsopaka``.
 """
 from dataclasses import dataclass, field
 
+# Imported for its IMPORT-TIME EFFECT, not for a name used below, so it is
+# suppressed rather than deleted. `bphs_core.utils` applies this engine's
+# declared astronomical choices at its module level -- the lunar node model, the
+# swisseph position-flag word, the sunrise/sunset convention words -- and
+# hard-fails if the library will not carry them. `bphs_core/__init__.py` imports
+# it first for exactly this reason and carries the same suppression.
+#
+# Today that package init makes this line redundant, since importing any module
+# here runs it first. It is kept because "redundant" is a property of today's
+# import graph rather than a guarantee, the same defense-in-depth reasoning
+# CLAUDE.md records for `Chart._compute` re-asserting the ayanamsa on top of the
+# decorator that already applied it. Deleting it to satisfy a linter would be a
+# change to an accuracy engine's import order with no test that failed first.
+from . import utils  # noqa: F401
 from .chart import ChartSnapshot
-from . import utils
 
 try:  # wrap pyjhora's pinned Dashavarga weight table
     from jhora import const as _jhora_const
