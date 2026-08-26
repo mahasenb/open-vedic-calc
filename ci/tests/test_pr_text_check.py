@@ -88,7 +88,11 @@ def _load_checker():
 
 
 def _load_workflow_scope():
-    """The ONE definition of "which files are this repo's workflows", by path."""
+    """Load ``ci/workflow_scope.py`` -- the shared workflow enumeration, by path.
+
+    Shared, not universal: which readers take their scope from it is recorded
+    in that module's own docstring, not restated here.
+    """
     module_path = _REPO_ROOT / "ci" / "workflow_scope.py"
     spec = importlib.util.spec_from_file_location(
         "_workflow_scope_for_pr_text", module_path
