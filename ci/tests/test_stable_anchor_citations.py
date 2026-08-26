@@ -163,9 +163,9 @@ corpus can vanish while their counts sit untouched.  That is measured, not
 supposed; the constant block below carries the numbers.
 
 Form F needs one floor MORE than its own count, and it is the one floor here set
-at equality: the module-scope declarations that admit it.  Deleting both would
-leave the declared-block total at 7, still clearing its floor of 6, while Form F
-quietly found nothing to read.
+at equality: the module-scope declarations that admit it.  A floor counting
+class-scope and module-scope declarations together keeps clearing on the
+class-scope ones alone, while Form F quietly finds nothing to read.
 
 Extend this file, never weaken it.
 """
@@ -188,38 +188,46 @@ _SCANNED_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".toml"})
 _HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".toml"})
 
 # ---------------------------------------------------------------------------
-# Non-vacuity floors.  MEASURED at this file's final state, not guessed --
-# re-measured 2026-08-26 when the Form B header was lifted to module scope: 99
-# tracked files scanned into 2577 prose chunks (1543 comment, 1031 docstring, 3
-# markdown), yielding Form A 28, Form B 9 declared blocks (7 on a class, 2 on a
-# module) / 34 bullet anchors (1 of them a containment pair), Form C 46, Form D
-# 1, Form F 17: 126 anchors in total.  That is a DATED measurement, not a
-# standing claim; the live counts are printed by the floor test on every run and
-# are the only numbers to trust.  The floors sit a little below the measurement
-# so ordinary refactoring does not red the guard, and are asserted PER FORM so
-# one form going dark cannot hide behind the others.
+# Non-vacuity floors.
 #
-# `_MIN_MODULE_DECLARATIONS` is the one floor set at EQUALITY with what the tree
-# holds, deliberately: the two module-scope declarations are what admit Form F
-# at all, so deleting either must red here rather than quietly returning those
-# anchors to the unguarded state they spent PR #74 in.  `_MIN_DECLARED_MODULES`
-# stays where it was and does not absorb the two -- a floor that counts both
-# kinds together would go on passing with the module-scope half gone.
+# THIS BLOCK CARRIES NO INVENTORY COUNTS, AND THAT IS THE POINT.  It used to
+# open with a narrative measurement -- so many files, so many chunks, so many
+# anchors per form -- and that narrative went stale TWICE: once before it was
+# first committed, having been measured before this file's own docstrings
+# finished growing, and once again on the very branch that recorded the first
+# lapse, where the figures were taken at the branch's opening commit and three
+# later commits then moved them.  A hand-typed count of live tree state, sitting
+# in the guard whose entire purpose is to stop hand-typed references rotting, is
+# the one place the defect must not survive.  So the numbers are gone rather
+# than re-typed: the only figures here are the floors below, which are ASSERTED
+# on every run, and the live inventory, which `test_the_anchor_inventory_meets_
+# its_floor` PRINTS on every run.  Read them there; nothing in this comment can
+# disagree with the tree because nothing in it describes the tree.
 #
-# EVERY number above is floored below.  That is deliberate: an unfloored number
-# in this comment would be a hand-typed figure that nothing recounts -- the
-# exact defect class this whole module exists to catch -- and the corpus size
-# was in fact stale here for one review round, having been measured before this
-# file's own docstrings finished growing.
+# WHY THE FLOORS EXIST.  Every assertion in this module has the form "each
+# anchor resolves", which is vacuously true of no anchors at all.  A regex that
+# stops matching, a corpus extractor returning nothing, or a `git ls-files` that
+# fails open would each turn the whole module green while checking nothing.
 #
-# The CHUNK floors are per KIND, and they are not decoration.  Measured: making
-# `python_chunks` drop comments while keeping docstrings costs the whole comment
-# half of the corpus -- 59% of it -- and every other floor still passes.  Form A
-# falls only 23 -> 20, clearing its floor of 18; Forms B and C never read the
-# chunk corpus at all (they re-parse ASTs directly); Form D's one citation lives
-# in a docstring and survives.  So the whole guard stays GREEN with every Python
-# comment in the tree unread.  A per-kind floor is the only thing here that sees
-# it.
+# WHY PER FORM.  A single total lets one form go dark behind the others' growth.
+#
+# WHY PER CHUNK KIND.  Measured: making `python_chunks` drop comments while
+# keeping docstrings costs the entire comment half of the corpus, and every
+# other floor here still passes -- Forms B and C never read the chunk corpus at
+# all (they re-parse ASTs directly), and Form D's lone citation lives in a
+# docstring.  The guard would stay GREEN with every Python comment in the tree
+# unread, and a per-kind floor is the only thing that sees it.
+#
+# WHY ONE FLOOR IS AN EQUALITY.  `_MIN_MODULE_DECLARATIONS` matches exactly what
+# the tree holds, deliberately: the module-scope declarations are what admit
+# Form F at all, so deleting one must red here rather than quietly returning
+# those anchors to the unguarded state they spent PR #74 in.
+# `_MIN_DECLARED_MODULES` deliberately does NOT absorb them -- a floor counting
+# class-scope and module-scope declarations together keeps clearing on the
+# class-scope ones alone while the module-scope half is gone.
+#
+# Floors otherwise sit below the live counts with headroom, so ordinary
+# refactoring and legitimate deletion do not red the guard.
 # ---------------------------------------------------------------------------
 _MIN_SCANNED_FILES = 80
 _MIN_COMMENT_CHUNKS = 1200

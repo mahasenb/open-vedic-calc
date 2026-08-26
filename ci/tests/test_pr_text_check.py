@@ -28,6 +28,13 @@ WHAT THIS GUARD PINS
    the variable something else. Measured 2026-08-26: no workflow here takes the
    env route today, so this widening is a preventive control, not a fix.
 
+   Both routes match on a NORMALISED expression body, because
+   ``${{ github['event']['pull_request']['title'] }}`` and
+   ``${{ GITHUB.EVENT.PULL_REQUEST.TITLE }}`` substitute exactly what the plain
+   dotted spelling does — measured, all three spellings were unflagged before
+   normalisation, and the direct half of that gap predates the env route. See
+   ``_normalise_expression`` for the one bound this leaves (a computed index).
+
 The workflow scope comes from ``git ls-files``, both ``.yml`` and ``.yaml``, and
 fails closed outside a checkout — see ``_workflow_paths``.
 
@@ -364,13 +371,44 @@ _PR_TEXT_EXPRESSIONS = (
 # run body would otherwise derive nothing and pass.
 _PR_TEXT_ENV_KEYS = frozenset({"PR_TITLE", "PR_BODY"})
 
-# One GitHub expression. They do not nest, so this is lexical -- not a model of
-# anything. That distinction matters: the sibling PYTEST_ADDOPTS guard is blunt
-# because telling a harmless mention from a poisoning one there meant modelling
-# redirection, heredocs and indirection. Here the substitution GitHub performs
-# IS `${{ ... }}` and nothing else, so reading exactly that is precision, not a
-# guess.
+# One GitHub expression. They do not nest, so FINDING the span is lexical -- not
+# a model of anything. That distinction matters: the sibling PYTEST_ADDOPTS guard
+# is blunt because telling a harmless mention from a poisoning one there meant
+# modelling redirection, heredocs and indirection. The substitution GitHub
+# performs is `${{ ... }}` and nothing else, so reading exactly that is precise.
+#
+# Resolving the NAME inside the span is a separate question, and the span being
+# lexical says nothing about it. See `_normalise_expression` and the bound below.
 _EXPRESSION = re.compile(r"\$\{\{(?P<body>.*?)\}\}", re.S)
+
+# `ctx['name']` / `ctx["name"]`, with optional inner whitespace.
+_INDEX = re.compile(r"\[\s*(['\"])(?P<name>[A-Za-z_][\w-]*)\1\s*\]")
+
+
+def _normalise_expression(body: str) -> str:
+    """One expression body, rewritten to canonical dotted lower case.
+
+    GitHub accepts index and property notation interchangeably and resolves
+    property names case-insensitively, so all of these substitute the identical
+    value::
+
+        ${{ github.event.pull_request.title }}
+        ${{ github['event']['pull_request']['title'] }}
+        ${{ GITHUB.event['pull_request'].TITLE }}
+
+    Matching the lower-case dotted spelling alone therefore reads the other two
+    as clean -- measured, all three were unflagged. Normalising first means ONE
+    rule covers every spelling, instead of a denylist growing an entry per
+    variant and still missing the next one.
+
+    KNOWN BOUND, stated rather than claimed away: only a *literal* index is
+    resolved. A computed one -- ``env[format('PR_{0}', 'TITLE')]``, or an index
+    by a variable -- is left as-is and will NOT match, because resolving it means
+    evaluating GitHub's expression language, which is the modelling this guard
+    deliberately does not do. That shape is exotic in a `run:` body and is
+    recorded here rather than silently assumed away.
+    """
+    return _INDEX.sub(lambda m: "." + m.group("name"), body).lower()
 
 
 def _env_keys_carrying_pr_text(document: dict) -> set[str]:
@@ -388,7 +426,11 @@ def _env_keys_carrying_pr_text(document: dict) -> set[str]:
             return
         for key, value in env.items():
             text = "" if value is None else str(value)
-            if any(expression in text for expression in _PR_TEXT_EXPRESSIONS):
+            # Normalised here too: an assignment written in index notation
+            # forwards PR text just as one written with dots, and a derivation
+            # blind to it would leave the forwarded name unregistered.
+            normalised = _normalise_expression(text)
+            if any(expression in normalised for expression in _PR_TEXT_EXPRESSIONS):
                 found.add(str(key))
 
     _harvest(document.get("env"))
@@ -423,22 +465,33 @@ def _interpolation_offenders(document: dict, label: str = "<document>") -> list[
             if not isinstance(step, dict):
                 continue
             run = step.get("run") or ""
+            # Blunt whole-body pass for the plain dotted spelling, kept so a
+            # mention outside a `${{ }}` span is still reported.
             for expression in _PR_TEXT_EXPRESSIONS:
                 if expression in run:
                     offenders.append(
                         f"{label}:{job_name}: {expression} in a run: body"
                     )
+            # Then per expression span, on the NORMALISED body, which is what
+            # catches index notation and mixed case in either route.
             for match in _EXPRESSION.finditer(run):
-                body = match.group("body")
+                body = _normalise_expression(match.group("body"))
+                for expression in _PR_TEXT_EXPRESSIONS:
+                    if expression in body:
+                        offenders.append(
+                            f"{label}:{job_name}: {expression} in a run: body"
+                        )
                 for key in sorted(dangerous_env):
-                    if re.search(rf"(?<![\w.]) *env\.{re.escape(key)}\b", body):
+                    if re.search(rf"(?<![\w.]) *env\.{re.escape(key.lower())}\b", body):
                         offenders.append(
                             f"{label}:{job_name}: ${{{{ env.{key} }}}} in a run: "
                             f"body -- the value is substituted into the script "
                             f"before the shell parses it. Read it as a shell "
                             f'variable instead: "${key}".'
                         )
-    return offenders
+    # Deduped: the dotted spelling is seen by both passes above, and the same
+    # finding reported twice reads as two problems.
+    return list(dict.fromkeys(offenders))
 
 
 def _steps_running_the_checker(self_test: bool | None = None) -> list[tuple[Path, dict, dict]]:
@@ -710,6 +763,122 @@ def test_the_convention_floor_catches_what_derivation_cannot_see() -> None:
         "block in that workflow declares it -- derivation cannot see a value "
         "that arrives from another level, so the convention names are a floor "
         "under it, not a redundancy"
+    )
+
+
+_BRACKET_ENV_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "${{ env['PR_TITLE'] }}"
+"""
+
+_BRACKET_DIRECT_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github['event']['pull_request']['title'] }}"
+"""
+
+_MIXED_CASE_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ GITHUB.event['pull_request'].TITLE }}"
+"""
+
+
+@pytest.mark.parametrize(
+    "workflow, why",
+    [
+        (_BRACKET_ENV_RUN, "env route, index notation"),
+        (_BRACKET_DIRECT_RUN, "direct route, index notation"),
+        (_MIXED_CASE_RUN, "mixed dotted/index and mixed case"),
+    ],
+    ids=["env-bracket", "direct-bracket", "mixed"],
+)
+def test_index_notation_substitutes_identically_and_is_flagged(workflow, why) -> None:
+    """``ctx['a']['b']`` is the same expression as ``ctx.a.b``, and interpolates the same.
+
+    Index syntax is valid in GitHub expressions and property lookup is
+    case-insensitive, so a guard matching only the lower-case dotted spelling
+    reads three evasions as clean. The direct half of this gap is older than
+    this guard's env route -- it was in the original two-string denylist -- so
+    both halves are closed here rather than only the new one.
+
+    The fix is normalisation, not more denylist entries: the expression body is
+    rewritten to canonical dotted lower case BEFORE any matching, so one rule
+    covers every spelling of the same path.
+    """
+    offenders = _interpolation_offenders(yaml.safe_load(workflow))
+    assert offenders, f"not flagged ({why}) -- this spelling substitutes identically"
+
+
+_BRACKET_ASSIGNED_RENAMED_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SUBJECT: ${{ github['event']['pull_request']['body'] }}
+        run: echo "${{ env.SUBJECT }}"
+"""
+
+
+def test_derivation_normalises_the_env_VALUE_not_only_the_run_body() -> None:
+    """The forwarding assignment can be written in index notation too.
+
+    Both evasions at once, and neither half alone catches it: the name is
+    ``SUBJECT``, so the conventional floor does not know it, and the assignment
+    is spelled ``github['event']['pull_request']['body']``, so a derivation that
+    matches only the dotted form never registers it. The run body is then plain
+    ``${{ env.SUBJECT }}`` -- perfectly ordinary-looking, and unflagged.
+
+    Written because a neuter measured the gap: dropping normalisation from the
+    env-value read left every other fixture here GREEN, since all of them happen
+    to spell the assignment with dots. A path nothing exercises is a claim.
+    """
+    offenders = _interpolation_offenders(yaml.safe_load(_BRACKET_ASSIGNED_RENAMED_RUN))
+    assert offenders, (
+        "an env key assigned PR text in INDEX notation, under a name outside "
+        "the conventional floor, was not registered as dangerous -- so "
+        "interpolating it into the run body went unflagged"
+    )
+
+
+def test_normalisation_does_not_manufacture_offenders() -> None:
+    """The don't-over-flag control: normalisation must not invent a match.
+
+    An index into an unrelated context, and a literal that merely CONTAINS a
+    dangerous name, must both stay clean -- otherwise the widening makes the
+    guard unusable and someone turns it off.
+    """
+    benign = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ matrix['python'] }} ${{ env.PR_TITLE_LENGTH }} $PR_TITLE"
+"""
+    assert _interpolation_offenders(yaml.safe_load(benign)) == [], (
+        "normalisation flagged a benign expression: an unrelated context index, "
+        "a DIFFERENT env name that merely starts with a dangerous one, and the "
+        "correct shell-variable spelling must all pass"
     )
 
 
