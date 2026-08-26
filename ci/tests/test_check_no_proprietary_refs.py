@@ -1296,3 +1296,201 @@ class TestFileScanScopeComesFromGit:
             f"only {len(paths)} paths enumerated for this repository -- the "
             "enumeration is broken, not the tree"
         )
+
+
+# ---------------------------------------------------------------------------
+# File-scan COVERAGE -- which enumerated files actually get opened
+# ---------------------------------------------------------------------------
+class TestEveryEnumeratedFileIsScanned:
+    """There is no extension allowlist, because an allowlist is fail-OPEN.
+
+    The scope fix above asked git the right question. This is the other half:
+    having got the right SET, the gate then dropped most of it on the floor.
+    ``_is_scannable`` admitted twelve extensions plus the exact name
+    ``Dockerfile``, so a file whose extension nobody had thought of was
+    enumerated, skipped, and counted towards a clean verdict -- the gate saying
+    ``OK:`` about a file it never opened, which is the same shape as the
+    directory blacklist it replaced.
+
+    Measured 2026-08-26 against this repository, EIGHT tracked files sat outside
+    it: ``Dockerfile.test``, ``.env.example``, ``.github/CODEOWNERS``,
+    ``.gitattributes``, ``.gitignore``, ``.python-version``, ``LICENSE`` and
+    ``uv.lock``. The first three are prose a human writes about the deployment
+    and about who owns which path, which is the register a downstream consumer
+    gets named in.
+    """
+
+    def test_a_token_in_an_extensionless_tracked_file_is_found(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """``CODEOWNERS`` has no extension at all, so the allowlist never saw it.
+
+        RED before the widening: the gate printed ``OK: no proprietary consumer
+        references found.`` over a tracked, shipping file holding the token.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path,
+            "extensionless",
+            {
+                "README.md": "nothing here\n",
+                ".github/CODEOWNERS": f"* @{_SYNTHETIC_TOKEN}-team\n",
+            },
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "an extensionless tracked file holding the token was enumerated and "
+            "then skipped -- the gate reported clean over a file this repo ships"
+        )
+        assert "CODEOWNERS" in captured.err
+        assert "OK:" not in captured.out
+
+    def test_a_token_in_a_suffixed_dockerfile_is_found(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """``Dockerfile.test`` matched neither arm of the old test.
+
+        Its suffix ``.test`` was not in the extension set, and the exact-name
+        arm compared the whole basename against ``dockerfile``. So the gate
+        scanned ``Dockerfile`` and skipped the file beside it -- a distinction
+        with no meaning to anyone writing a comment in either.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path,
+            "suffixed-dockerfile",
+            {
+                "Dockerfile": "FROM python:3.11-slim\n",
+                "Dockerfile.test": (
+                    f"# built for {_SYNTHETIC_TOKEN}\nFROM python:3.11-slim\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "Dockerfile.test was enumerated and skipped: its suffix was not in "
+            "the extension set and its basename is not exactly 'Dockerfile'"
+        )
+        assert "Dockerfile.test" in captured.err
+
+    def test_a_token_in_a_lock_file_is_found(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """Lock files are IN scope, and this is what that decision buys.
+
+        ``uv.lock`` is machine-generated, which is the argument FOR scanning it
+        rather than against: a private package name or a private index host
+        lands there without a human ever typing it into a file the gate reads.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(
+            tmp_path,
+            "lockfile",
+            {
+                "pyproject.toml": "[project]\nname = \'x\'\n",
+                "uv.lock": f'[[package]]\nname = "{_SYNTHETIC_TOKEN}-core"\n',
+            },
+        )
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, "a token in uv.lock went unscanned"
+        assert "uv.lock" in captured.err
+
+    def test_an_unreadable_binary_file_is_REFUSED_not_skipped(
+        self, gate_with_synthetic_token, tmp_path, monkeypatch, capsys
+    ):
+        """Widening the scope means binary reaches the decode. That is a refusal.
+
+        The dangerous answer would be to skip it and carry on: "I could not read
+        it" recorded as "there was nothing in it" is precisely the silent pass
+        the strict decode exists to remove, and it would hand anyone a way to
+        park a leak behind an unrecognised extension. So the verdict is rc 1,
+        the file is NAMED, and no ``OK:`` is printed.
+
+        Note what is NOT asserted: that the gate can read binary. It cannot, and
+        it says so.
+        """
+        module = gate_with_synthetic_token
+        root = _repo_with(tmp_path, "binary", {"README.md": "nothing here\n"})
+        # Written as bytes, after the fixture's text files: invalid UTF-8 (a
+        # lone 0x80 continuation byte) plus a NUL, i.e. an ordinary blob.
+        (root / "blob.bin").write_bytes(b"\x00\x01\x80\xff binary payload \x80")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "blob"], cwd=root, check=True)
+        monkeypatch.setattr(module, "_REPO_ROOT", root)
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+
+        exit_code = module.main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1, (
+            "an undecodable file in the scan set was skipped rather than "
+            "refused -- 'I could not read it' became 'there was nothing in it'"
+        )
+        assert "blob.bin" in captured.err, (
+            f"the refusal does not name the offending file: {captured.err!r}"
+        )
+        assert "OK:" not in captured.out
+
+    def test_this_repository_has_NO_file_the_scan_leaves_out(
+        self, gate_without_env_token, capsys
+    ):
+        """The standing anti-regression: enumerated == scanned, on the real tree.
+
+        This is what makes the widening permanent rather than a one-off sweep.
+        Reintroducing any filter -- an extension set, a name test, a size cap --
+        reddens here on the commit that adds it.
+
+        The gate's own source is the single deliberate exclusion (it necessarily
+        spells the legacy token out in order to describe it), so it is subtracted
+        rather than exempted by a rule that could grow a second member.
+        """
+        module = gate_without_env_token
+        candidates, source = module.scan_paths(module._REPO_ROOT)
+        assert source == "git", f"this checkout was enumerated by {source!r}"
+
+        on_disk = [
+            label for label in candidates if (module._REPO_ROOT / label).is_file()
+        ]
+        expected = [
+            label
+            for label in on_disk
+            if (module._REPO_ROOT / label).resolve() != module._SELF
+        ]
+        # Non-vacuity: the subtraction must remove exactly the gate, and the
+        # remainder must be a real tree rather than an empty list.
+        assert len(on_disk) - len(expected) == 1, (
+            "the gate's own file was not found in its own scan set"
+        )
+        assert len(expected) >= 100, (
+            f"only {len(expected)} files enumerated -- the enumeration is "
+            "broken, not the tree"
+        )
+
+        module.main(commit_range=None)
+        captured = capsys.readouterr()
+        reported = re.search(r"\((\d+) file\(s\) scanned", captured.out)
+        assert reported is not None, (
+            f"the gate did not report how many files it scanned: {captured.out!r}"
+        )
+        assert int(reported.group(1)) == len(expected), (
+            f"the gate scanned {reported.group(1)} of {len(expected)} enumerated "
+            f"files. Every file git lists must be opened: a file that is "
+            f"enumerated and then skipped still counts towards the clean "
+            f"verdict, which is the gate reporting OK: about a file it never "
+            f"read."
+        )
