@@ -10,6 +10,22 @@ cancellation rules, the nakshatra-compatibility prose branches, and every
 
 Mangal-dosha and composite-strength tests build a minimal ``ChartSnapshot`` the
 same way ``tests/test_calc_regressions.py`` does.
+
+Branch anchors below are named by function in bphs_core/compat.py:
+
+The ``# <symbol>: ...`` comments marking individual score tiers and prose
+branches are CITATIONS into that module, not free prose.  The declaration line
+above is what makes them machine-readable: it is the same header a class
+docstring uses to declare its subject, lifted to module scope so that a comment
+-- which has no enclosing scope to inherit an owner from -- has one.  Every such
+comment in this file is resolved against ``bphs_core/compat.py`` on every CI run
+by ``ci/tests/test_stable_anchor_citations.py``, so a rename over there reddens
+here instead of quietly leaving a comment pointing at nothing.
+
+The consequence, stated so it is not discovered as a surprise: inside a declared
+file a ``# Word: ...`` comment opener IS an anchor.  Prose that is not a citation
+must not be written in that shape, and an anchor into any OTHER module is spelled
+in full as ``<path>.py::<symbol>``.
 """
 import datetime
 

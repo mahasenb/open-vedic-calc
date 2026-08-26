@@ -24,6 +24,17 @@ built by anything other than this producer can still carry them.
 The per-limb classification for all of ``compute_muhurat_for_day`` is pinned by
 tests/test_muhurat_limb_failure_modes.py.
 
+Branch anchors below are named by function in bphs_core/lagna_shuddhi.py:
+
+The ``# <symbol>: ...`` comments in this file are CITATIONS into that module,
+resolved on every CI run by ``ci/tests/test_stable_anchor_citations.py``.  The
+declaration line above is the Form B header lifted to module scope, which is
+what gives a comment -- a construct with no enclosing AST scope to inherit an
+owner from -- a machine-readable one.  A scope declares exactly ONE subject
+module, so an anchor into any other (``bphs_core/muhurat.py``, for instance) is
+spelled in full as ``<path>.py::<symbol>`` rather than as a bare comment opener,
+and prose that is not a citation is not written in the ``Word: ...`` shape.
+
 All ``drik`` monkeypatching targets ``bphs_core.muhurat.drik`` (for muhurat) or
 ``bphs_core.lagna_shuddhi.drik`` (for the scorer). Both attributes name the ONE
 shared ``jhora.panchanga.drik`` module object, so a patch placed on it is also
