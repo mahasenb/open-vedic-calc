@@ -218,10 +218,28 @@ _HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".toml"})
 # docstring.  The guard would stay GREEN with every Python comment in the tree
 # unread, and a per-kind floor is the only thing that sees it.
 #
-# WHY ONE FLOOR IS AN EQUALITY.  `_MIN_MODULE_DECLARATIONS` matches exactly what
-# the tree holds, deliberately: the module-scope declarations are what admit
-# Form F at all, so deleting one must red here rather than quietly returning
-# those anchors to the unguarded state they spent PR #74 in.
+# WHY ONE OF THESE IS AN EQUALITY, AND IS NAMED FOR IT.
+# `_EXPECTED_MODULE_DECLARATIONS` is asserted with `==`, not `>=`.  It used to be
+# spelled `_MIN_MODULE_DECLARATIONS` and asserted `>=` while this comment claimed
+# it "matches exactly what the tree holds" -- a description and an assertion that
+# disagreed, in the guard whose entire subject is prose disagreeing with code.
+# Measured: staging a third declaring file left all 21 tests in this module GREEN
+# with the inventory reporting 3 against a constant of 2, so the sentence was
+# already false and nothing said so.
+#
+# The equality is the right half to keep, in BOTH directions:
+#   * DELETING a declaring file must red, because the module-scope declarations
+#     are what admit Form F at all, and losing one silently returns that file's
+#     comment anchors to the unguarded state they spent PR #74 in.
+#   * ADDING one must red too, and that is a feature rather than a cost.  A
+#     declaration changes the MEANING of every `# Word: ...` comment in its file
+#     -- they become citations, resolved on every run -- so it is a deliberate
+#     act whose cost is recorded in each declaring docstring.  Something that
+#     changes what the guard reads may not slip in unremarked.
+# A hand-typed equality cannot rot SILENTLY: it reds on the commit that moves the
+# tree away from it, which is the moment its author can cheaply re-derive it.  A
+# floor rots exactly the way the citations this module polices do.
+#
 # `_MIN_DECLARED_MODULES` deliberately does NOT absorb them -- a floor counting
 # class-scope and module-scope declarations together keeps clearing on the
 # class-scope ones alone while the module-scope half is gone.
@@ -237,7 +255,7 @@ _MIN_DECLARED_MODULES = 6
 _MIN_BULLET_ANCHORS = 28
 _MIN_MEMBER_ANCHORS = 38
 _MIN_SHA_PINNED_CITATIONS = 1
-_MIN_MODULE_DECLARATIONS = 2
+_EXPECTED_MODULE_DECLARATIONS = 2  # an EQUALITY, not a floor -- see above
 _MIN_COMMENT_ANCHORS = 14
 _MIN_TOTAL_ANCHORS = 105
 
@@ -1002,11 +1020,15 @@ def test_the_anchor_inventory_meets_its_floor():
     # Floored SEPARATELY from the declared-block total above: a combined count
     # of 9 keeps clearing a floor of 6 with both module-scope declarations gone,
     # and Form F would then silently find nothing to check.
-    assert len(inventory["module_declarations"]) >= _MIN_MODULE_DECLARATIONS, (
-        f"{len(inventory['module_declarations'])} module-scope declarations, "
-        f"floor {_MIN_MODULE_DECLARATIONS} -- without them Form F has no file "
-        f"to read, and the comment anchors those files carry go back to being "
-        f"unguarded prose"
+    assert len(inventory["module_declarations"]) == _EXPECTED_MODULE_DECLARATIONS, (
+        f"{len(inventory['module_declarations'])} module-scope declarations "
+        f"({sorted(inventory['module_declarations'])}), expected exactly "
+        f"{_EXPECTED_MODULE_DECLARATIONS}. FEWER: Form F has lost a file to "
+        f"read, and the comment anchors it carried are unguarded prose again. "
+        f"MORE: a file has newly declared a subject module, which turns every "
+        f"`# Word: ...` comment in it into a resolved citation -- a deliberate "
+        f"act, so update this constant in the same change rather than relaxing "
+        f"the assertion."
     )
     assert len(inventory["comment_anchors"]) >= _MIN_COMMENT_ANCHORS, (
         f"Form F found {len(inventory['comment_anchors'])} comment anchors, "
