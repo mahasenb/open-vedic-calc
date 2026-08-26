@@ -81,6 +81,21 @@ def _load_checker():
     return module
 
 
+def _load_workflow_scope():
+    """The ONE definition of "which files are this repo's workflows", by path."""
+    module_path = _REPO_ROOT / "ci" / "workflow_scope.py"
+    spec = importlib.util.spec_from_file_location(
+        "_workflow_scope_for_pr_text", module_path
+    )
+    assert spec is not None and spec.loader is not None, module_path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_workflow_scope = _load_workflow_scope()
+
+
 def _env(**overrides) -> dict[str, str]:
     """A same-repo, human-actor environment with the secret present."""
     base = {
@@ -327,29 +342,13 @@ def _workflow_paths(repo_root: Path) -> list[Path]:
     Fails CLOSED: outside a checkout this raises rather than returning an empty
     list, because "zero workflows found" and "zero violations found" are the
     same green and a guard may not reach the second by way of the first.
+
+    The implementation moved to ``ci/workflow_scope.py`` unchanged, so this
+    repository has ONE answer to "what are the workflows". It had three, and two
+    of them read ``*.yml`` only -- the exact half-enumeration this docstring
+    already warned about, sitting two files away from the warning.
     """
-    result = subprocess.run(
-        [
-            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
-            "--", ".github/workflows",
-        ],
-        cwd=repo_root,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"`git ls-files` failed in {repo_root}: "
-        f"{result.stderr.decode('utf-8', 'replace').strip()}. This guard derives "
-        "its scope from git and fails closed rather than reporting no workflows."
-    )
-    records = [r for r in result.stdout.decode("utf-8").split("\0") if r]
-    return sorted(
-        {
-            repo_root / record
-            for record in records
-            if Path(record).suffix in _WORKFLOW_SUFFIXES
-        }
-    )
+    return _workflow_scope.workflow_paths(repo_root)
 
 
 def _workflows() -> dict[Path, dict]:
@@ -990,11 +989,17 @@ def test_the_enumeration_fails_closed_when_git_cannot_answer(tmp_path: Path) -> 
 
     "Zero workflows found" and "zero violations found" are the same green, and
     a guard may not reach the second by way of the first.
+
+    The refusal is a DEDICATED exception rather than a bare ``assert``, which is
+    what it used to be. ``assert`` is compiled out under ``python -O``, so the
+    fail-closed property held only for the optimisation level this happens to
+    run at -- a guard whose refusal can be switched off by an interpreter flag
+    is a guard with a mode in which it reports no workflows and no violations.
     """
     loose = tmp_path / "not-a-repo"
     (loose / ".github" / "workflows").mkdir(parents=True)
     (loose / ".github" / "workflows" / "a.yml").write_text(_SAFE_RUN, encoding="utf-8")
-    with pytest.raises(AssertionError, match="ls-files"):
+    with pytest.raises(_workflow_scope.WorkflowScopeError, match="ls-files"):
         _workflow_paths(loose)
 
 
