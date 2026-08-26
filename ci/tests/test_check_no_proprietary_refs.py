@@ -1929,10 +1929,19 @@ class TestTheGateItselfHasNoUnresolvableRunCall:
         asserted, and ``symtable`` is the checker: it is built by the compiler
         and knows every construct that binds a name.
 
-        Measured on this gate: 28 names, identical both ways. A construct the
-        visitor does not model -- a walrus at module scope, a match capture, a
-        starred unpack -- shows up here as a divergence on the commit that adds
-        it, rather than as a name that can quietly hold ``subprocess.run``.
+        The two sets are asserted EQUAL in both directions, over a set first
+        proved non-empty -- so a construct the visitor does not model (a walrus
+        at module scope, a match capture, a starred unpack) shows up here as a
+        divergence on the commit that adds it, rather than as a name that can
+        quietly hold ``subprocess.run``.
+
+        This docstring used to end "Measured on this gate: 28 names, identical
+        both ways", and the cardinality is deliberately gone rather than
+        re-measured. Nothing recounted it, and by the time anyone looked it was
+        **37** -- a standing claim about the current gate, wrong by nine, in
+        tracked prose. The equality below is the claim; the size of the set was
+        decoration, and decoration that rots is worse than none (this
+        repository's citation rule, applied to a number instead of a line).
         """
         source = _GATE_PATH.read_text(encoding="utf-8")
         collector = _collect_run_calls(ast.parse(source))
