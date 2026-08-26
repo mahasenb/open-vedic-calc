@@ -19,7 +19,17 @@ WHAT THIS GUARD PINS
    fails) — asserted first, so a broken detector can never certify anything;
 2. the secret-availability policy, case by case;
 3. the workflow wiring — a checker no workflow runs is inert;
-4. that PR text is never interpolated into a shell command.
+4. that PR text is never interpolated into a shell command, **by either
+   route** — the direct ``${{ github.event.pull_request.title }}`` and the
+   env-indirect ``${{ env.PR_TITLE }}``, which is the same substitution
+   performed on a value that was forwarded correctly and then thrown away. The
+   dangerous env names are DERIVED from each workflow's own ``env:`` blocks
+   rather than denylisted, because a two-name denylist is defeated by calling
+   the variable something else. Measured 2026-08-26: no workflow here takes the
+   env route today, so this widening is a preventive control, not a fix.
+
+The workflow scope comes from ``git ls-files``, both ``.yml`` and ``.yaml``, and
+fails closed outside a checkout — see ``_workflow_paths``.
 
 Loaded by path via importlib, never ``from ci import ...``: ``ci/`` has no
 ``__init__.py`` by design and CI runs the bare ``pytest ci/tests/ -q`` console
@@ -29,6 +39,8 @@ script, which does not put the CWD on sys.path (see CLAUDE.md).
 from __future__ import annotations
 
 import importlib.util
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -282,11 +294,151 @@ def test_the_refusal_names_the_secret(capsys) -> None:
 # ---------------------------------------------------------------------------
 # 3. Wiring -- a checker no workflow runs is inert.
 # ---------------------------------------------------------------------------
+_WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
+
+
+def _workflow_paths(repo_root: Path) -> list[Path]:
+    """Every workflow file, asked of git -- BOTH extensions, tracked and staged-to-be.
+
+    Three decisions, each of them a lesson paid for elsewhere in this workspace:
+
+    * **Both suffixes.** GitHub Actions runs ``.yaml`` exactly as it runs
+      ``.yml``. A ``*.yml`` glob makes an affirmative "no violations" claim about
+      a file it never opened -- and this is the third repository here to be
+      bitten by that particular half-enumeration.
+    * **git, not a directory glob.** ``--exclude-standard`` drops a developer's
+      ignored scratch workflow, so the verdict does not depend on what else is
+      on the disk; ``--others`` keeps an UNTRACKED workflow in scope, which is
+      this guard's own stated reason for existing -- the cheapest moment to
+      catch a violation is the commit that introduces it, and at that moment the
+      file is not yet tracked. Tracked-only would arrive one commit late, so the
+      union is the choice, matching ``ci/check_pytest_collection.py``.
+    * **``-z``, and bytes mode.** Without ``-z`` git QUOTES a path holding
+      non-ASCII bytes and octal-escapes them; a text-mode read moves the decode
+      onto a thread where its failure is invisible.
+
+    Fails CLOSED: outside a checkout this raises rather than returning an empty
+    list, because "zero workflows found" and "zero violations found" are the
+    same green and a guard may not reach the second by way of the first.
+    """
+    result = subprocess.run(
+        [
+            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+            "--", ".github/workflows",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"`git ls-files` failed in {repo_root}: "
+        f"{result.stderr.decode('utf-8', 'replace').strip()}. This guard derives "
+        "its scope from git and fails closed rather than reporting no workflows."
+    )
+    records = [r for r in result.stdout.decode("utf-8").split("\0") if r]
+    return sorted(
+        {
+            repo_root / record
+            for record in records
+            if Path(record).suffix in _WORKFLOW_SUFFIXES
+        }
+    )
+
+
 def _workflows() -> dict[Path, dict]:
     loaded = {}
-    for path in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+    for path in _workflow_paths(_REPO_ROOT):
         loaded[path] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return loaded
+
+
+# The two expressions that put attacker-controlled PR text straight into a shell.
+_PR_TEXT_EXPRESSIONS = (
+    "github.event.pull_request.title",
+    "github.event.pull_request.body",
+)
+
+# This repository's convention names the forwarded values PR_TITLE / PR_BODY.
+# Kept as a floor under the DERIVED set below rather than as the whole rule: a
+# step that deleted its `env:` block while leaving `${{ env.PR_TITLE }}` in the
+# run body would otherwise derive nothing and pass.
+_PR_TEXT_ENV_KEYS = frozenset({"PR_TITLE", "PR_BODY"})
+
+# One GitHub expression. They do not nest, so this is lexical -- not a model of
+# anything. That distinction matters: the sibling PYTEST_ADDOPTS guard is blunt
+# because telling a harmless mention from a poisoning one there meant modelling
+# redirection, heredocs and indirection. Here the substitution GitHub performs
+# IS `${{ ... }}` and nothing else, so reading exactly that is precision, not a
+# guess.
+_EXPRESSION = re.compile(r"\$\{\{(?P<body>.*?)\}\}", re.S)
+
+
+def _env_keys_carrying_pr_text(document: dict) -> set[str]:
+    """Every ``env:`` key, at any level, whose VALUE carries PR text.
+
+    Derived from the workflow rather than hardcoded, because a two-name denylist
+    is defeated by calling the variable something else: ``SUBJECT: ${{
+    github.event.pull_request.body }}`` followed by ``${{ env.SUBJECT }}`` is the
+    identical injection under a different label.
+    """
+    found: set[str] = set()
+
+    def _harvest(env) -> None:
+        if not isinstance(env, dict):
+            return
+        for key, value in env.items():
+            text = "" if value is None else str(value)
+            if any(expression in text for expression in _PR_TEXT_EXPRESSIONS):
+                found.add(str(key))
+
+    _harvest(document.get("env"))
+    for job in (document.get("jobs") or {}).values():
+        if not isinstance(job, dict):
+            continue
+        _harvest(job.get("env"))
+        for step in job.get("steps", []) or []:
+            if isinstance(step, dict):
+                _harvest(step.get("env"))
+    return found
+
+
+def _interpolation_offenders(document: dict, label: str = "<document>") -> list[str]:
+    """Every ``run:`` body that lets PR text reach the shell as CODE.
+
+    Two routes, one mechanism. The direct route interpolates
+    ``${{ github.event.pull_request.title }}``; the env route forwards the value
+    into ``env:`` -- which is the CORRECT thing to do -- and then throws it away
+    by writing ``${{ env.PR_TITLE }}`` in the run body. ``env:`` is only safe
+    while the script reads a SHELL variable (``"$PR_TITLE"``): the shell expands
+    that itself, over data it already holds. A ``${{ }}`` expression is textual
+    substitution performed BEFORE the shell parses the command, and it does not
+    care which route the text arrived by.
+    """
+    dangerous_env = _PR_TEXT_ENV_KEYS | _env_keys_carrying_pr_text(document)
+    offenders: list[str] = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps", []) or []:
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run") or ""
+            for expression in _PR_TEXT_EXPRESSIONS:
+                if expression in run:
+                    offenders.append(
+                        f"{label}:{job_name}: {expression} in a run: body"
+                    )
+            for match in _EXPRESSION.finditer(run):
+                body = match.group("body")
+                for key in sorted(dangerous_env):
+                    if re.search(rf"(?<![\w.]) *env\.{re.escape(key)}\b", body):
+                        offenders.append(
+                            f"{label}:{job_name}: ${{{{ env.{key} }}}} in a run: "
+                            f"body -- the value is substituted into the script "
+                            f"before the shell parses it. Read it as a shell "
+                            f'variable instead: "${key}".'
+                        )
+    return offenders
 
 
 def _steps_running_the_checker(self_test: bool | None = None) -> list[tuple[Path, dict, dict]]:
@@ -416,15 +568,11 @@ def test_pr_text_is_never_interpolated_into_a_run_body() -> None:
     property is about the repository, and the cheapest moment to catch a new
     violation is the commit that introduces it.
     """
-    dangerous = ("github.event.pull_request.title", "github.event.pull_request.body")
-    offenders = []
-    for path, document, in ((p, d) for p, d in _workflows().items()):
-        for job_name, job in (document.get("jobs") or {}).items():
-            for step in job.get("steps", []) or []:
-                run = step.get("run") or ""
-                for expression in dangerous:
-                    if expression in run:
-                        offenders.append(f"{path.name}:{job_name}: {expression} in a run: body")
+    offenders = [
+        offender
+        for path, document in _workflows().items()
+        for offender in _interpolation_offenders(document, path.name)
+    ]
     assert not offenders, (
         "PR text is interpolated directly into a shell command:\n  "
         + "\n  ".join(offenders)
@@ -444,6 +592,250 @@ def test_the_guard_above_examined_something() -> None:
         for job in (document.get("jobs") or {}).values()
     )
     assert steps >= 20, f"only {steps} workflow steps enumerated"
+
+
+# ---------------------------------------------------------------------------
+# 4b. The env-indirect spelling of the same injection.
+# ---------------------------------------------------------------------------
+_SAFE_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python ci/check_pr_text.py
+"""
+
+_ENV_INTERPOLATED_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "${{ env.PR_TITLE }}" > title.txt
+"""
+
+_RENAMED_ENV_INTERPOLATED_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SUBJECT: ${{ github.event.pull_request.body }}
+        run: echo "${{ env.SUBJECT }}"
+"""
+
+
+def test_the_env_route_is_flagged_too_not_just_the_direct_expression() -> None:
+    """``env:`` is only safe while the run body reads a SHELL variable.
+
+    Putting the title in ``env:`` and then writing ``${{ env.PR_TITLE }}`` in the
+    ``run:`` body re-opens the identical hole: a ``${{ }}`` expression is
+    textual substitution performed BEFORE the shell parses the command, and it
+    does not care which route the text arrived by. So the safe spelling is
+    ``"$PR_TITLE"`` -- a shell variable expansion, which the shell performs on
+    data it already holds -- and the denylist has to cover both.
+
+    This is a hole the guard did not see: it denylisted exactly the two direct
+    ``github.event.pull_request.*`` expressions, and a workflow author who "did
+    it right" by moving the value into ``env:`` could reintroduce the injection
+    in the same breath.
+    """
+    checker_offenders = _interpolation_offenders(yaml.safe_load(_ENV_INTERPOLATED_RUN))
+    assert checker_offenders, (
+        "`${{ env.PR_TITLE }}` in a run: body was not flagged -- the value still "
+        "reaches the shell as code, exactly as the direct expression does"
+    )
+    assert not _interpolation_offenders(yaml.safe_load(_SAFE_RUN)), (
+        "the compliant shape -- env: carrying the value, run: not interpolating "
+        "it -- was flagged, which would make the guard unusable"
+    )
+
+
+def test_the_dangerous_env_names_are_derived_from_the_workflow_not_hardcoded() -> None:
+    """A denylist of two names is defeated by naming the variable something else.
+
+    ``SUBJECT: ${{ github.event.pull_request.body }}`` then
+    ``${{ env.SUBJECT }}`` is the same injection under a different label. The
+    dangerous names are therefore READ from the workflow's own ``env:`` blocks --
+    any key whose value carries PR text -- unioned with the two names this
+    repository's convention uses, so neither a rename nor a deleted ``env:``
+    block can hide it.
+    """
+    offenders = _interpolation_offenders(yaml.safe_load(_RENAMED_ENV_INTERPOLATED_RUN))
+    assert offenders, (
+        "an env key carrying PR text under a different NAME was interpolated "
+        "into a run: body and went unflagged -- the guard is a two-name "
+        "denylist, not a check on the mechanism"
+    )
+
+
+_ORPHAN_ENV_INTERPOLATED_RUN = """\
+name: probe
+on: [push]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ env.PR_BODY }}"
+"""
+
+
+def test_the_convention_floor_catches_what_derivation_cannot_see() -> None:
+    """Derivation alone fails open when the ``env:`` block is gone.
+
+    A step that deletes its ``env:`` mapping but leaves ``${{ env.PR_BODY }}`` in
+    the run body derives NOTHING dangerous -- there is no assignment left to read
+    the PR expression out of -- so a purely derived rule would pass it. That is
+    not hypothetical bookkeeping: the value can be set at job or workflow level,
+    or by a preceding step writing ``$GITHUB_ENV``, none of which this step's own
+    ``env:`` records.
+
+    Written because a neuter measured the gap: removing ``_PR_TEXT_ENV_KEYS``
+    from the union left the whole module GREEN, because every other fixture here
+    happens to declare the key it interpolates. A floor nothing exercises is a
+    claim, not a control.
+    """
+    offenders = _interpolation_offenders(yaml.safe_load(_ORPHAN_ENV_INTERPOLATED_RUN))
+    assert offenders, (
+        "`${{ env.PR_BODY }}` in a run: body went unflagged because no env: "
+        "block in that workflow declares it -- derivation cannot see a value "
+        "that arrives from another level, so the convention names are a floor "
+        "under it, not a redundancy"
+    )
+
+
+def test_nothing_in_this_repository_takes_the_env_route_today() -> None:
+    """The premise, measured rather than assumed.
+
+    This widening closes a hole that is currently EMPTY. Saying so is the point:
+    a guard whose motivating defect is already present is a fix, and one whose
+    motivating defect is not is a preventive control -- and conflating the two
+    is how a "measured" claim gets written about something nobody measured.
+    """
+    offenders = [
+        offender
+        for path, document in _workflows().items()
+        for offender in _interpolation_offenders(document, path.name)
+    ]
+    assert not offenders, (
+        "PR text is interpolated into a run: body via env:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4c. The enumeration -- scope from git, both extensions.
+# ---------------------------------------------------------------------------
+def _fixture_repo(tmp_path: Path, files: dict[str, str], commit: bool = True) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
+    for relative, content in files.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+    if commit:
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+    return root
+
+
+def test_a_yaml_workflow_is_not_invisible_to_the_enumeration(tmp_path: Path) -> None:
+    """``*.yml`` alone is the third repository in this workspace to be bitten.
+
+    GitHub Actions runs ``.yaml`` exactly as it runs ``.yml``. A guard that
+    globs one of them makes an affirmative "no violations" claim about a file it
+    never opened, which is worse than not checking: the claim is what a reviewer
+    reads.
+    """
+    root = _fixture_repo(
+        tmp_path,
+        {
+            ".github/workflows/a.yml": _SAFE_RUN,
+            ".github/workflows/b.yaml": _SAFE_RUN,
+        },
+    )
+    names = {p.name for p in _workflow_paths(root)}
+    assert names == {"a.yml", "b.yaml"}, (
+        f"the enumeration returned {sorted(names)} -- a .yaml workflow is "
+        "invisible to it, and GitHub runs it all the same"
+    )
+
+
+def test_an_untracked_workflow_is_enumerated(tmp_path: Path) -> None:
+    """``--others``: the cheapest moment to catch a violation is before it lands.
+
+    This guard's own stated reason for scanning EVERY workflow is that the
+    cheapest moment to catch a new violation is the commit that introduces it --
+    and at that moment the offending file is typically still untracked.
+    Tracked-only enumeration would arrive one commit too late.
+    """
+    root = _fixture_repo(tmp_path, {".github/workflows/a.yml": _SAFE_RUN})
+    (root / ".github/workflows/new.yml").write_text(
+        _ENV_INTERPOLATED_RUN, encoding="utf-8", newline="\n"
+    )
+    names = {p.name for p in _workflow_paths(root)}
+    assert "new.yml" in names, (
+        f"an untracked workflow was not enumerated ({sorted(names)}) -- the "
+        "violation would be caught only after it was committed"
+    )
+
+
+def test_a_git_ignored_workflow_file_is_not_enumerated(tmp_path: Path) -> None:
+    """``--exclude-standard``: a local scratch file is not this repository's CI.
+
+    Without it the guard's verdict depends on what else happens to be on the
+    developer's disk, which is the same defect the tree gate's directory walk
+    carried.
+    """
+    root = _fixture_repo(
+        tmp_path,
+        {
+            ".github/workflows/a.yml": _SAFE_RUN,
+            ".gitignore": ".github/workflows/scratch.yml\n",
+        },
+    )
+    (root / ".github/workflows/scratch.yml").write_text(
+        _ENV_INTERPOLATED_RUN, encoding="utf-8", newline="\n"
+    )
+    names = {p.name for p in _workflow_paths(root)}
+    assert "scratch.yml" not in names, (
+        f"a git-ignored scratch workflow was enumerated ({sorted(names)}); it is "
+        "not part of this repository's CI and cannot inject anything"
+    )
+
+
+def test_the_enumeration_fails_closed_when_git_cannot_answer(tmp_path: Path) -> None:
+    """Outside a checkout the guard refuses rather than reporting no workflows.
+
+    "Zero workflows found" and "zero violations found" are the same green, and
+    a guard may not reach the second by way of the first.
+    """
+    loose = tmp_path / "not-a-repo"
+    (loose / ".github" / "workflows").mkdir(parents=True)
+    (loose / ".github" / "workflows" / "a.yml").write_text(_SAFE_RUN, encoding="utf-8")
+    with pytest.raises(AssertionError, match="ls-files"):
+        _workflow_paths(loose)
+
+
+def test_this_repositorys_workflows_come_from_git(tmp_path: Path) -> None:
+    """Non-vacuity on the real tree, and the extension set it actually holds."""
+    paths = _workflow_paths(_REPO_ROOT)
+    assert len(paths) >= 3, f"only {len(paths)} workflows enumerated here"
+    assert all(p.suffix in {".yml", ".yaml"} for p in paths), sorted(
+        p.name for p in paths
+    )
 
 
 # ---------------------------------------------------------------------------
