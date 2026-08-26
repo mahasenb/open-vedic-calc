@@ -14,7 +14,17 @@ this module landed it unified the four ``ci/tests/`` guards and **two production
 checkers still enumerated the directory themselves**:
 ``ci/check_workflow_token_scopes.py`` (``workflow_files``) and
 ``ci/check_pytest_collection.py`` (the ``PYTEST_ADDOPTS`` workflow scan). Both
-are migrated now, so all SIX readers take their scope from here.
+are migrated now, so **every** reader takes its scope from here.
+
+That "every" is CHECKED, not counted:
+``ci/tests/test_workflow_scope.py::test_nothing_else_enumerates_the_workflow_directory``
+sweeps the tracked tree and reds if any file but this one enumerates that
+directory itself. An earlier draft of this sentence read "all SIX readers" --
+a hand-typed cardinality nothing recounted, which is the same defect this
+repository had just paid for elsewhere in prose (a "28 names" claim that was 37
+by the time anyone re-measured it). A number in a docstring is an inventory that
+cannot drift, and an inventory that cannot drift cannot detect drift; an
+assertion over the tracked tree can.
 
 What that migration actually changed is worth recording, because both of those
 checkers already read BOTH suffixes -- the half-enumeration defect was never

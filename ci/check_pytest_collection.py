@@ -575,6 +575,24 @@ def workflow_addopts_declarations(root: Path) -> list[str]:
             "files nothing enumerated."
         ]
 
+    if not paths:
+        # The sibling's [EMPTY_SCAN], mirrored. Two guards that migrated to one
+        # scope definition must not disagree about what an EMPTY scope means:
+        # `check_workflow_token_scopes.scan_violations` already refuses this
+        # state, and this arm answered `[]` -- clean -- which is "zero found and
+        # zero violations are the same green" one state along from the one the
+        # git migration closed.
+        #
+        # Reachable through the migration's own `is_file()` filter as well:
+        # every workflow deleted from the worktree while still in the index
+        # drops the enumeration to zero paths.
+        return [
+            f"no workflow files found under {root / '.github' / 'workflows'} "
+            f"(scope derived from git), so this checker examined none. It "
+            f"refuses rather than reporting no {ADDOPTS_ENV} declarations, "
+            f"which would be vacuously true of a scan of nothing."
+        ]
+
     found: list[str] = []
     for path in paths:
         relative = path.relative_to(root).as_posix()

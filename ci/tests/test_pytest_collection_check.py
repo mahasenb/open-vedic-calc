@@ -46,8 +46,13 @@ def _load_checker():
     return module
 
 
-def _tree(tmp_path: pathlib.Path, pyproject_tail: str = "") -> pathlib.Path:
-    """A fixture tree that is a real git CHECKOUT, because the checker's is.
+def _tree(
+    tmp_path: pathlib.Path,
+    pyproject_tail: str = "",
+    with_workflow: bool = True,
+) -> pathlib.Path:
+    """A fixture tree that is a real git CHECKOUT holding at least one workflow,
+    because the checker's is.
 
     It was a bare directory until the workflow arm started taking its scope from
     ``ci/workflow_scope.py``, which asks git and fails closed when git cannot
@@ -58,6 +63,13 @@ def _tree(tmp_path: pathlib.Path, pyproject_tail: str = "") -> pathlib.Path:
     tree — is asserted deliberately, in
     ``test_a_tree_git_cannot_describe_is_REFUSED_not_reported_clean``, rather
     than being the accidental default for every other test in this file.
+
+    The same argument gives it a baseline WORKFLOW. This checker runs as a step
+    inside a workflow, so a checkout holding none is another state that does not
+    occur -- and it is now refused (``[EMPTY_SCAN]``-class, matching the sibling
+    checker), so a fixture without one would be measuring the refusal instead of
+    whatever the test is about. ``with_workflow=False`` asks for that state
+    deliberately, and only the two tests that are about it do.
     """
     (tmp_path / "pyproject.toml").write_text(
         _BASE_PYPROJECT + pyproject_tail, encoding="utf-8", newline="\n"
@@ -68,6 +80,15 @@ def _tree(tmp_path: pathlib.Path, pyproject_tail: str = "") -> pathlib.Path:
         ("config", "user.name", "Test"),
     ):
         subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=True)
+    if with_workflow:
+        directory = tmp_path / ".github" / "workflows"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "baseline.yml").write_text(
+            "name: baseline\non: [push]\npermissions:\n  contents: read\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: pytest tests/ -q\n",
+            encoding="utf-8", newline="\n",
+        )
     return tmp_path
 
 
@@ -572,6 +593,57 @@ def test_a_tracked_workflow_deleted_from_the_worktree_does_not_crash(
     subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True, check=True)
     (root / ".github" / "workflows" / "doomed.yml").unlink()
     assert checker.workflow_addopts_declarations(root) == []
+
+
+def test_a_scope_that_enumerates_NO_workflow_is_REFUSED(
+    tmp_path: pathlib.Path
+) -> None:
+    """Fail closed on a scope that found nothing, not only on one git refused.
+
+    The sibling checker already does: `check_workflow_token_scopes` answers
+    `[EMPTY_SCAN] no workflow files found ...` for this state. This arm did not
+    -- measured, a real checkout holding zero workflow files returned `[]`,
+    i.e. CLEAN, which is "zero found and zero violations are the same green"
+    one state along from the one the git migration closed.
+
+    Reachable through the migration's own `is_file()` filter, too: every
+    workflow deleted from the worktree while still in the index drops the
+    enumeration to zero paths.
+
+    Effectively unreachable in CI -- this checker runs as a step in a workflow
+    that must therefore be in the checkout -- and pre-existing rather than
+    introduced here. It is closed anyway, because the asymmetry sits inside the
+    one claim this change makes: that both checkers now answer the same way.
+    """
+    checker = _load_checker()
+    root = _tree(tmp_path, with_workflow=False)
+    found = checker.workflow_addopts_declarations(root)
+    assert found, (
+        "a checkout enumerating zero workflow files was reported clean; the "
+        "sibling checker refuses the same state with [EMPTY_SCAN]"
+    )
+    assert any("no workflow files" in problem for problem in found), found
+
+
+def test_both_checkers_answer_the_empty_scan_the_same_way(
+    tmp_path: pathlib.Path
+) -> None:
+    """The asymmetry itself, asserted as a property rather than per-checker.
+
+    Two guards that migrated to one scope definition must not disagree about
+    what an empty scope MEANS -- that disagreement is what this round found,
+    and a per-checker test on each would not have shown it.
+    """
+    checker = _load_checker()
+    spec = importlib.util.spec_from_file_location(
+        "_token_scopes_for_symmetry_test", _CI_DIR / "check_workflow_token_scopes.py"
+    )
+    token_scopes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(token_scopes)
+
+    root = _tree(tmp_path, with_workflow=False)
+    assert token_scopes.scan_violations(root), "the sibling stopped failing closed"
+    assert checker.workflow_addopts_declarations(root), "this checker fails open"
 
 
 def test_the_checker_no_longer_lists_the_workflow_directory_itself() -> None:
