@@ -26,7 +26,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _load_workflow_scope():
-    """The ONE definition of "which files are this repo's workflows".
+    """Load ``ci/workflow_scope.py`` -- the shared workflow enumeration.
+
+    SHARED, not universal. Exactly which readers take their scope from it, and
+    which (if any) still enumerate the directory themselves, is recorded in
+    that module's own docstring and deliberately not restated here: a
+    duplicated scoping claim is one that goes stale on the next migration.
 
     By path, not ``from ci import ...``: ``ci/`` has no ``__init__.py`` by
     design, and CI runs the console-script ``pytest``, which does not put the
