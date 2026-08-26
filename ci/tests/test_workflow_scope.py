@@ -22,31 +22,67 @@ is the argument for writing the probes down as test data rather than trusting
 the matcher by eye. A second probe then caught that the resolution had to be
 TRANSITIVE (``d2 = d``) as well.
 
-AND IT READS ARGUMENT POSITION, NOT ONLY RECEIVERS
-==================================================
-The second version still inspected ``ast.Attribute`` receivers alone, so every
-enumerator that takes the directory as an ARGUMENT was invisible to it:
-``os.walk(d)``, ``os.listdir(d)``, ``os.scandir(d)``, ``glob.glob(...)``. All
-four were measured unflagged against a flagged ``iterdir`` control. That gap was
-not theoretical -- ``os.walk`` is already an idiom in this repository, at
-``ci/check_pytest_collection.py``'s config scan -- so it is closed rather than
-recorded as a bound.
+AND IT READS EVERY ARGUMENT POSITION, WHICH TOOK TWO GOES
+=========================================================
+Version two inspected ``ast.Attribute`` receivers alone, so every enumerator
+aiming at the directory through an ARGUMENT was invisible: ``os.walk(d)``,
+``os.listdir(d)``, ``os.scandir(d)``, ``glob.glob(...)``, all four measured
+unflagged against a flagged ``iterdir`` control.
+
+Version three read ``node.args`` -- and was blind to every KEYWORD spelling of
+the same calls. ``os.walk(top=d)``, ``os.listdir(path=d)``,
+``os.scandir(path=d)``, ``glob.glob(pathname=...)``, ``glob.iglob(pathname=...)``
+were 5/5 missed, and an explicit ``ast.Starred`` skip added ``os.walk(*paths)``
+and ``os.walk(**options)`` to that set. Those are ordinary Python, not evasions.
+
+So version four stopped enumerating positions altogether: it reads EVERY child
+of the call except the callee, via ``ast.iter_child_nodes``. That yields
+positionals, ``Starred`` nodes and ``keyword`` nodes (including the ``arg=None``
+one carrying ``**kwargs``), so a spelling nobody here thought of is covered by
+construction. Reading positions is what was wrong twice; the fix was to stop.
 
 KNOWN BOUNDS, stated rather than claimed away
 =============================================
-* The enumerator sets are ENUMERATED, so a call this module has not heard of
-  (``pathlib.Path.walk`` on 3.12+, ``os.fwalk``, a third-party helper) is
-  missed. That is the shape of bound the sibling guards record too, and the
-  answer is the same: add the name when the idiom arrives.
-* A name is resolved by SOURCE ORDER within a file. A directory reached through
-  a function return, a class attribute, or another module is not resolved.
-* The marker is the literal path component, so a directory built from a
+Corrected in both directions after review: the previous version of this block
+listed several bounds and NOT ONE of them covered the keyword gap above --
+``walk`` WAS in the enumerator set, the name DID resolve, and it WAS bound from
+a marker expression, so the block read as though that case were handled. An
+understated bound is a wrong bound.
+
+(The first draft of this very sentence said the old block "listed three bounds".
+Measured against the commit: five. A hand-typed count, wrong, inside the
+paragraph correcting hand-typed claims -- so the number is gone rather than
+fixed, which is the treatment every other one in this change got.)
+
+What is COVERED: any of the named enumerators, reached as a receiver or through
+any argument position (positional, keyword, ``*args``, ``**kwargs``), aimed at
+an expression that either spells the marker or mentions a name transitively
+bound to one, nested to any depth.
+
+What is NOT:
+
+* **The enumerator NAMES are a list.** A call this module has not heard of --
+  ``pathlib.Path.walk`` (3.12+), ``os.fwalk``, ``os.listdir``'s
+  ``scandir``-alikes in a third-party helper -- is missed. Same shape of bound
+  the sibling guards record, same answer: add the name when the idiom arrives.
+  This is the bound that matters most, and no test can close it.
+* **A splat this module cannot read.** ``os.walk(*paths)`` where ``paths`` is
+  built elsewhere, returned by a function, or read from a module is missed. It
+  is MISSED rather than refused, and that asymmetry with the neutrality gate's
+  collector -- which refuses every unprovable receiver -- is deliberate: that
+  guard's subject is one file where every ``.run(...)`` should reach subprocess,
+  while this one sweeps the whole tree, where an unprovable ``os.walk`` argument
+  is ordinary code.
+* **Names resolve in SOURCE ORDER within one file.** A directory reached through
+  a function return, a class attribute, a parameter default, or another module
+  is not resolved.
+* **The marker is the literal path component.** A directory built from a
   variable that never spells ``workflows`` is missed.
-* Scope is the tracked tree, and the call SITE. It cannot prove what a path
-  holds at run time.
-* It over-flags by design: any name bound from a marker-mentioning expression
-  taints every enumerator it reaches. The near-miss probes bound that, and the
-  trade is deliberate -- a false positive costs one deliberate exemption, a
+* **Scope is the tracked tree, read as a call SITE.** It cannot prove what a
+  path holds at run time.
+* **It over-flags by design**: any name bound from a marker-mentioning
+  expression taints every enumerator it reaches. The near-miss probes bound
+  that, and the trade is deliberate -- a false positive costs one exemption, a
   false negative costs a second enumeration nobody notices.
 """
 from __future__ import annotations
@@ -112,7 +148,7 @@ def workflow_directory_enumerations(source: str) -> list[tuple[int, str]]:
     """
     tree = ast.parse(source)
 
-    def refers_to_marked_dir(node: ast.expr, bound: set[str]) -> bool:
+    def refers_to_marked_dir(node: ast.AST, bound: set[str]) -> bool:
         """Does this expression denote the workflow directory?
 
         Two ways: its source text names the marker, or it mentions a name
@@ -181,10 +217,18 @@ def workflow_directory_enumerations(source: str) -> list[tuple[int, str]]:
             found.append((node.lineno, f"{receiver}.{name}(...)"))
             continue
 
+        # EVERY child of the call except the callee -- not `node.args`, and not
+        # `node.args` plus some list of positions. Reading positions is what put
+        # this matcher wrong twice: receivers only (blind to `os.walk(d)`), then
+        # positional args only (blind to all five `os.walk(top=d)` spellings and
+        # to both splats). `iter_child_nodes` yields positionals, `Starred`
+        # nodes, and `keyword` nodes including the `arg=None` one that carries
+        # `**kwargs`, so a spelling nobody here thought of is covered by
+        # construction rather than by another round of enumeration.
         if name in _ARGUMENT_ENUMERATORS and any(
-            refers_to_marked_dir(argument, bound)
-            for argument in node.args
-            if not isinstance(argument, ast.Starred)
+            refers_to_marked_dir(child, bound)
+            for child in ast.iter_child_nodes(node)
+            if child is not func
         ):
             rendered = ast.get_source_segment(source, node) or f"{name}(...)"
             found.append((node.lineno, rendered))
@@ -319,15 +363,72 @@ def test_the_detector_sees_an_ARGUMENT_POSITION_enumeration() -> None:
         )
 
 
+def test_the_detector_sees_a_KEYWORD_position_enumeration() -> None:
+    """Every one of these enumerators names its path parameter, and a matcher
+    reading ``node.args`` alone is blind to all of them.
+
+    ``os.walk(top=d)``, ``os.listdir(path=d)``, ``os.scandir(path=d)``,
+    ``glob.glob(pathname=...)``, ``glob.iglob(pathname=...)`` -- the spellings
+    are ordinary Python, not evasions, and 5/5 were measured unflagged against
+    the same bound directory the positional forms already caught.
+
+    A SPLAT is covered too when its contents can be proved: ``os.walk(*paths)``
+    and ``os.walk(**options)`` where the splatted expression mentions the marker
+    or a bound name. What cannot be proved is missed rather than refused, and
+    KNOWN BOUNDS says so.
+    """
+    marked = 'd = root / ".github" / "workflows"\n'
+    probes = {
+        "os.walk(top=)": "import os\n" + marked + "list(os.walk(top=d))\n",
+        "os.listdir(path=)": "import os\n" + marked + "os.listdir(path=d)\n",
+        "os.scandir(path=)": "import os\n" + marked + "list(os.scandir(path=d))\n",
+        "glob.glob(pathname=)": (
+            "import glob\n" + marked + "glob.glob(pathname=str(d))\n"
+        ),
+        "glob.iglob(pathname=)": (
+            "import glob\n" + marked + "list(glob.iglob(pathname=str(d)))\n"
+        ),
+        "keyword with an inline marker": (
+            'import os\nos.listdir(path=root / ".github" / "workflows")\n'
+        ),
+        "a starred positional": "import os\n" + marked
+        + "paths = [d]\nfor p in paths:\n    list(os.walk(*paths))\n",
+        "a double-starred keyword": "import os\n" + marked
+        + "options = {'top': d}\nlist(os.walk(**options))\n",
+    }
+    for label, source in probes.items():
+        assert workflow_directory_enumerations(source), (
+            f"the detector is blind to {label} aimed at the workflow "
+            f"directory:\n{source}"
+        )
+
+
 def test_the_detector_does_not_fire_on_an_unrelated_listing() -> None:
     """The near-miss half. A guard that flags everything is not a guard, and
-    this repository already runs ``glob``/``rglob`` over other directories --
-    ``tests/`` in the Swiss-job guard, the tree in the neutrality gate's
-    announced fallback."""
+    this repository really does run these enumerators over other directories --
+    ``(root / "tests").glob(...)`` in the Swiss-job guard, ``root.rglob("*")``
+    in the neutrality gate's fallback, ``os.walk(root)`` in the collection
+    checker's config scan. Each is the same CALL as a flagged probe above and
+    differs only in what it is aimed at, which is what makes this the real
+    bound on the widening: the marker test, not an exemption by name.
+    """
     for label, source in (
         ("a tests/ glob", 'for p in (root / "tests").glob("**/*.py"):\n    pass\n'),
         ("an os.walk", "import os\nfor a, b, c in os.walk(root):\n    pass\n"),
         ("a bare rglob", 'list(root.rglob("*"))\n'),
+        # The keyword and splat spellings must stay bounded by the marker too --
+        # widening the POSITIONS read must not widen WHAT COUNTS as the
+        # directory.
+        ("os.walk(top=) at the repo root", "import os\nlist(os.walk(top=root))\n"),
+        ("os.listdir(path=) elsewhere", 'import os\nos.listdir(path=root / "tests")\n'),
+        (
+            "a splat of an unrelated list",
+            "import os\npaths = [root, other]\nlist(os.walk(*paths))\n",
+        ),
+        (
+            "a double-star of unrelated options",
+            "import os\noptions = {'top': root}\nlist(os.walk(**options))\n",
+        ),
         (
             "the word in a comment only",
             "# workflows are enumerated elsewhere\nlist(other.iterdir())\n",
