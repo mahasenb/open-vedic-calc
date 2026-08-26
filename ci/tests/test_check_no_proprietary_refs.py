@@ -627,18 +627,24 @@ class _RunCallCollector(ast.NodeVisitor):
 
     ENUMERATE BINDINGS, THEN FAIL CLOSED ON WHAT IS LEFT
     ====================================================
-    Enumerating binding constructs can never be finished -- that is the lesson
-    the sibling records in its KNOWN BOUNDS, where ``r = subprocess.run`` is
-    named as reachable-but-unclosed. So this collector does BOTH halves:
+    Enumerating binding constructs can never be finished -- ``getattr`` and
+    ``importlib.import_module`` are reachable by construction and stay open in
+    the sibling, which is a tree-wide guard and cannot refuse every unprovable
+    receiver without drowning in ordinary code. So this collector does BOTH
+    halves:
 
     * **Resolve** the constructs it models: ``import subprocess``,
       ``import subprocess as sp``, ``from subprocess import run``,
       ``from subprocess import run as r``, ``from subprocess import *``,
       ``sp = subprocess`` (transitively), and ``r = subprocess.run``. That last
-      one is the form the sibling records in its own KNOWN BOUNDS as measured
-      and deliberately left open; it is closed HERE, for this one file. The
-      sibling's tree-wide collector still carries it, and saying so is the
-      point -- two guards claiming different reaches must not be read as one.
+      one was, when this collector was written, the form the sibling recorded
+      in its KNOWN BOUNDS as measured and deliberately left open; it is now
+      resolved in BOTH guards (the sibling's
+      ``_RESOLVED_BINDING_FORMS`` enumerates it). What still separates the two
+      is the REFUSAL half below, which is available here because this guard's
+      subject is one file whose every ``.run(...)`` should reach subprocess,
+      and is not available tree-wide where ``obj.run(...)`` is ordinary code.
+      Two guards claiming different reaches must not be read as one.
     * **Refuse** everything it cannot prove innocent. ANY call whose callee is
       an attribute named ``run`` and whose receiver is not a name resolved to
       the subprocess module is recorded as UNRESOLVED, and the arm below fails
