@@ -19,7 +19,35 @@ RECEIVER, so it caught ``(root / ".github" / "workflows").iterdir()`` and missed
 cannot see the defect it was written for is worse than no guard, because it
 reports clean. Its own offender probe caught that before it was committed, which
 is the argument for writing the probes down as test data rather than trusting
-the matcher by eye.
+the matcher by eye. A second probe then caught that the resolution had to be
+TRANSITIVE (``d2 = d``) as well.
+
+AND IT READS ARGUMENT POSITION, NOT ONLY RECEIVERS
+==================================================
+The second version still inspected ``ast.Attribute`` receivers alone, so every
+enumerator that takes the directory as an ARGUMENT was invisible to it:
+``os.walk(d)``, ``os.listdir(d)``, ``os.scandir(d)``, ``glob.glob(...)``. All
+four were measured unflagged against a flagged ``iterdir`` control. That gap was
+not theoretical -- ``os.walk`` is already an idiom in this repository, at
+``ci/check_pytest_collection.py``'s config scan -- so it is closed rather than
+recorded as a bound.
+
+KNOWN BOUNDS, stated rather than claimed away
+=============================================
+* The enumerator sets are ENUMERATED, so a call this module has not heard of
+  (``pathlib.Path.walk`` on 3.12+, ``os.fwalk``, a third-party helper) is
+  missed. That is the shape of bound the sibling guards record too, and the
+  answer is the same: add the name when the idiom arrives.
+* A name is resolved by SOURCE ORDER within a file. A directory reached through
+  a function return, a class attribute, or another module is not resolved.
+* The marker is the literal path component, so a directory built from a
+  variable that never spells ``workflows`` is missed.
+* Scope is the tracked tree, and the call SITE. It cannot prove what a path
+  holds at run time.
+* It over-flags by design: any name bound from a marker-mentioning expression
+  taints every enumerator it reaches. The near-miss probes bound that, and the
+  trade is deliberate -- a false positive costs one deliberate exemption, a
+  false negative costs a second enumeration nobody notices.
 """
 from __future__ import annotations
 
@@ -31,13 +59,30 @@ import subprocess
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _SCOPE_MODULE = _REPO_ROOT / "ci" / "workflow_scope.py"
 
-# The calls that enumerate a directory. `os.walk` is deliberately absent: it is
-# the neutrality gate's announced fallback for a tree git cannot describe, and
-# `ci/check_pytest_collection.py` uses it for the CONFIG scan, neither of which
-# is a workflow enumeration.
-_ENUMERATORS = frozenset({"iterdir", "glob", "rglob"})
+# Enumerators that take the directory as their RECEIVER: `d.iterdir()`.
+_RECEIVER_ENUMERATORS = frozenset({"iterdir", "glob", "rglob"})
+
+# Enumerators that take it as an ARGUMENT: `os.walk(d)`. A matcher reading only
+# receivers is blind to every one of these -- measured, all four were invisible
+# while an `iterdir` control flagged. Not hypothetical: `os.walk` is already an
+# idiom in this repository (`ci/check_pytest_collection.py` walks the tree with
+# it for the CONFIG scan), so it is a shape a contributor would reach for.
+#
+# Matched on the FUNCTION NAME alone, so `from os import walk` is covered as
+# well as `os.walk`. `glob` appears in both sets on purpose: `p.glob(pat)` aims
+# through the receiver and `glob.glob(path)` through the argument.
+_ARGUMENT_ENUMERATORS = frozenset({"walk", "listdir", "scandir", "glob", "iglob"})
 
 # The path component that makes a directory THE workflow directory.
+#
+# NOTE ON WHAT IS *NOT* EXCLUDED. An earlier version of this block justified
+# leaving `os.walk` out by calling it "the neutrality gate's announced
+# fallback". That was wrong on the facts, and the correction is the point:
+# measured, `os.walk` appears ZERO times in `ci/check_no_proprietary_refs.py` --
+# its fallback is `root.rglob("*")`, and `rglob` is in the receiver set above.
+# What keeps that call and `ci/check_pytest_collection.py`'s `os.walk(root)` out
+# of the results is the MARKER test, not an exemption: both walk the repository
+# root, which is not the workflow directory. No enumerator is excluded by name.
 _MARKER = "workflows"
 
 
@@ -67,8 +112,25 @@ def workflow_directory_enumerations(source: str) -> list[tuple[int, str]]:
     """
     tree = ast.parse(source)
 
-    # Every `name = <expr>` in the file, as (name, source of expr).
-    assignments: list[tuple[str, str]] = []
+    def refers_to_marked_dir(node: ast.expr, bound: set[str]) -> bool:
+        """Does this expression denote the workflow directory?
+
+        Two ways: its source text names the marker, or it mentions a name
+        already proved to hold it. The second is checked over the whole
+        SUBTREE, not by exact match, so ``str(directory / "*.yml")`` counts --
+        the argument-position spellings nest the directory inside another call
+        far more often than the receiver ones do.
+        """
+        segment = ast.get_source_segment(source, node) or ""
+        if _MARKER in segment:
+            return True
+        return any(
+            isinstance(inner, ast.Name) and inner.id in bound
+            for inner in ast.walk(node)
+        )
+
+    # Every `name = <expr>` in the file, as (name, assigned expression).
+    assignments: list[tuple[str, ast.expr]] = []
     for node in ast.walk(tree):
         targets: list[ast.expr] = []
         value: ast.expr | None = None
@@ -78,22 +140,21 @@ def workflow_directory_enumerations(source: str) -> list[tuple[int, str]]:
             targets, value = [node.target], node.value
         if value is None:
             continue
-        segment = ast.get_source_segment(source, value) or ""
         for target in targets:
             if isinstance(target, ast.Name):
-                assignments.append((target.id, segment))
+                assignments.append((target.id, value))
 
     # Fixed point, so a REBINDING resolves: `d = <...workflows...>` then
-    # `d2 = d`. A single pass sees only the first, and the probe below caught
+    # `d2 = d`. A single pass sees only the first, and a probe below caught
     # exactly that -- the same transitive gap the subprocess collector had.
     bound: set[str] = set()
     changed = True
     while changed:
         changed = False
-        for name, segment in assignments:
+        for name, value in assignments:
             if name in bound:
                 continue
-            if _MARKER in segment or segment.strip() in bound:
+            if refers_to_marked_dir(value, bound):
                 bound.add(name)
                 changed = True
 
@@ -102,13 +163,31 @@ def workflow_directory_enumerations(source: str) -> list[tuple[int, str]]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr not in _ENUMERATORS:
+        # The called NAME, however it is reached: `d.iterdir`, `os.walk`, or a
+        # bare `walk` imported with `from os import walk`.
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        else:
             continue
-        receiver = ast.get_source_segment(source, func.value) or ""
-        is_marked = _MARKER in receiver
-        is_bound = isinstance(func.value, ast.Name) and func.value.id in bound
-        if is_marked or is_bound:
-            found.append((node.lineno, f"{receiver}.{func.attr}(...)"))
+
+        if (
+            name in _RECEIVER_ENUMERATORS
+            and isinstance(func, ast.Attribute)
+            and refers_to_marked_dir(func.value, bound)
+        ):
+            receiver = ast.get_source_segment(source, func.value) or ""
+            found.append((node.lineno, f"{receiver}.{name}(...)"))
+            continue
+
+        if name in _ARGUMENT_ENUMERATORS and any(
+            refers_to_marked_dir(argument, bound)
+            for argument in node.args
+            if not isinstance(argument, ast.Starred)
+        ):
+            rendered = ast.get_source_segment(source, node) or f"{name}(...)"
+            found.append((node.lineno, rendered))
     return found
 
 
@@ -179,15 +258,64 @@ def test_the_detector_sees_the_shape_that_actually_shipped() -> None:
         "d2 = d\n"
         "list(d2.rglob('*'))\n"
     )
+    # The receiver's own text names no marker; only walking its subtree for a
+    # bound name finds it.
+    nested_receiver = (
+        'd = root / ".github" / "workflows"\n'
+        'for p in (d / "nested").iterdir():\n'
+        "    pass\n"
+    )
 
     for label, source in (
         ("the shape that shipped", shipped),
         ("the inline spelling", inline),
         ("a glob rather than iterdir", globbed),
         ("a rebinding", rebound),
+        ("a nested receiver", nested_receiver),
     ):
         assert workflow_directory_enumerations(source), (
             f"the detector no longer recognises {label}:\n{source}"
+        )
+
+
+def test_the_detector_sees_an_ARGUMENT_POSITION_enumeration() -> None:
+    """Not every enumerator takes the directory as its receiver.
+
+    ``os.walk(directory)``, ``os.listdir(directory)``, ``os.scandir(directory)``
+    and ``glob.glob(...)`` aim at the directory through an ARGUMENT, so a
+    matcher that only inspects ``ast.Attribute`` receivers is blind to all four.
+    That is not hypothetical here: ``os.walk`` is already an idiom in this
+    repository (``ci/check_pytest_collection.py`` walks the tree with it for the
+    CONFIG scan), so the shape is one a contributor would reach for.
+    """
+    marked = 'd = root / ".github" / "workflows"\n'
+    probes = {
+        "os.walk": "import os\n" + marked + "for a, b, c in os.walk(d):\n    pass\n",
+        "os.listdir": 'import os\nos.listdir(root / ".github" / "workflows")\n',
+        "os.scandir": "import os\n" + marked + "list(os.scandir(d))\n",
+        "glob.glob": (
+            "import glob\n"
+            'glob.glob(str(root / ".github" / "workflows" / "*.yml"))\n'
+        ),
+        "bare walk": "from os import walk\n" + marked + "list(walk(d))\n",
+        # NESTED: the argument's own source text says nothing about workflows --
+        # only walking its subtree for a name already proved to hold the
+        # directory finds it. Argument-position spellings nest far more often
+        # than receiver ones (`str(...)`, `os.fspath(...)`, a join), so this is
+        # the ordinary case rather than an exotic one. Caught by the neuter
+        # sweep: reducing the resolution to an exact-name test left every other
+        # probe here green, so this generality was untested until now.
+        "os.walk of a nested bound name": (
+            "import os\n" + marked + "list(os.walk(str(d)))\n"
+        ),
+        "glob of a nested bound name": (
+            "import glob\n" + marked + 'glob.glob(str(d / "*.yml"))\n'
+        ),
+    }
+    for label, source in probes.items():
+        assert workflow_directory_enumerations(source), (
+            f"the detector is blind to {label} aimed at the workflow "
+            f"directory:\n{source}"
         )
 
 
