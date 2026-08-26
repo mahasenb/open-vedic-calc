@@ -32,8 +32,9 @@ that wraps across two comment lines is still one anchor.
     scope, found by parsing the target's AST -- never by grepping it.
 
 **Form B -- declared-module bullet anchor**
-    A class docstring that opens a block with ``named by function in <path>:``
-    or ``named by symbol in <path>:``, followed by bullets of the shape::
+    A **class or module** docstring that opens a block with ``named by function
+    in <path>:`` or ``named by symbol in <path>:``, followed by bullets of the
+    shape::
 
         - ``symbol`` -- what this test covers about it
         - ``enclosing`` -> ``callee`` -- what this test covers about the pair
@@ -46,6 +47,12 @@ that wraps across two comment lines is still one anchor.
     too: ``callee`` must actually be called somewhere inside ``enclosing``'s
     body.  Both halves resolving separately is not enough -- the arrow is a
     claim about where the callee lives.
+
+    A scope declares exactly ONE subject module.  Two declarations in one
+    docstring are a hard failure rather than "take the first", because the
+    second would be silently ignored and every anchor written for it would
+    resolve against the wrong module or, worse, coincidentally against the
+    right-looking one.  Anchors into a second module are spelled in Form A.
 
 **Form C -- declared-module member anchor**
     Inside a class carrying a Form B declaration, a test method whose docstring
@@ -67,6 +74,25 @@ that wraps across two comment lines is still one anchor.
     makes PR #71 a standing convention instead of a snapshot: a fresh
     line-number citation reds here on the commit that introduces it.
 
+**Form F -- declared-module comment anchor**  ``# <symbol>: ...``
+    A comment line opening with an identifier and a colon, inside a file whose
+    MODULE docstring carries the Form B header.  ``<symbol>`` resolves at module
+    scope of the declared path, exactly as Form C's does.
+
+    This form was exclusion #2 below until the header was lifted to module
+    scope.  The anchors were always genuine; what they lacked was an owner a
+    machine could read.  A comment has no enclosing AST node to inherit one
+    from -- which is the whole reason a *module*-scope declaration was the
+    missing piece, and the reason Form C remains class-scoped: a method
+    docstring already has an owning scope and does not need the file to speak
+    for it.
+
+    The declaration is what removes the guesswork rather than tolerating it: the
+    selector runs ONLY inside files that opted in, so a ``word:`` comment opener
+    there IS a citation by construction, and the cost -- prose in that shape can
+    no longer be written in a declared file -- is stated in each declaring
+    docstring rather than discovered by whoever reds the build.
+
 WHAT THIS GUARD DELIBERATELY DOES NOT READ
 ==========================================
 
@@ -80,19 +106,24 @@ measurement, not a shrug.
     reading them means guessing.  They are covered indirectly: nearly all of
     them name a symbol that also appears in a Form A/B/C anchor.
 
-2.  **Bare ``# <ident>: ...`` comment anchors with no module declaration.**
-    ``tests/test_compat_deep.py`` carries a block of these (``# _vasya: `ga ==
-    gb` same-group tier``); how many is deliberately not written here, because a
-    hand-typed count in prose is the same defect class as a hand-typed line
-    number.  They are genuine anchors, but the module they resolve
-    against is stated only in English in the file's module docstring, so
-    selecting them means selecting every ``word:`` clause in every comment in
-    the tree.  Measured over the corpus, that selector also returns
-    ``Additive:``, ``False:``, ``Measured:`` and ``navamsa:`` -- none of them
-    citations.  Bringing this file's anchors under the guard needs a
-    machine-readable module declaration (the Form B header, lifted to module
-    scope); that is a deliberate convention change, reported upward rather than
-    smuggled in here.
+2.  **Bare ``# <ident>: ...`` comment anchors in a file that declares NO module.**
+    This exclusion used to be unconditional, and the reason was real: the module
+    such an anchor resolves against was stated only in English, so selecting
+    them meant selecting every ``word:`` clause in every comment in the tree,
+    and measured over the corpus that selector also returns ``Additive:``,
+    ``False:``, ``Measured:`` and ``navamsa:`` -- none of them citations.
+
+    The convention change that removes the guesswork has now landed: the Form B
+    header is admissible in a MODULE docstring, and a file that opts in has its
+    comment anchors read as Form F above.  ``tests/test_compat_deep.py`` and
+    ``tests/test_panchanga_fail_closed.py``, the two files this exclusion named,
+    both declare.  How many anchors they carry is deliberately not written here
+    -- a hand-typed count in prose is the same defect class as a hand-typed line
+    number; the floor test prints the live number on every run.
+
+    What remains excluded is a comment anchor in an UNDECLARED file, and it
+    stays excluded on the same evidence as before.  The fix is one line of
+    declaration, not a widened selector.
 
 3.  **Code string literals.**  ``ci/tests/test_pytest_collection_check.py``
     holds synthetic pytest ``--deselect`` argv fixtures spelled as node-ids, one
@@ -127,9 +158,14 @@ corpus.  "Every anchor resolves" is vacuously true of zero anchors, and a regex
 that silently stops matching is exactly how a guard dies quietly.  The floors
 are therefore asserted PER FORM rather than only in total, so one form going
 dark cannot hide behind the others -- and PER CHUNK KIND as well, because the
-corpus feeds only Forms A and D: Forms B and C re-parse ASTs directly, so half
-the corpus can vanish while their counts sit untouched.  That is measured, not
+corpus feeds Forms A, D and F: Forms B and C re-parse ASTs directly, so half the
+corpus can vanish while their counts sit untouched.  That is measured, not
 supposed; the constant block below carries the numbers.
+
+Form F needs one floor MORE than its own count, and it is the one floor here set
+at equality: the module-scope declarations that admit it.  Deleting both would
+leave the declared-block total at 7, still clearing its floor of 6, while Form F
+quietly found nothing to read.
 
 Extend this file, never weaken it.
 """
@@ -152,15 +188,23 @@ _SCANNED_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".toml"})
 _HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".toml"})
 
 # ---------------------------------------------------------------------------
-# Non-vacuity floors.  MEASURED at this file's final state, not guessed -- 96
-# tracked files (87 .py, 6 .yml/.toml, 3 .md) scanned into 2393 prose chunks
-# (1454 comment, 936 docstring, 3 markdown), yielding Form A 23, Form B 7
-# declared modules / 34 bullet anchors (1 of them a containment pair), Form C
-# 46, Form D 1: 104 anchors in total.  That is a DATED measurement, not a
+# Non-vacuity floors.  MEASURED at this file's final state, not guessed --
+# re-measured 2026-08-26 when the Form B header was lifted to module scope: 99
+# tracked files scanned into 2577 prose chunks (1543 comment, 1031 docstring, 3
+# markdown), yielding Form A 28, Form B 9 declared blocks (7 on a class, 2 on a
+# module) / 34 bullet anchors (1 of them a containment pair), Form C 46, Form D
+# 1, Form F 17: 126 anchors in total.  That is a DATED measurement, not a
 # standing claim; the live counts are printed by the floor test on every run and
 # are the only numbers to trust.  The floors sit a little below the measurement
 # so ordinary refactoring does not red the guard, and are asserted PER FORM so
 # one form going dark cannot hide behind the others.
+#
+# `_MIN_MODULE_DECLARATIONS` is the one floor set at EQUALITY with what the tree
+# holds, deliberately: the two module-scope declarations are what admit Form F
+# at all, so deleting either must red here rather than quietly returning those
+# anchors to the unguarded state they spent PR #74 in.  `_MIN_DECLARED_MODULES`
+# stays where it was and does not absorb the two -- a floor that counts both
+# kinds together would go on passing with the module-scope half gone.
 #
 # EVERY number above is floored below.  That is deliberate: an unfloored number
 # in this comment would be a hand-typed figure that nothing recounts -- the
@@ -185,7 +229,9 @@ _MIN_DECLARED_MODULES = 6
 _MIN_BULLET_ANCHORS = 28
 _MIN_MEMBER_ANCHORS = 38
 _MIN_SHA_PINNED_CITATIONS = 1
-_MIN_TOTAL_ANCHORS = 88
+_MIN_MODULE_DECLARATIONS = 2
+_MIN_COMMENT_ANCHORS = 14
+_MIN_TOTAL_ANCHORS = 105
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +565,14 @@ _BULLET = re.compile(
     re.M,
 )
 _MEMBER_ANCHOR = re.compile(r"\A[ \t]*(?P<symbol>[A-Za-z_]\w*):[ \t]")
+# Form F.  Deliberately the same grammar as Form C, matched per LINE (`re.M`)
+# rather than at the start of one docstring, because a comment anchor opens its
+# own comment line and a run of them is extracted as one chunk.  It is applied
+# only inside files carrying a MODULE-scope declaration -- unqualified, the same
+# selector returns `Additive:`, `False:`, `Measured:` and `navamsa:` across the
+# tree, which is exactly why this form was excluded before the declaration
+# existed.
+_COMMENT_ANCHOR = re.compile(r"^[ \t]*(?P<symbol>[A-Za-z_]\w*):[ \t]", re.M)
 _FILE_LINE = re.compile(
     r"(?<![\w/.-])(?P<path>[\w./-]+\.(?:py|md|ya?ml|toml)):(?P<line>\d+)(?!\d)"
 )
@@ -550,6 +604,13 @@ class MemberAnchor:
 
 
 @dataclass(frozen=True)
+class CommentAnchor:
+    where: str
+    module_ref: str
+    symbol: str
+
+
+@dataclass(frozen=True)
 class ShaPinnedCitation:
     where: str
     sha_candidates: tuple[str, ...]
@@ -573,27 +634,105 @@ def collect_node_id_anchors(chunks: list[Chunk]) -> list[NodeIdAnchor]:
     return anchors
 
 
+def sole_declaration(docstring: str, where: str) -> str | None:
+    """The one module-ref a docstring declares, or ``None`` -- never a guess.
+
+    TWO declarations in one docstring is a hard failure rather than "take the
+    first": the second would be silently ignored, and every anchor the author
+    wrote for it would resolve against the wrong module or, worse, resolve
+    against the right-looking one by coincidence.  A scope declares one subject.
+    """
+    found = _DECLARATION.findall(docstring)
+    if not found:
+        return None
+    if len(found) > 1:
+        raise Unresolved(
+            f"{where}: {len(found)} module declarations in one docstring "
+            f"({found}). A scope declares exactly one subject module -- the "
+            f"extras would be silently ignored. Split the block, or cite the "
+            f"others in Form A (`<path>.py::<symbol>`)."
+        )
+    return found[0]
+
+
 def collect_declared_blocks(
     tracked: tuple[str, ...]
-) -> tuple[list[BulletAnchor], list[MemberAnchor], list[tuple[str, str, str]]]:
-    """Form B bullets, Form C member anchors, and the declarations themselves."""
+) -> tuple[
+    list[BulletAnchor],
+    list[MemberAnchor],
+    list[tuple[str, str, str]],
+    dict[str, str],
+]:
+    """The tracked-file driver for :func:`collect_declared_blocks_from_source`."""
+    return collect_declared_blocks_from_source(
+        {
+            relative: (REPO_ROOT / relative).read_text(encoding="utf-8")
+            for relative in tracked
+            if relative.endswith(".py")
+        }
+    )
+
+
+def collect_declared_blocks_from_source(
+    sources: dict[str, str]
+) -> tuple[
+    list[BulletAnchor],
+    list[MemberAnchor],
+    list[tuple[str, str, str]],
+    dict[str, str],
+]:
+    """Form B bullets, Form C member anchors, the declarations, and the modules.
+
+    Driven from ``{path: source}`` rather than from disk, for the same reason
+    :func:`python_chunks` takes a source string: the grammar can then be
+    exercised on a synthetic module, and a control that has to commit a file to
+    the tree in order to test a rejection is a control nobody writes.
+
+    The declaration header is read at TWO scopes.  On a class it declares that
+    class's subject, as it always has.  On a MODULE it declares the whole file's
+    subject, which is what gives a bare ``# <symbol>:`` comment a machine-readable
+    owner -- a comment has no enclosing AST node to inherit one from, and that
+    absence is the entire reason Form F could not be read before.
+
+    Bullets are collected from either kind of docstring, because the grammar is
+    the same grammar; member anchors stay a CLASS-scope form, because a method
+    docstring already has an owning scope and does not need the file to speak
+    for it.
+    """
     bullets: list[BulletAnchor] = []
     members: list[MemberAnchor] = []
     declarations: list[tuple[str, str, str]] = []
-    for relative in tracked:
-        if not relative.endswith(".py"):
-            continue
-        tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+    module_declarations: dict[str, str] = {}
+    for relative, source in sources.items():
+        tree = ast.parse(source)
+
+        module_doc = ast.get_docstring(tree, clean=False)
+        if module_doc:
+            module_ref = sole_declaration(module_doc, f"{relative} (module docstring)")
+            if module_ref:
+                module_declarations[relative] = module_ref
+                declarations.append((relative, "<module>", module_ref))
+                for bullet in _BULLET.finditer(module_doc):
+                    bullets.append(
+                        BulletAnchor(
+                            where=f"{relative}:1 (module docstring)",
+                            module_ref=module_ref,
+                            symbol=bullet.group("symbol"),
+                            callee=bullet.group("callee"),
+                        )
+                    )
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             docstring = ast.get_docstring(node, clean=False)
             if not docstring:
                 continue
-            declaration = _DECLARATION.search(docstring)
-            if not declaration:
+            module_ref = sole_declaration(
+                docstring, f"{relative}:{node.lineno} ({node.name} docstring)"
+            )
+            if not module_ref:
                 continue
-            module_ref = declaration.group("module")
             owner = f"{relative}::{node.name}"
             declarations.append((relative, node.name, module_ref))
             for bullet in _BULLET.finditer(docstring):
@@ -622,7 +761,35 @@ def collect_declared_blocks(
                         owner=owner,
                     )
                 )
-    return bullets, members, declarations
+    return bullets, members, declarations, module_declarations
+
+
+def collect_comment_anchors(
+    chunks: list[Chunk], module_declarations: dict[str, str]
+) -> list[CommentAnchor]:
+    """Form F: ``# <symbol>: ...`` inside a file that declared its subject module.
+
+    Scoped to declared files, and to COMMENT chunks specifically.  A docstring in
+    a declared file is left alone: its ``<symbol>:`` openers are Form C's
+    business, and reading them here would count the same anchor twice under two
+    forms, inflating a floor that is supposed to detect a form going dark.
+    """
+    anchors: list[CommentAnchor] = []
+    for chunk in chunks:
+        if chunk.kind != "comment":
+            continue
+        module_ref = module_declarations.get(chunk.path)
+        if module_ref is None:
+            continue
+        for match in _COMMENT_ANCHOR.finditer(chunk.text):
+            anchors.append(
+                CommentAnchor(
+                    where=chunk.where(match.start()),
+                    module_ref=module_ref,
+                    symbol=match.group("symbol"),
+                )
+            )
+    return anchors
 
 
 def collect_file_line_citations(chunks: list[Chunk]) -> list[ShaPinnedCitation]:
@@ -717,7 +884,10 @@ def build_inventory():
     tracked = _tracked_paths()
     chunks, scanned = corpus()
     node_ids = collect_node_id_anchors(chunks)
-    bullets, members, declarations = collect_declared_blocks(tracked)
+    bullets, members, declarations, module_declarations = collect_declared_blocks(
+        tracked
+    )
+    comment_anchors = collect_comment_anchors(chunks, module_declarations)
     file_lines = collect_file_line_citations(chunks)
     return {
         "tracked": tracked,
@@ -727,6 +897,8 @@ def build_inventory():
         "bullets": bullets,
         "members": members,
         "declarations": declarations,
+        "module_declarations": module_declarations,
+        "comment_anchors": comment_anchors,
         "file_lines": file_lines,
     }
 
@@ -751,10 +923,12 @@ def test_the_anchor_inventory_meets_its_floor():
         "  of which docstring": by_kind["docstring"],
         "  of which markdown": by_kind["markdown"],
         "Form A node-id anchors": len(inventory["node_ids"]),
-        "Form B declared modules": len(inventory["declarations"]),
+        "Form B declared blocks": len(inventory["declarations"]),
+        "  of which module-scope": len(inventory["module_declarations"]),
         "Form B bullet anchors": len(inventory["bullets"]),
         "Form C member anchors": len(inventory["members"]),
         "Form D file:line citations": len(inventory["file_lines"]),
+        "Form F comment anchors": len(inventory["comment_anchors"]),
     }
     print("\nStable-anchor inventory:")
     for label, value in counts.items():
@@ -765,6 +939,7 @@ def test_the_anchor_inventory_meets_its_floor():
         + len(inventory["bullets"])
         + len(inventory["members"])
         + len(inventory["file_lines"])
+        + len(inventory["comment_anchors"])
     )
     print(f"  {'TOTAL anchors checked':34} {total}")
 
@@ -815,6 +990,19 @@ def test_the_anchor_inventory_meets_its_floor():
     assert len(inventory["file_lines"]) >= _MIN_SHA_PINNED_CITATIONS, (
         f"Form D found {len(inventory['file_lines'])} SHA-pinned citations, floor "
         f"{_MIN_SHA_PINNED_CITATIONS} -- the residue check has nothing to check"
+    )
+    # Floored SEPARATELY from the declared-block total above: a combined count
+    # of 9 keeps clearing a floor of 6 with both module-scope declarations gone,
+    # and Form F would then silently find nothing to check.
+    assert len(inventory["module_declarations"]) >= _MIN_MODULE_DECLARATIONS, (
+        f"{len(inventory['module_declarations'])} module-scope declarations, "
+        f"floor {_MIN_MODULE_DECLARATIONS} -- without them Form F has no file "
+        f"to read, and the comment anchors those files carry go back to being "
+        f"unguarded prose"
+    )
+    assert len(inventory["comment_anchors"]) >= _MIN_COMMENT_ANCHORS, (
+        f"Form F found {len(inventory['comment_anchors'])} comment anchors, "
+        f"floor {_MIN_COMMENT_ANCHORS} -- the comment form has gone dark"
     )
     assert total >= _MIN_TOTAL_ANCHORS, (
         f"{total} anchors in total, floor {_MIN_TOTAL_ANCHORS}"
@@ -873,6 +1061,60 @@ def test_every_declared_module_member_anchor_resolves():
                 f"(declared module {member.module_ref}) -- {exc}"
             )
     assert not failures, "Rotted member anchors:\n" + "\n".join(failures)
+
+
+def test_every_declared_module_comment_anchor_resolves():
+    """Form F: ``# <symbol>: ...`` in a file whose MODULE declares its subject.
+
+    This form was the guard's documented exclusion #2 until the Form B header
+    was lifted to module scope.  The anchors were always genuine -- the reason
+    they could not be read is that the module they resolve against was stated
+    only in English, so selecting them meant selecting every ``word:`` clause in
+    every comment in the tree, which measurably returns ``Additive:``,
+    ``False:``, ``Measured:`` and ``navamsa:`` among the real ones.
+
+    A machine-readable declaration removes the guesswork instead of tolerating
+    it: the selector now runs ONLY inside files that opted in by naming their
+    subject module, and inside those files a ``word:`` comment opener IS a
+    citation by construction.
+    """
+    inventory = build_inventory()
+    anchors = inventory["comment_anchors"]
+    assert anchors, "Form F found nothing -- see the floor test"
+    failures: list[str] = []
+    for anchor in anchors:
+        try:
+            relative = resolve_module_ref(anchor.module_ref, inventory["tracked"])
+            resolve_module_level_symbol(relative, anchor.symbol)
+        except Unresolved as exc:
+            failures.append(
+                f"{anchor.where}: comment anchor `{anchor.symbol}:` "
+                f"(module declared as {anchor.module_ref}) -- {exc}"
+            )
+    assert not failures, "Rotted comment anchors:\n" + "\n".join(failures)
+
+
+def test_the_two_files_that_carried_unguarded_comment_anchors_are_declared():
+    """The premise of the form above, named rather than left implicit.
+
+    Form F is vacuous unless some file actually declares its module.  These two
+    are the files the exclusion named, and the count is DERIVED from each file's
+    own comments rather than written down here -- a hand-typed anchor count in
+    prose is the same defect class as a hand-typed line number.
+    """
+    inventory = build_inventory()
+    declared = inventory["module_declarations"]
+    for path, expected_module in (
+        ("tests/test_compat_deep.py", "bphs_core/compat.py"),
+        ("tests/test_panchanga_fail_closed.py", "bphs_core/lagna_shuddhi.py"),
+    ):
+        assert declared.get(path) == expected_module, (
+            f"{path} does not declare {expected_module} at module scope "
+            f"(declared: {declared.get(path)!r}), so its comment anchors are "
+            f"outside the guarded inventory again"
+        )
+        found = [a for a in inventory["comment_anchors"] if a.where.startswith(path)]
+        assert found, f"{path} declares a module but yielded no comment anchors"
 
 
 def test_every_sha_pinned_citation_resolves_at_its_sha():
@@ -1129,6 +1371,98 @@ def test_the_pin_target_verifier_refuses_a_pin_that_no_longer_describes_its_targ
         assert "BLANK" in str(exc), str(exc)
     else:
         raise AssertionError("a pin citing a blank line was accepted")
+
+
+_SYNTHETIC_DECLARED_MODULE = '''\
+"""A module that declares its subject, named by function in bphs_core/chart.py:
+
+  - ``ChartSnapshot`` -- a bullet read from a MODULE docstring, not a class one.
+"""
+
+# ChartSnapshot: a comment anchor, owned by the module declaration above.
+# _jd_from_person: a second one.
+VALUE = 1
+'''
+
+_SYNTHETIC_UNDECLARED_MODULE = '''\
+"""A module that declares nothing at all."""
+
+# Measured: this is prose, and must NOT be read as a citation.
+VALUE = 1
+'''
+
+
+def test_a_module_scope_declaration_owns_its_files_comment_anchors():
+    """Form F's mechanism, exercised on a synthetic file rather than only the tree.
+
+    Two halves, and the second is the one that matters: the identical comment in
+    an UNDECLARED file must stay invisible.  Reading it there is the
+    false-positive storm the exclusion was written to avoid, and ``Measured:``
+    is one of the four openers actually measured over this corpus.
+    """
+    _bullets, _members, _declarations, declared = collect_declared_blocks_from_source(
+        {"declared.py": _SYNTHETIC_DECLARED_MODULE}
+    )
+    assert declared == {"declared.py": "bphs_core/chart.py"}
+
+    chunks = python_chunks("declared.py", _SYNTHETIC_DECLARED_MODULE)
+    anchors = collect_comment_anchors(chunks, declared)
+    assert sorted(a.symbol for a in anchors) == ["ChartSnapshot", "_jd_from_person"], (
+        f"the declared file's comment anchors were not read: {anchors}"
+    )
+
+    undeclared_chunks = python_chunks("plain.py", _SYNTHETIC_UNDECLARED_MODULE)
+    assert collect_comment_anchors(undeclared_chunks, declared) == [], (
+        "a `Word: ...` comment in a file that declares nothing was read as a "
+        "citation -- that is the false-positive storm exclusion #2 exists to "
+        "prevent"
+    )
+
+
+def test_a_module_scope_declaration_also_carries_its_bullets():
+    """The Form B grammar is the same grammar wherever the header sits."""
+    bullets, _members, _declarations, _declared = collect_declared_blocks_from_source(
+        {"declared.py": _SYNTHETIC_DECLARED_MODULE}
+    )
+    assert [b.symbol for b in bullets] == ["ChartSnapshot"], (
+        f"a bullet under a module-scope declaration was not read: {bullets}"
+    )
+    assert all(b.module_ref == "bphs_core/chart.py" for b in bullets)
+
+
+def test_two_declarations_in_one_docstring_are_refused_not_silently_halved():
+    """"Take the first" would discard a whole block of anchors without a word."""
+    doc = (
+        "named by function in bphs_core/chart.py:\n"
+        "\nand also named by function in bphs_core/compat.py:\n"
+    )
+    assert sole_declaration("named by function in bphs_core/chart.py:", "x") == (
+        "bphs_core/chart.py"
+    )
+    assert sole_declaration("no declaration here", "x") is None
+    try:
+        sole_declaration(doc, "synthetic.py (module docstring)")
+    except Unresolved as exc:
+        assert "2 module declarations" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "two declarations in one docstring were accepted, so the second "
+            "module's anchors would resolve against the first"
+        )
+
+
+def test_the_comment_anchor_resolver_refuses_a_symbol_that_moved():
+    """Neuter control for Form F: the anchor must actually be checked.
+
+    A form that collects anchors but resolves nothing is a counter, not a guard.
+    """
+    resolve_module_level_symbol("bphs_core/compat.py", "_vasya")  # the control passes
+    try:
+        resolve_module_level_symbol("bphs_core/compat.py", "_vasya_renamed")
+    except Unresolved as exc:
+        assert "_vasya_renamed" in str(exc), str(exc)
+    else:
+        raise AssertionError("a renamed comment-anchor target resolved anyway")
 
 
 def test_the_declaration_and_bullet_grammar_reject_prose_that_is_not_a_citation():
