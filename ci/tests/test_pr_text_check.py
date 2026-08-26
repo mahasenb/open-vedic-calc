@@ -29,11 +29,18 @@ WHAT THIS GUARD PINS
    env route today, so this widening is a preventive control, not a fix.
 
    Both routes match on a NORMALISED expression body, because
-   ``${{ github['event']['pull_request']['title'] }}`` and
-   ``${{ GITHUB.EVENT.PULL_REQUEST.TITLE }}`` substitute exactly what the plain
-   dotted spelling does — measured, all three spellings were unflagged before
-   normalisation, and the direct half of that gap predates the env route. See
-   ``_normalise_expression`` for the one bound this leaves (a computed index).
+   ``${{ github['event']['pull_request']['title'] }}``,
+   ``${{ GITHUB.EVENT.PULL_REQUEST.TITLE }}`` and
+   ``${{ github.event.pull_request . title }}`` all substitute exactly what the
+   plain dotted spelling does — measured, every one of those spellings was
+   unflagged before normalisation, and the direct half of that gap predates the
+   env route. The WHITESPACE half was settled from GitHub's engine rather than
+   guessed: the runner's ``LexicalAnalyzer.TryGetNextToken`` skips
+   ``Char.IsWhiteSpace`` unconditionally before reading the character that
+   decides a token's type, so a space around a member-access dot never becomes a
+   token and the spaced spelling is legal. See ``_normalise_expression`` for the
+   two bounds this leaves (a computed index, and collapse inside string
+   literals).
 
 The workflow scope comes from ``git ls-files``, both ``.yml`` and ``.yaml``, and
 fails closed outside a checkout — see ``_workflow_paths``.
@@ -383,22 +390,47 @@ _EXPRESSION = re.compile(r"\$\{\{(?P<body>.*?)\}\}", re.S)
 # `ctx['name']` / `ctx["name"]`, with optional inner whitespace.
 _INDEX = re.compile(r"\[\s*(['\"])(?P<name>[A-Za-z_][\w-]*)\1\s*\]")
 
+# Whitespace touching a member-access punctuator. NOT a style allowance this
+# guard is granting -- it is what the engine does, established from the runner's
+# own source rather than guessed at. See `_normalise_expression`.
+_MEMBER_WHITESPACE = re.compile(r"\s*([.\[\]])\s*")
+
 
 def _normalise_expression(body: str) -> str:
     """One expression body, rewritten to canonical dotted lower case.
 
-    GitHub accepts index and property notation interchangeably and resolves
-    property names case-insensitively, so all of these substitute the identical
-    value::
+    GitHub accepts index and property notation interchangeably, resolves
+    property names case-insensitively, and DISCARDS WHITESPACE, so all of these
+    substitute the identical value::
 
         ${{ github.event.pull_request.title }}
         ${{ github['event']['pull_request']['title'] }}
         ${{ GITHUB.event['pull_request'].TITLE }}
+        ${{ github.event.pull_request . title }}
+        ${{ github ['event'] ['pull_request'] ['title'] }}
 
-    Matching the lower-case dotted spelling alone therefore reads the other two
-    as clean -- measured, all three were unflagged. Normalising first means ONE
-    rule covers every spelling, instead of a denylist growing an entry per
-    variant and still missing the next one.
+    Matching the lower-case dotted spelling alone therefore reads every one of
+    the others as clean -- measured, all of them were unflagged. Normalising
+    first means ONE rule covers every spelling, instead of a denylist growing an
+    entry per variant and still missing the next one.
+
+    WHY THE WHITESPACE RULE IS NOT A GUESS. Whether ``env . PR_TITLE`` even
+    evaluates is a question about GitHub's expression grammar, and the answer was
+    read out of the engine rather than assumed either way. The runner's
+    ``LexicalAnalyzer.TryGetNextToken`` (``actions/runner``, the C#
+    ``Expressions2`` library that evaluates ``${{ }}``) advances past
+    ``Char.IsWhiteSpace`` unconditionally before reading the character that
+    decides a token's type, so whitespace never becomes a token at all and
+    ``env . PR_TITLE`` produces the IDENTICAL token stream to ``env.PR_TITLE``.
+    GitHub's own TypeScript reimplementation for editors, ``actions/languageservices``,
+    agrees: its ``Lexer.lex`` has a ``// Ignore whitespace`` arm that emits
+    nothing for space, tab, CR and LF, and its ``.`` arm keys off the PREVIOUS
+    TOKEN rather than the previous character -- so an intervening space cannot
+    change the token it produces. The spaced spelling is therefore legal and
+    substitutes exactly what the unspaced one does, which makes it an evasion to
+    close rather than a bound to record. ``re.S`` on ``_EXPRESSION`` means a body
+    may span lines, and a newline is whitespace to the same lexer arm, so the
+    pattern uses ``\\s`` and not a literal space.
 
     KNOWN BOUND, stated rather than claimed away: only a *literal* index is
     resolved. A computed one -- ``env[format('PR_{0}', 'TITLE')]``, or an index
@@ -406,8 +438,17 @@ def _normalise_expression(body: str) -> str:
     evaluating GitHub's expression language, which is the modelling this guard
     deliberately does not do. That shape is exotic in a `run:` body and is
     recorded here rather than silently assumed away.
+
+    SECOND KNOWN BOUND, introduced by the whitespace collapse: it is applied to
+    the whole expression body, STRING LITERALS INCLUDED, so
+    ``${{ format('a . b') }}`` normalises to ``format('a.b')``. That can only
+    ever make this guard flag MORE, never less, and telling a literal from an
+    operator means parsing the expression language -- the modelling above. Over-
+    flagging is the safe direction here and is bounded by
+    ``test_normalisation_does_not_manufacture_offenders``.
     """
-    return _INDEX.sub(lambda m: "." + m.group("name"), body).lower()
+    collapsed = _MEMBER_WHITESPACE.sub(r"\1", body)
+    return _INDEX.sub(lambda m: "." + m.group("name"), collapsed).lower()
 
 
 def _env_keys_carrying_pr_text(document: dict) -> set[str]:
@@ -1018,3 +1059,157 @@ def test_this_repositorys_workflows_come_from_git(tmp_path: Path) -> None:
 def test_self_test_passes_and_discriminates() -> None:
     checker = _load_checker()
     assert checker.self_test() == 0
+
+
+# ---------------------------------------------------------------------------
+# Whitespace in a member expression. GitHub's lexer discards it before any token
+# exists, so `env . PR_TITLE` and `env.PR_TITLE` are the SAME expression.
+# ---------------------------------------------------------------------------
+def test_a_spaced_dot_in_the_env_route_is_flagged() -> None:
+    """``${{ env . PR_TITLE }}`` substitutes exactly what the unspaced form does.
+
+    Measured unflagged before this normalisation. The question it turned on was
+    not a style preference but a grammar fact -- does GitHub's evaluator even
+    ACCEPT whitespace around a member-access dot? -- and it was settled from the
+    engine rather than guessed: the runner's ``LexicalAnalyzer.TryGetNextToken``
+    skips ``Char.IsWhiteSpace`` unconditionally before reading the character
+    that decides the token type, so whitespace never becomes a token and the two
+    spellings produce an identical stream. Legal, therefore an evasion to close,
+    not a bound to record.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "${{ env . PR_TITLE }}"
+"""
+    )
+    offenders = _interpolation_offenders(document, "wf")
+    assert offenders, (
+        "`${{ env . PR_TITLE }}` was not flagged -- the value is still "
+        "substituted into the script before the shell parses it, and a space "
+        "around the dot is invisible to the evaluator"
+    )
+
+
+def test_a_spaced_dot_in_the_direct_route_is_flagged() -> None:
+    """The same hole on the other route, which the env fix alone would leave open.
+
+    The two routes are checked by different code paths -- one compares against
+    ``_PR_TEXT_EXPRESSIONS``, the other against a derived env-key set -- so
+    closing one says nothing about the other. Both read the normalised body,
+    which is why one normalisation fixes both.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - run: echo "${{ github.event.pull_request . title }}"
+"""
+    )
+    assert _interpolation_offenders(document, "wf"), (
+        "a spaced dot in the direct route went unflagged"
+    )
+
+
+def test_a_spaced_index_is_flagged() -> None:
+    """Space BEFORE the bracket, which index normalisation alone did not reach.
+
+    ``_INDEX`` already tolerated whitespace INSIDE the brackets, so this looked
+    covered. It was not: the space between ``github`` and ``[`` survived the
+    substitution and left ``github .event.pull_request.title``, which matches
+    nothing. A guard that half-normalises reads as a guard that normalises.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - run: echo "${{ github ['event'] ['pull_request'] ['title'] }}"
+"""
+    )
+    assert _interpolation_offenders(document, "wf"), (
+        "a spaced index expression went unflagged"
+    )
+
+
+def test_a_newline_inside_the_expression_is_flagged() -> None:
+    r"""A newline is whitespace to the same lexer arm, and ``_EXPRESSION`` is re.S.
+
+    A ``run:`` body is frequently a YAML block scalar, so an expression really
+    can span lines. Collapsing on a literal space rather than ``\s`` would
+    close the shape a reviewer thinks of and leave the one a formatter produces.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "${{ env
+          .
+          PR_BODY }}"
+"""
+    )
+    assert _interpolation_offenders(document, "wf"), (
+        "an expression split across lines went unflagged"
+    )
+
+
+def test_the_derivation_reads_a_spaced_env_VALUE_too() -> None:
+    """Normalisation must run on the ASSIGNMENT as well as on the run body.
+
+    ``SUBJECT: ${{ github.event.pull_request . body }}`` forwards PR text just
+    as the unspaced spelling does. A derivation blind to the spacing never
+    registers ``SUBJECT`` as dangerous, so the perfectly ordinary-looking
+    ``${{ env.SUBJECT }}`` downstream is then read as clean -- the hole moving
+    one step upstream rather than closing.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - env:
+          SUBJECT: ${{ github.event.pull_request . body }}
+        run: echo "${{ env.SUBJECT }}"
+"""
+    )
+    assert "SUBJECT" in _env_keys_carrying_pr_text(document), (
+        "a spaced assignment did not register the forwarded key"
+    )
+    assert _interpolation_offenders(document, "wf"), (
+        "the spaced assignment left ${{ env.SUBJECT }} unflagged downstream"
+    )
+
+
+def test_whitespace_collapse_does_not_manufacture_offenders() -> None:
+    """The don't-over-flag control for the collapse specifically.
+
+    Collapsing whitespace around ``.``/``[``/``]`` is applied to the whole
+    expression body, so it must not turn benign expressions into matches. The
+    stated bound is that it also collapses inside string literals, which can
+    only ever flag MORE -- this pins that "more" is still zero for the shapes
+    this repository actually writes.
+    """
+    document = yaml.safe_load(
+        """
+jobs:
+  j:
+    steps:
+      - run: >-
+          echo "${{ matrix['python'] }} ${{ env.PR_TITLE_LENGTH }}
+          ${{ steps.build.outputs.title }} ${{ runner . os }} $PR_TITLE"
+"""
+    )
+    assert _interpolation_offenders(document, "wf") == [], (
+        "normalisation invented a match: an unrelated context index, a longer "
+        "env name that merely starts with a dangerous one, an outputs field "
+        "called `title`, and a shell variable are all benign"
+    )
