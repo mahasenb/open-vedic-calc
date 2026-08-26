@@ -28,6 +28,28 @@ _SYNTHETIC_TOKEN = "zzznotarealbrand"
 _LEGACY_WORD = "".join(["a", "s", "t", "r", "o"])
 
 
+def _gate_constant(name: str) -> str:
+    """A string constant read out of the gate's SOURCE, never re-typed here.
+
+    Parsed rather than imported: this runs at collection time, and the gate
+    builds its pattern list from the environment at import. A hand-copied
+    duplicate of the pin would be one more thing that can silently disagree with
+    the code it claims to describe.
+    """
+    tree = ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            assert isinstance(node.value, ast.Constant), f"{name} is not a literal"
+            return node.value.value
+    raise AssertionError(f"{name} is not defined at module scope of {_GATE_PATH.name}")
+
+
+# The output-encoding pin, taken from the gate itself.
+_PIN = _gate_constant("_LOG_OUTPUT_ENCODING_PIN")
+
+
 def _load_gate_module():
     """Import ci/check_no_proprietary_refs.py fresh as a module (it's a standalone
     script, not a package member), so each test can control its env before import-time
@@ -636,26 +658,162 @@ class TestSubprocessDecodingIsPinnedStructurally:
     # still put its decode on the reader thread.
     _TEXT_MODE_KEYWORDS = frozenset({"encoding", "errors", "text", "universal_newlines"})
 
-    def test_git_access_is_funnelled_through_the_pinned_helper_or_runs_in_bytes_mode(
-        self,
-    ):
-        """Every git call is pinned by the helper, or is shape (A): bytes mode.
+    # ------------------------------------------------------------------
+    # TWO ORTHOGONAL PROPERTIES, ENFORCED SEPARATELY. Neither implies the other,
+    # and an earlier revision of this class asserted only the first while
+    # claiming to be "stricter" than the rule it replaced. Measured: adding a
+    # second commit-message read outside the pinned helper, in bytes mode --
+    #     subprocess.run(["git", "log", "--format=%B", "-1"],
+    #                    capture_output=True, check=False, cwd=cwd)
+    # -- was rc 1 RED at 71cbf45 and rc 0 GREEN under that revision. The two
+    # exemptions admit DISJOINT sets, so replacing one with the other traded a
+    # control away rather than tightening it.
+    #
+    #   NEAR end of the pipe -- where the bytes are DECODED. Bytes mode, so the
+    #   decode happens in this process and its failure is catchable, instead of
+    #   on a reader thread that dies and hands back stdout=None, returncode=0.
+    #
+    #   FAR end of the pipe -- what git EMITS. `-c i18n.logOutputEncoding=UTF-8`,
+    #   because a contributor carrying `i18n.logOutputEncoding=ISO-8859-1` makes
+    #   `git log` emit latin-1 (measured; CLAUDE.md says the read is UTF-8 at
+    #   BOTH ends). Bytes mode says nothing about this: the caller faithfully
+    #   decodes latin-1 bytes as UTF-8 and refuses, or worse, mis-scans.
+    #
+    # Arm A below enforces the near end on EVERY call, helper included. Arms B
+    # and C enforce the far end: B funnels anything that could carry a commit
+    # message through the helper, C proves the helper still carries the pin.
+    # ------------------------------------------------------------------
 
-        The escape hatch used to be "names an explicit ``encoding=``", and that
-        was the wrong exemption -- the sibling guard
-        ``ci/tests/test_subprocess_decoding.py`` measures precisely why: an
-        explicit encoding does NOT remove the hazard, it only changes which
-        codec dies on the reader thread, so ``encoding="cp1252"`` would have
-        satisfied the old rule while decoding at a codepage's discretion.
+    # Git subcommands a stray call may invoke, each mapped to the reason it needs
+    # no output-encoding pin. An ALLOWLIST, not a denylist: a subcommand nobody
+    # has reasoned about is refused, so the next git call added to this gate has
+    # to justify itself rather than inherit an exemption by looking harmless.
+    # (`git log`, `show`, `whatchanged`, `rev-list --format` and friends all
+    # render commit messages; enumerating the dangerous ones correctly is the bet
+    # an allowlist does not have to make.)
+    _PIN_FREE_SUBCOMMANDS = {
+        "ls-files": (
+            "emits index PATHS, which carry no commit-message encoding header "
+            "and which i18n.logOutputEncoding does not touch. -z makes the "
+            "records exact and the caller decodes them in-process."
+        ),
+    }
 
-        The exemption is now BYTES MODE, which is stricter: no text-mode keyword
-        at all, so the decode happens in this process where its failure is
-        catchable. ``_git_scan_paths`` is the call that needs it -- a filename is
-        not necessarily valid UTF-8, and the listing is decoded (and refused) in
-        the gate's own frame. ``_run_git_log`` stays the one route for COMMIT
-        MESSAGES specifically, because those additionally need
-        ``i18n.logOutputEncoding`` pinned at git's end, which a file listing has
-        no equivalent of.
+    # The one function permitted to make a stray call. Without this a THIRD git
+    # call could inherit `_git_scan_paths`'s exemption simply by sitting beside
+    # it, and the previous revision's floor -- "at least one stray exists" --
+    # was satisfied by any number of unpinned calls.
+    _PIN_FREE_CALLERS = frozenset({"_git_scan_paths"})
+
+    # KNOWN BOUNDS, stated rather than claimed away, per this repo's convention
+    # (`ci/tests/test_subprocess_decoding.py`'s KNOWN BOUNDS block and
+    # `ci/check_pytest_collection.py`'s `Known bound:` note):
+    #   * argv must be a LITERAL list. A call assembling its argv elsewhere is
+    #     refused, not analysed -- this guard cannot read what it cannot see.
+    #   * scope is `subprocess.run` in this one file. A git call made through
+    #     another module, `Popen`, or `os.system` is outside it; the sibling
+    #     `ci/tests/test_subprocess_decoding.py` polices the tracked tree for the
+    #     decoding half.
+    #   * it reads the call SITE. It cannot prove what `git` does at run time.
+
+    @staticmethod
+    def _literal_argv(call: ast.Call) -> list[str | None] | None:
+        """The call's argv as tokens, with ``None`` for any element it cannot read.
+
+        A module-level string constant is RESOLVED rather than refused -- the
+        helper spells its pin as ``_LOG_OUTPUT_ENCODING_PIN``, which is the
+        single-source-of-truth shape this repo wants, and a reader that only
+        understood inline literals would push the pin back into a duplicated
+        string. A ``*args`` splat becomes ``None``: unreadable, not fatal, since
+        what matters is whether anything unreadable sits BEFORE the subcommand.
+
+        Returns ``None`` only when the first argument is not a list at all.
+        """
+        if not call.args or not isinstance(call.args[0], ast.List):
+            return None
+        tokens: list[str | None] = []
+        for element in call.args[0].elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                tokens.append(element.value)
+            elif isinstance(element, ast.Name):
+                try:
+                    tokens.append(_gate_constant(element.id))
+                except AssertionError:
+                    tokens.append(None)
+            else:  # a Starred splat, an f-string, a call -- unreadable here
+                tokens.append(None)
+        return tokens
+
+    @classmethod
+    def _git_subcommand(cls, call: ast.Call) -> str | None:
+        """The subcommand a git argv invokes, skipping ``-c k=v`` pairs.
+
+        ``None`` means "this guard cannot tell", which its caller treats as a
+        refusal rather than as permission.
+        """
+        argv = cls._literal_argv(call)
+        if not argv or argv[0] != "git":
+            return None
+        index = 1
+        while index < len(argv):
+            token = argv[index]
+            if token is None:
+                return None  # unreadable before the subcommand: refuse
+            if not token.startswith("-"):
+                return token
+            index += 2 if token == "-c" else 1
+        return None
+
+    @staticmethod
+    def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
+        owner: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in _subprocess_run_calls(node):
+                owner.setdefault(id(call), node.name)
+        return owner
+
+    # --- Arm A: the NEAR end, on every call including the helper's own --------
+    def test_every_subprocess_call_in_the_gate_runs_in_bytes_mode(self):
+        """No call here may decode where the failure is invisible. No exceptions.
+
+        Universal on purpose: the helper is not exempt from the property it
+        exists to provide, and an explicit ``encoding=`` does not earn an
+        exemption either -- the sibling guard measures that an explicit encoding
+        does not remove the hazard, it only changes which codec dies on the
+        reader thread.
+        """
+        tree = ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
+        calls = _subprocess_run_calls(tree)
+        assert len(calls) >= 2, (
+            f"only {len(calls)} subprocess.run call(s) found -- this gate makes "
+            "two (the commit-message read and the file listing), so the scan is "
+            "broken or a call site has gone"
+        )
+        offenders = [
+            f"line {call.lineno}: {sorted({kw.arg for kw in call.keywords} & self._TEXT_MODE_KEYWORDS)}"
+            for call in calls
+            if {kw.arg for kw in call.keywords} & self._TEXT_MODE_KEYWORDS
+        ]
+        assert not offenders, (
+            "subprocess.run call(s) running in TEXT mode:\n  "
+            + "\n  ".join(offenders)
+            + f"\nAny of {sorted(self._TEXT_MODE_KEYWORDS)} selects text mode, "
+            "which moves the decode onto a reader thread where a "
+            "UnicodeDecodeError kills the thread and the caller is handed "
+            "stdout=None with returncode=0. Read bytes and decode in-process."
+        )
+
+    # --- Arm B: the FAR end, funnelled ---------------------------------------
+    def test_only_a_registered_pin_free_git_call_may_bypass_the_pinned_helper(self):
+        """Anything that could carry a COMMIT MESSAGE goes through the helper.
+
+        Bytes mode does not make a stray ``git log`` safe: it fixes the decode,
+        not what git emitted. This arm is what the previous revision gave up,
+        and it is restored as an allowlist so the exemption cannot spread by
+        proximity -- both the subcommand and the calling function must be
+        registered.
         """
         tree = ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
         helper = next(
@@ -666,35 +824,79 @@ class TestSubprocessDecodingIsPinnedStructurally:
             None,
         )
         assert helper is not None, "the pinned git helper _run_git_log is gone"
-
         inside = {id(call) for call in _subprocess_run_calls(helper)}
         assert inside, "_run_git_log no longer runs git"
 
-        strays = [
-            call
-            for call in _subprocess_run_calls(tree)
-            if id(call) not in inside
-        ]
-        # Floor: the exemption below is vacuously satisfied by no stray calls,
-        # and this gate does carry one.
-        assert strays, (
-            "no subprocess.run call outside _run_git_log -- if the file-listing "
-            "call has gone, the scan set is no longer asked of git"
+        owner = self._enclosing_functions(tree)
+        strays = [c for c in _subprocess_run_calls(tree) if id(c) not in inside]
+
+        # Floor, and it names WHICH call rather than merely counting: "at least
+        # one stray exists" was satisfiable by any number of unpinned calls.
+        stray_owners = {owner.get(id(call), "<module scope>") for call in strays}
+        assert stray_owners == set(self._PIN_FREE_CALLERS), (
+            f"the set of functions making an unpinned git call is "
+            f"{sorted(stray_owners)}, registered is "
+            f"{sorted(self._PIN_FREE_CALLERS)}. Every entry must be deliberate: "
+            f"a new one needs a reason recorded in _PIN_FREE_SUBCOMMANDS, and a "
+            f"missing one means the file listing no longer asks git."
         )
-        in_text_mode = [
-            call.lineno
-            for call in strays
-            if {kw.arg for kw in call.keywords} & self._TEXT_MODE_KEYWORDS
-        ]
-        assert not in_text_mode, (
-            f"subprocess.run call(s) at line(s) {in_text_mode} bypass "
-            f"_run_git_log AND run in text mode. Any of "
-            f"{sorted(self._TEXT_MODE_KEYWORDS)} selects text mode, which moves "
-            f"the decode onto a reader thread where a UnicodeDecodeError kills "
-            f"the thread and hands back stdout=None with returncode=0. Either "
-            f"route the call through the pinned helper, or read bytes and decode "
-            f"in this process."
+
+        refused = []
+        for call in strays:
+            where = f"line {call.lineno} in {owner.get(id(call), '<module scope>')}()"
+            subcommand = self._git_subcommand(call)
+            if subcommand is None:
+                refused.append(
+                    f"{where}: argv is not a literal git command list, so this "
+                    f"guard cannot read which subcommand runs. Spell it out."
+                )
+            elif subcommand not in self._PIN_FREE_SUBCOMMANDS:
+                refused.append(
+                    f"{where}: `git {subcommand}` bypasses _run_git_log, so it "
+                    f"runs WITHOUT `-c {_PIN!s}`. Bytes mode does not help here "
+                    f"-- it fixes how the bytes are decoded, not which encoding "
+                    f"git emitted them in. Registered pin-free subcommands: "
+                    f"{sorted(self._PIN_FREE_SUBCOMMANDS)}."
+                )
+        assert not refused, "Unpinned git access:\n  " + "\n  ".join(refused)
+
+    # --- Arm C: the pin the funnel funnels TOWARDS ---------------------------
+    def test_the_pinned_helper_actually_carries_the_output_encoding_pin(self):
+        """Arms A and B are worth nothing if the helper stopped pinning.
+
+        Structural, and complementary to
+        ``test_the_log_output_encoding_is_pinned_at_the_producer``, which drives
+        ``_get_commit_messages`` under a monkeypatched ``subprocess.run`` and so
+        only ever observes calls made THROUGH this helper.
+        """
+        tree = ast.parse(_GATE_PATH.read_text(encoding="utf-8"))
+        helper = next(
+            (
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_run_git_log"
+            ),
+            None,
         )
+        assert helper is not None, "the pinned git helper _run_git_log is gone"
+        calls = _subprocess_run_calls(helper)
+        assert calls, "_run_git_log no longer runs git"
+        for call in calls:
+            argv = self._literal_argv(call)
+            assert argv is not None, (
+                f"line {call.lineno}: the helper's argv is not a literal list, "
+                "so the pin cannot be read at the call site"
+            )
+            assert "-c" in argv and _PIN in argv, (
+                f"line {call.lineno}: the helper's argv {argv} does not carry "
+                f"`-c {_PIN}`. Without it git emits whatever the contributor's "
+                f"own i18n.logOutputEncoding says -- measured, ISO-8859-1 config "
+                f"yields latin-1 bytes -- and the strict UTF-8 decode downstream "
+                f"then refuses (or a non-ASCII token silently stops matching)."
+            )
+            assert argv.index("-c") < argv.index("log"), (
+                f"line {call.lineno}: `-c` must precede the `log` subcommand to "
+                f"be a git option rather than an argument to it: {argv}"
+            )
 
 
 # A synthetic brand token spelled with a non-ASCII character. Obviously fake, as
