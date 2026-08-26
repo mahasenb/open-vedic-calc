@@ -14,15 +14,15 @@ member's Rahu/Yama/Gulika exclusions and Tara/Chandra Bala, then ranking by
 the minimum individual score so no weak member can be averaged away.
 """
 import logging
-from datetime import datetime, date as date_type
-from typing import Literal
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
 
 import swisseph as swe
 from jhora.panchanga import drik
 
 from . import utils
-from .muhurat import compute_muhurat_for_day, _TARA_BALA_LEVELS
+from .muhurat import _TARA_BALA_LEVELS, compute_muhurat_for_day
 
 logger = logging.getLogger(__name__)
 

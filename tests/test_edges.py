@@ -12,12 +12,10 @@ Each section is mapped to the §3.4 capability it exercises:
 All fixtures use synthetic data only — no real personal data.
 """
 import datetime
-from types import SimpleNamespace
 
 import pytest
 
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
-
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
@@ -360,7 +358,6 @@ class TestSpecialPointsEdges:
     def test_upapada_12th_lord_absent_returns_12th_sign(self):
         """get_upapada: 12th lord missing from rasi_chart → sign = the 12th sign itself."""
         from bphs_core.special_points import get_upapada
-        from bphs_core import utils
         # Aries lagna: 12th sign = Pisces, lord Jupiter — not in rasi_chart.
         snap = self._sp_snapshot(
             {"Sun": _planet("Aries", 10.0, 1, planet_name="Sun")},
@@ -554,7 +551,7 @@ class TestVimshopakaEdges:
     def test_fallback_table_matches_bphs_if_pyjhora_unavailable(self):
         """_DASHAVARGA_WEIGHTS_RAW: the except-arm literal fallback table satisfies
         both invariants."""
-        from bphs_core.vimshopaka import _DASHAVARGA_WEIGHTS_RAW, _VARGA_ATTR
+        from bphs_core.vimshopaka import _DASHAVARGA_WEIGHTS_RAW
         # If pyjhora's import failed the fallback literal is used; either way these
         # must pass (the module asserts this at import time already, but we test
         # the values explicitly so a coverage probe touches the fallback branch).

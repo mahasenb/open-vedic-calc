@@ -5,12 +5,11 @@ All logic is deterministic — no LLM calls.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
-from typing import Literal
+from datetime import date, datetime, timedelta
 
+from . import utils
 from .chart import ChartSnapshot
 from .dashas import vimshottari_mahadashas
-from . import utils
 
 # ---------------------------------------------------------------------------
 # Classical data tables

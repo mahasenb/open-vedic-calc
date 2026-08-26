@@ -35,11 +35,12 @@ from datetime import date
 
 import pytest
 import swisseph as swe
+from jhora import (
+    utils as jutils,  # the library formatter the served clock must agree with
+)
 
 from bphs_core import muhurat as m
 from bphs_core import utils
-from jhora import utils as jutils  # the library formatter the served clock must agree with
-
 
 PLACE = utils.make_place("Sample City", 7.0, 80.0, 5.5)
 TARGET = date(2026, 5, 26)

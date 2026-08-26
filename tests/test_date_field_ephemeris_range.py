@@ -82,7 +82,6 @@ os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 import swisseph as swe
 from fastapi.testclient import TestClient
 
-from bphs_core import utils
 from app import schemas as app_schemas
 from app.main import app
 from app.schemas import (
@@ -91,6 +90,7 @@ from app.schemas import (
     MIN_EPHEMERIS_DATE,
     MIN_SCANNED_DATE,
 )
+from bphs_core import utils
 from tests.conftest import SAMPLE_A, SAMPLE_B
 
 _ONE_DAY = datetime.timedelta(days=1)

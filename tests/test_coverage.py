@@ -73,10 +73,10 @@ main.py – /v1/compat
   ✓ 422 on missing person_b (covered by test_endpoints)
   ✓ 401 on bad token (covered by test_endpoints)
 """
+import importlib
 import os
 import re
-import sys
-import importlib
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -109,8 +109,9 @@ class TestAuthBranches:
         old = os.environ.pop("CALC_SERVICE_TOKEN", None)
         try:
             # Re-import the module so require_token picks up the new env
-            import app.auth as auth_mod
             import importlib
+
+            import app.auth as auth_mod
             importlib.reload(auth_mod)
 
             # A protected endpoint must succeed with no Authorization header
@@ -128,7 +129,6 @@ class TestAuthBranches:
 
     def test_unset_token_fails_closed_in_non_dev(self):
         """Branch: non-dev env + unset token → import-time RuntimeError (fail closed)."""
-        import importlib
         import app.auth as auth_mod
 
         old_token = os.environ.pop("CALC_SERVICE_TOKEN", None)

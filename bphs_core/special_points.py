@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from .chart import ChartSnapshot
+
 from . import utils
+from .chart import ChartSnapshot
 
 
 @dataclass

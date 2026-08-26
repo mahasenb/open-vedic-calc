@@ -7,13 +7,16 @@ import datetime
 
 import pytest
 
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
-from bphs_core import special_points as sp
-from bphs_core.special_points import (
-    get_indu_lagna, get_beeja_sphuta, get_kshetra_sphuta,
-    _sphuta_strength, _navamsa_sign_of_longitude, _parity,
-)
 from bphs_core import utils
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
+from bphs_core.special_points import (
+    _navamsa_sign_of_longitude,
+    _parity,
+    _sphuta_strength,
+    get_beeja_sphuta,
+    get_indu_lagna,
+    get_kshetra_sphuta,
+)
 
 
 def _mock_chart(planets: dict[str, dict], lagna: str = "Aries",

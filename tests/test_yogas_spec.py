@@ -1,11 +1,13 @@
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
-from bphs_core.yogas import _compute_yoga_strength, detect_all_yogas
 import datetime
+
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
+from bphs_core.yogas import _compute_yoga_strength, detect_all_yogas
+
 
 def mock_chart(planets_data: dict[str, dict], lagna: str = "Aries") -> ChartSnapshot:
     # A simple mock for ChartSnapshot that only populates rasi_chart
     # and minimal lagna/house cusps for yoga detection tests.
-    
+
     person = PersonalData(
         name="Test", birth_date=datetime.date(2000, 1, 1),
         birth_time=datetime.time(12, 0), birth_place="Test",
@@ -24,7 +26,7 @@ def mock_chart(planets_data: dict[str, dict], lagna: str = "Aries") -> ChartSnap
             aspects=[],
             is_retrograde=d.get("is_retrograde", False),
         )
-    
+
     return ChartSnapshot(
         person=person,
         lagna=lagna,

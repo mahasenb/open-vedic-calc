@@ -15,7 +15,7 @@ that holds for any non-zero timezone.
 """
 import datetime
 
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
 
 
 def _mock_chart(planets: dict[str, dict], lagna: str = "Aries",
@@ -81,8 +81,8 @@ _BAV_TOTALS = {"Sun": 48, "Moon": 49, "Mars": 39, "Mercury": 54,
 # ---------------------------------------------------------------------------
 
 def test_ashtakavarga_matches_reference_distribution():
-    from bphs_core.strength import compute_ashtakavarga
     from bphs_core import utils
+    from bphs_core.strength import compute_ashtakavarga
 
     snap = _mock_chart(_REF_PLACEMENTS, lagna=_REF_LAGNA, lagna_lord="Saturn")
     akv = compute_ashtakavarga(snap)
@@ -120,8 +120,8 @@ def test_ashtakavarga_bav_totals_are_invariant():
 
 
 def test_ashtakavarga_single_planet_shape():
-    from bphs_core.strength import compute_ashtakavarga
     from bphs_core import utils
+    from bphs_core.strength import compute_ashtakavarga
 
     snap = _mock_chart(_REF_PLACEMENTS, lagna=_REF_LAGNA, lagna_lord="Saturn")
     one = compute_ashtakavarga(snap, "Saturn")
@@ -190,8 +190,9 @@ def test_chart_planet_longitudes_are_not_double_timezone_shifted():
     """
     import swisseph as swe
     from jhora.panchanga import drik
-    from bphs_core.chart import Chart
+
     from bphs_core import utils
+    from bphs_core.chart import Chart
 
     tz = 5.5
     p = PersonalData(
@@ -217,8 +218,10 @@ def test_vimshottari_balance_tracks_moon_fraction():
     from birth equals (1 - elapsed_fraction) * lord's full period."""
     from bphs_core.chart import Chart
     from bphs_core.dashas import (
-        _moon_nakshatra_and_fraction, vimshottari_mahadashas,
-        NAKSHATRA_LORDS, VIMSHOTTARI_YEARS,
+        NAKSHATRA_LORDS,
+        VIMSHOTTARI_YEARS,
+        _moon_nakshatra_and_fraction,
+        vimshottari_mahadashas,
     )
 
     p = PersonalData(

@@ -102,8 +102,13 @@ invisible to this guard:**
 
 Those are deliberate-evasion shapes rather than things anyone writes by
 accident, and closing them means executing the module rather than parsing it.
-They are refused as a *design* boundary, not overlooked. Note this repository
-has **no linter at all**, so nothing else would flag them either.
+They are refused as a *design* boundary, not overlooked. Nothing else in the
+tree flags them either: this repository now runs ruff, but its selected rules
+are pyflakes, import ordering and the stable pycodestyle subset, none of which
+tracks what a name is bound to. (This sentence used to read "note this
+repository has **no linter at all**" — true when it was written, and false the
+moment the lint gate landed, which is the rot this file's own citations rule
+exists to prevent.)
 
 Further bounds:
 
@@ -463,7 +468,10 @@ class _Site:
         and then this returns ``_NOT_LITERAL`` so the caller can fail closed,
         symmetrically with how ``encoding=`` and ``errors=`` already treat a
         non-literal. ``text=<variable>`` is ordinary Python, not a contrived
-        evasion, and this repository has no linter to catch it either.
+        evasion, and the repository's linter does not catch it either: ruff's
+        selected rule set here is pyflakes plus import ordering plus the stable
+        pycodestyle subset, none of which reasons about a keyword's runtime
+        truthiness.
         """
         states = [self.truthiness(key) for key in _TEXT_MODE_KEYS]
         if any(state is True for state in states):

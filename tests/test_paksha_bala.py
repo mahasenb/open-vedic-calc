@@ -17,9 +17,8 @@ Covers:
 All fixtures are synthetic; no personal data used.
 """
 import datetime
-import pytest
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
 
+from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
 
 # ---------------------------------------------------------------------------
 # Shared helper: build a minimal synthetic ChartSnapshot

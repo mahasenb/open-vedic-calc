@@ -4,14 +4,14 @@ Run: pytest tests/ -v
 After first successful run, freeze the actual values in the assertions.
 """
 import os
-import pytest
+
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
 from app.main import app
-from tests.conftest import SAMPLE_A, SAMPLE_B, SAMPLE_C
+from tests.conftest import SAMPLE_A, SAMPLE_B
 
 client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
 
@@ -68,6 +68,7 @@ def test_resolve_version_content_hash_fallback(monkeypatch):
     """Without GIT_COMMIT and with git unavailable, a readable source tree yields
     the deterministic content-hash ('src-' prefix) — never the bare 'unknown'."""
     import subprocess as _subprocess
+
     import app.main as main_mod
 
     monkeypatch.delenv("GIT_COMMIT", raising=False)
@@ -191,6 +192,7 @@ def test_chart_placidus_fallback_logs_warning(monkeypatch, caplog):
     """FIX #6: when swe.houses raises on b'P', the equatorial fallback is used
     and a 'placidus_fallback_equatorial' warning is emitted. Chart still returns 200."""
     import logging
+
     import bphs_core.chart as chart_mod
 
     real_houses = chart_mod.swe.houses
@@ -362,7 +364,7 @@ def test_muhurat_endpoint():
     body = r.json()
     assert "days" in body
     assert len(body["days"]) == 3
-    
+
     first_day = body["days"][0]
     assert first_day["date"] == "2026-05-26"
     assert "sunrise" in first_day
@@ -814,7 +816,7 @@ def test_configurable_lagna_shuddhi_limit(monkeypatch):
     import app.main
     # Override limit to 20 days.
     monkeypatch.setattr(app.main, "MAX_LAGNA_SHUDDHI_DAYS", 20)
-    
+
     # Request a 17-day range (May 26 to June 12 = 17 days), which exceeds default 14 days.
     req = {
         **_LAGNA_SHUDDHI_REQ,

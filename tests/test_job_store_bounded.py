@@ -10,7 +10,7 @@ terminal (``done``/``error``) jobs first once the cap is exceeded.
 import importlib
 import time as time_mod
 
-from app.jobs import Job, JobStore
+from app.jobs import JobStore
 
 
 def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -> bool:

@@ -1,14 +1,16 @@
 """Vimshopaka Bala (Dashavarga, 0-20) — unit tests."""
-import pytest
+
+from datetime import datetime, time
 
 from bphs_core.chart import Chart, PersonalData
-from bphs_core import vimshopaka as vm
 from bphs_core.vimshopaka import (
-    _DASHAVARGA_WEIGHTS_RAW, _DIGNITY_FACTOR, _VARGA_ATTR,
-    compute_vimshopaka, compute_all_vimshopaka, _grade,
+    _DASHAVARGA_WEIGHTS_RAW,
+    _DIGNITY_FACTOR,
+    _VARGA_ATTR,
+    _grade,
+    compute_all_vimshopaka,
 )
 from tests.conftest import SAMPLE_A
-from datetime import datetime, time
 
 
 def _snapshot(sample: dict):

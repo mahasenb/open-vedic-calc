@@ -275,8 +275,9 @@ def test_dashas_boundary_at_max_passes():
     The cap is measured from birth (bounds cycle_count), not from from_date.
     SAMPLE_A birth is 1950-06-15; birth + 47000 days is still within the
     legitimate range and must not be rejected."""
-    import app.main as main_mod
     from datetime import date, timedelta
+
+    import app.main as main_mod
     limit = main_mod.MAX_DASHA_DAYS
     birth_dt = date.fromisoformat(SAMPLE_A["birth_date"])
     to_dt = birth_dt + timedelta(days=limit)
@@ -290,8 +291,9 @@ def test_dashas_one_over_max_is_422():
     """to_date at MAX_DASHA_DAYS+1 days from birth must be rejected with 422.
 
     The cap is measured from birth; from_date is irrelevant to the guard."""
-    import app.main as main_mod
     from datetime import date, timedelta
+
+    import app.main as main_mod
     limit = main_mod.MAX_DASHA_DAYS
     birth_dt = date.fromisoformat(SAMPLE_A["birth_date"])
     to_dt = birth_dt + timedelta(days=limit + 1)

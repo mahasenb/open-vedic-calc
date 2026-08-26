@@ -26,7 +26,6 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("CALC_SERVICE_TOKEN", "test")
 os.environ.setdefault("PUBLIC_SOURCE_URL", "https://example.com")
 
-import pytest
 import swisseph as swe
 from jhora.panchanga import drik
 
@@ -62,7 +61,6 @@ class TestMuhuratUTCNakshatra:
       utc-noon  jd -> Moon nakshatra = Krittika (CORRECT)
     """
     def test_nakshatra_from_moon_uses_utc_jd(self):
-        from bphs_core import muhurat as m
         from bphs_core import utils
 
         place = _make_place(13.0, 77.6, 5.5)  # IST location
@@ -128,8 +126,9 @@ class TestTransitTzCorrection:
     transit Moon nakshatra matches a UTC-corrected jd lookup.
     """
     def test_transit_moon_nakshatra_utc_based(self):
-        from bphs_core import transits as tr, utils
-        from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
+        from bphs_core import transits as tr
+        from bphs_core import utils
+        from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
 
         # Minimal snapshot — transits doesn't need a full chart
         rasi = {
@@ -283,7 +282,11 @@ class TestSadeSatiLookback:
             "Sade Sati should not be active for Moon-in-Capricorn when Saturn is in Libra"
         )
 
-from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData  # noqa: E402 — used in Fix 3
+from bphs_core.chart import (  # noqa: E402 — used in Fix 3
+    ChartSnapshot,
+    PersonalData,
+    PlanetData,
+)
 
 # ===========================================================================
 # FIX 4 — lagna_shuddhi step granularity
@@ -300,7 +303,6 @@ class TestLagnaShuddhiStepGranularity:
 
     def test_step_filter_uses_minute_value_not_index(self):
         """Direct unit test of the filtering logic."""
-        from bphs_core import lagna_shuddhi as ls
 
         # Fake candidate list starting at minute 63 (03:03), not a multiple of 5
         candidates = list(range(63, 80))  # [63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]
@@ -348,6 +350,7 @@ class TestHouseSystemField:
         # ENVIRONMENT=test and CALC_SERVICE_TOKEN=test are set at module level
         # above, so this import is safe.
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
@@ -377,6 +380,7 @@ class TestHouseSystemField:
         monkeypatched bphs_core swe.houses call is intercepted.
         """
         import swisseph as swe_mod
+
         from bphs_core import chart as chart_mod
 
         original_houses = swe_mod.houses
@@ -389,7 +393,7 @@ class TestHouseSystemField:
         monkeypatch.setattr(swe_mod, "houses", _failing_placidus)
         monkeypatch.setattr(chart_mod.swe, "houses", _failing_placidus)
 
-        from bphs_core.chart import PersonalData, Chart
+        from bphs_core.chart import Chart, PersonalData
         # Use a mid-latitude location so pyjhora's rasi_chart doesn't also fail
         person = PersonalData(
             name="T", birth_date=datetime.date(2000, 1, 1),
@@ -430,8 +434,9 @@ class TestVarnaKutaDirectional:
         assert score == 1.0, f"Expected 1.0 for equal Brahmin varna, got {score}"
 
     def test_varna_docstring_states_groom_convention(self):
-        from bphs_core import compat
         import inspect
+
+        from bphs_core import compat
         src = inspect.getsource(compat._varna)
         assert "groom" in src.lower() or "person_a" in src.lower(), (
             "_varna docstring or comment must document the person_a=groom convention"
@@ -449,6 +454,7 @@ class TestProfilePrecisionDays:
     def test_sade_sati_lifetime_includes_precision_days(self):
         # ENVIRONMENT=test and CALC_SERVICE_TOKEN=test are set at module level above.
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         client = TestClient(app, headers={"X-Calc-Service-Token": "test"})
@@ -477,8 +483,8 @@ class TestProfilePrecisionDays:
 
     def test_compute_profile_precision_days_direct(self):
         """Direct unit test of compute_profile to avoid app-level module loading issues."""
+        from bphs_core.chart import ChartSnapshot, PersonalData, PlanetData
         from bphs_core.profile import compute_profile
-        from bphs_core.chart import ChartSnapshot, PlanetData, PersonalData
 
         rasi = {
             "Moon": PlanetData(
@@ -554,8 +560,10 @@ class TestEnvironmentDefaultProduction:
         """logger.critical must be emitted by require_token when called with an
         empty token in an insecure environment (auth disabled path)."""
         import logging
-        import app.auth as auth_mod
+
         from fastapi import HTTPException
+
+        import app.auth as auth_mod
 
         # Temporarily disable the token so the no-token path is reached
         monkeypatch.delenv("CALC_SERVICE_TOKEN", raising=False)
@@ -576,6 +584,7 @@ class TestEnvironmentDefaultProduction:
         in the insecure set. Since the module was already imported (ENVIRONMENT=test),
         we verify the CRITICAL log call works by invoking the logger directly."""
         import logging
+
         import app.auth as auth_mod
 
         with caplog.at_level(logging.CRITICAL, logger="app.auth"):

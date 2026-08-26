@@ -1,6 +1,7 @@
 import hmac
 import logging
 import os
+
 from fastapi import Header, HTTPException, status
 
 from .deployment import LENIENT_ENVS, environment, is_real_deployment
