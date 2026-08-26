@@ -71,8 +71,33 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path
+
+_WORKFLOW_SCOPE_PATH = Path(__file__).resolve().parent / "workflow_scope.py"
+
+
+def _load_workflow_scope():
+    """Load ``ci/workflow_scope.py`` -- the shared workflow enumeration.
+
+    By path, not ``from ci import ...``: ``ci/`` has no ``__init__.py`` by
+    design, and this runs both as ``python ci/check_workflow_token_scopes.py``
+    (where ``ci/`` is on ``sys.path``) and loaded by path from
+    ``ci/tests/test_check_workflow_token_scopes.py`` (where it is not). The
+    by-path form is the one that works in both, and it is the form
+    ``ci/check_pr_text.py`` already uses to reach the tree gate.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_workflow_scope_for_token_scopes", _WORKFLOW_SCOPE_PATH
+    )
+    assert spec is not None and spec.loader is not None, _WORKFLOW_SCOPE_PATH
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_workflow_scope = _load_workflow_scope()
 
 try:
     import yaml
@@ -468,19 +493,52 @@ def fixture_failures() -> list[str]:
 
 
 def workflow_files(repo_root: Path) -> list[Path]:
-    workflow_dir = repo_root / ".github" / "workflows"
-    if not workflow_dir.is_dir():
-        return []
-    return sorted(
-        p for p in workflow_dir.iterdir()
-        if p.is_file() and p.suffix in {".yml", ".yaml"}
-    )
+    """Every workflow file, from the repository's ONE scope definition.
+
+    This used to be ``workflow_dir.iterdir()`` filtered on the two suffixes. It
+    read BOTH suffixes, so the half-enumeration defect ``ci/workflow_scope.py``
+    was built to close was never present here — what it lacked was the two
+    semantics only git can supply, and a fail-closed answer:
+
+    * ``--exclude-standard`` — a developer's git-ignored scratch workflow is
+      never pushed, so GitHub Actions never runs it, and it must not decide
+      whether this gate is red. Measured before the migration: an ignored probe
+      workflow with no ``permissions:`` block was scanned and reported FAIL.
+    * ``--others`` — an untracked workflow stays in scope, because the cheapest
+      moment to catch a violation is the commit that introduces it.
+    * a tree git cannot describe RAISES rather than listing nothing. A
+      filesystem walk answers "no workflows" for a directory that is not part of
+      any checkout, and "no workflows found" and "no violations found" are the
+      same green.
+
+    A path git lists from the INDEX may no longer exist in the working tree (a
+    workflow deleted but not yet committed). That is a failure mode the walk
+    could not produce, so it is closed here: such a path is dropped rather than
+    read and crashed on.
+    """
+    return [p for p in _workflow_scope.workflow_paths(repo_root) if p.is_file()]
 
 
 def scan_results(repo_root: Path) -> list[tuple[str, list[str]]]:
-    """Return (relative path, violation messages) for every workflow file."""
+    """Return (relative path, violation messages) for every workflow file.
+
+    A scope git cannot derive is reported as a violation rather than raised: the
+    caller's contract is "one message per problem", and a traceback out of a
+    gate is a worse verdict than a legible refusal, not a better one.
+    """
     results: list[tuple[str, list[str]]] = []
-    for path in workflow_files(repo_root):
+    try:
+        paths = workflow_files(repo_root)
+    except _workflow_scope.WorkflowScopeError as exc:
+        return [(
+            ".github/workflows",
+            [
+                f"[SCOPE_UNKNOWN] the workflow scope could not be derived from "
+                f"git under {repo_root}: {exc} This gate refuses rather than "
+                f"reporting clean about files nothing enumerated."
+            ],
+        )]
+    for path in paths:
         try:
             rel = path.relative_to(repo_root).as_posix()
         except ValueError:  # pragma: no cover - defensive
