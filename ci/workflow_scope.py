@@ -3,10 +3,12 @@
 
 WHY THIS EXISTS
 ===============
-Four guards in ``ci/tests/`` need that set, and before this module they answered
-it four different ways. Two of them were wrong in the same way, and the shape of
-the error is worth naming because it is the third time this workspace has paid
-for it: they enumerated ``.github/workflows/*.yml``.
+WHEN THIS MODULE LANDED (historical, and left in the past tense deliberately --
+the current count is not written down anywhere, see below): four guards in
+``ci/tests/`` needed that set and answered it four different ways between them.
+Two were wrong in the same way, and the shape of the error is worth naming
+because it is the third time this workspace has paid for it: they enumerated
+``.github/workflows/*.yml``.
 
 SCOPE OF THE "ONE DEFINITION" CLAIM -- stated precisely, because the loose
 version was false for a while and the correction is the interesting part. When
