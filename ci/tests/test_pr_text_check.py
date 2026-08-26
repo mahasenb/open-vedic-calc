@@ -63,7 +63,6 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _CHECKER_PATH = _REPO_ROOT / "ci" / "check_pr_text.py"
-_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
 # Obviously fake, and the only kind of token that may appear in this public
 # repo's tracked source — the real ones arrive at runtime from a secret.
@@ -323,9 +322,6 @@ def test_the_refusal_names_the_secret(capsys) -> None:
 # ---------------------------------------------------------------------------
 # 3. Wiring -- a checker no workflow runs is inert.
 # ---------------------------------------------------------------------------
-_WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
-
-
 def _workflow_paths(repo_root: Path) -> list[Path]:
     """Every workflow file, asked of git -- BOTH extensions, tracked and staged-to-be.
 
@@ -350,10 +346,18 @@ def _workflow_paths(repo_root: Path) -> list[Path]:
     list, because "zero workflows found" and "zero violations found" are the
     same green and a guard may not reach the second by way of the first.
 
-    The implementation moved to ``ci/workflow_scope.py`` unchanged, so this
-    repository has ONE answer to "what are the workflows". It had three, and two
-    of them read ``*.yml`` only -- the exact half-enumeration this docstring
-    already warned about, sitting two files away from the warning.
+    The implementation moved to ``ci/workflow_scope.py`` unchanged, so the four
+    ``ci/tests/`` guards share ONE answer to "what are the workflows". Three of
+    them had their own, and two of those read ``*.yml`` only -- the exact
+    half-enumeration this docstring already warned about, sitting two files away
+    from the warning.
+
+    Scoped deliberately to ``ci/tests/``: two production checkers
+    (``ci/check_workflow_token_scopes.py``, ``ci/check_pytest_collection.py``)
+    still enumerate the directory themselves, so the repository-wide "one
+    answer" claim would be false. Both read BOTH suffixes, so they do not carry
+    the defect above; ``ci/workflow_scope.py``'s docstring records what they do
+    lack.
     """
     return _workflow_scope.workflow_paths(repo_root)
 

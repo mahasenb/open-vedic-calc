@@ -665,9 +665,21 @@ class _RunCallCollector(ast.NodeVisitor):
       interpreter's own symbol table, and reds if the tree ever contains a
       binding construct this visitor does not record. That converts "we think we
       enumerated them" into a measured equality.
-    * Bindings are tracked at MODULE scope and in source order. A rebinding
-      placed textually before its import, or built dynamically, is not resolved
-      -- and, for the attribute form, is refused rather than missed.
+    * Bindings are tracked in SOURCE ORDER. A rebinding placed textually before
+      its import, or built dynamically, is not resolved -- and, for the
+      attribute form, is refused rather than missed.
+    * A FUNCTION-LOCAL rebinding IS resolved, which an earlier revision of this
+      block wrongly recorded as a module-scope-only limit. Measured: ``sp =
+      subprocess`` inside a function body, then ``sp.run(...)``, is collected
+      and named with its enclosing function. ``module_names`` is populated
+      scope-independently; only ``_bind`` -- which feeds the ``symtable``
+      cross-check below -- is gated on module scope. The bound was stated
+      narrower than the code achieves, and an understated bound is still a wrong
+      one: it invites somebody to add a guard that already exists.
+    * What IS module-scope-only is the ``symtable`` completeness check, and so
+      the bare-name path that rests on it: a name bound inside a function by a
+      construct this visitor does not model is covered by the attribute-refusal
+      sweep, not by the bare-name resolution.
     * Scope is this one file, read as a call SITE. It cannot prove what ``git``
       does at run time.
     """
@@ -1765,6 +1777,14 @@ class TestTheRunCallCollectorSeesEveryBinding:
         (
             "aliased inside a function",
             "import subprocess as sp\ndef f(c):\n    return sp.run([1], cwd=c)\n",
+        ),
+        # A rebinding in a FUNCTION BODY, not merely a module-level alias used
+        # from one. The KNOWN BOUNDS above used to record this as out of reach;
+        # it is not, and an understated bound invites a redundant guard.
+        (
+            "function-local rebinding",
+            "import subprocess\ndef f(c):\n    sp = subprocess\n"
+            "    return sp.run([1], cwd=c)\n",
         ),
     ]
 
