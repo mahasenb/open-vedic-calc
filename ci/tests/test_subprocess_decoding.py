@@ -62,7 +62,13 @@ Refused, therefore:
 * a ``**kwargs`` splat on a subprocess call — the property cannot be proved by
   reading the call, and a guard that cannot prove its property must fail closed;
 * a call whose text-mode keywords cannot be read — ``text=<expr>`` and friends.
-  Text mode is decided by TRUTHINESS, so an unreadable value may well select it.
+  Text mode is decided by TRUTHINESS, so an unreadable value may well select it;
+* more than one positional argument, or a ``*args`` splat — **text mode can be
+  selected with no keyword at all.** ``universal_newlines`` is ``Popen``'s 12th
+  positional parameter and ``run``/``check_output``/``call``/``check_call``
+  forward ``*popenargs`` into it, so a guard reading only ``node.keywords``
+  makes an affirmative *"bytes, safe"* claim about a text-mode call. See
+  ``_MAX_POSITIONAL_ARGS``.
 
 **Text mode is read as the engine reads it.** CPython's ``Popen.__init__`` sets
 ``self.text_mode = encoding or errors or text or universal_newlines`` — an
@@ -185,6 +191,34 @@ _TEXT_MODE_KEYS = ("encoding", "errors", "text", "universal_newlines")
 # therefore the one codec whose argument is actually proven; anything else must
 # extend the argument with its own measurement rather than inherit this one.
 _ADMITTED_CODECS = frozenset({"utf-8"})
+
+# Positional arguments beyond the command itself are refused.
+#
+# `universal_newlines` is a POSITIONAL_OR_KEYWORD parameter of
+# `Popen.__init__`, and `run` / `check_output` / `call` / `check_call` forward
+# their `*popenargs` straight into `Popen`. So text mode can be selected
+# without any keyword at all, and a guard reading `node.keywords` alone makes
+# an affirmative "bytes, safe" claim about a call the engine puts in text mode.
+#
+# Measured on the locked interpreter, `inspect.signature(Popen.__init__)`:
+#
+#     position 12  universal_newlines   POSITIONAL_OR_KEYWORD
+#     position 21  encoding             KEYWORD_ONLY
+#     position 22  errors               KEYWORD_ONLY
+#     position 23  text                 KEYWORD_ONLY
+#
+# so `universal_newlines` is the ONLY one of the four reachable positionally --
+# and measured end to end, `subprocess.run(cmd, -1, None, None, PIPE, PIPE,
+# None, True, False, None, None, True)` returns `stdout='ok\n'` (a `str`: text
+# mode), while the same call ending in `False` returns `bytes`.
+#
+# Resolving positions 2+ against the signature is possible, but refusal is the
+# cheaper honest shape and it is the same ground on which a `**kwargs` splat is
+# refused: the property cannot be read at the call site. Measured tree-wide
+# before choosing it, so the cost is known and not guessed: of 53 watched call
+# sites, **every one passes exactly one positional argument** and none uses a
+# `*args` splat -- so this refuses nothing that exists today.
+_MAX_POSITIONAL_ARGS = 1
 
 # Modules this guard watches, and which of their entry points matter.
 # Enumerated in one table so the dispatch is stated once and the docstring's
@@ -354,6 +388,11 @@ class _Site:
         self.qualname = qualname
         self.splat = any(kw.arg is None for kw in node.keywords)
         self.kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        # POSITIONAL arguments are part of the decoding contract too -- see
+        # `_MAX_POSITIONAL_ARGS`. Reading only `node.keywords` was a measured
+        # false-safety claim.
+        self.star_args = any(isinstance(arg, ast.Starred) for arg in node.args)
+        self.positional = len(node.args)
 
     def __str__(self) -> str:
         return (
@@ -553,6 +592,26 @@ def _verdict(site: _Site) -> tuple[str, str]:
             "the call site, so this guard cannot prove the call is safe. Pass "
             "the decoding keywords explicitly."
         )
+    if site.star_args:
+        return "violation", (
+            "a `*args` splat means the number of positional arguments cannot be "
+            "read at the call site, so this guard cannot tell whether one of "
+            "them is `universal_newlines` (Popen's 12th positional parameter). "
+            "Pass the command as a single argument and everything else by "
+            "keyword."
+        )
+    if site.positional > _MAX_POSITIONAL_ARGS:
+        return "violation", (
+            f"{site.positional} positional arguments. `run`/`check_output`/"
+            "`call`/`check_call` forward `*popenargs` into `Popen`, whose 12th "
+            "positional parameter is `universal_newlines` -- so text mode can "
+            "be selected with no keyword at all, and reading only the keywords "
+            "would report this call as bytes mode. Measured: "
+            "`run(cmd, -1, None, None, PIPE, PIPE, None, True, False, None, "
+            "None, True)` returns a `str`. Pass the command positionally and "
+            "everything else by keyword, where both this guard and a human "
+            "reader can see it."
+        )
 
     text_mode = site.text_mode
     if text_mode is _NOT_LITERAL:
@@ -619,6 +678,36 @@ def _verdict(site: _Site) -> tuple[str, str]:
     return "lossy", f"encoding={encoding!r}, errors={errors!r}"
 
 
+# Shapes driven through BOTH the real engine and this guard. One list, so the
+# expression the engine evaluates and the expression the guard parses cannot
+# drift apart. `EMIT` is a child that writes pure ASCII, so the only question
+# asked is str-vs-bytes -- the text-mode decision itself.
+_ENGINE_CROSSCHECK_SHAPES = [
+    # keyword axis
+    "subprocess.run(EMIT, capture_output=True)",
+    "subprocess.run(EMIT, capture_output=True, text=True)",
+    "subprocess.run(EMIT, capture_output=True, text=1)",
+    "subprocess.run(EMIT, capture_output=True, text=2)",
+    "subprocess.run(EMIT, capture_output=True, text='yes')",
+    "subprocess.run(EMIT, capture_output=True, universal_newlines=1)",
+    "subprocess.run(EMIT, capture_output=True, text=0)",
+    "subprocess.run(EMIT, capture_output=True, text=False)",
+    "subprocess.run(EMIT, capture_output=True, text=None)",
+    "subprocess.run(EMIT, capture_output=True, encoding=None)",
+    "subprocess.run(EMIT, capture_output=True, errors=None)",
+    "subprocess.run(EMIT, capture_output=True, encoding='utf-8')",
+    "subprocess.run(EMIT, capture_output=True, errors='replace')",
+    # POSITIONAL axis -- the round-2 blocking finding. `universal_newlines` is
+    # Popen's 12th positional parameter, so these select text mode with no
+    # keyword at all. `capture_output` cannot be combined with an explicit
+    # stdout/stderr, hence PIPE passed positionally too.
+    "subprocess.run(EMIT, -1, None, None, subprocess.PIPE, subprocess.PIPE,"
+    " None, True, False, None, None, True)",
+    "subprocess.run(EMIT, -1, None, None, subprocess.PIPE, subprocess.PIPE,"
+    " None, True, False, None, None, False)",
+]
+
+
 # ---------------------------------------------------------------------------
 # Arm 0 -- the classifier itself, proved against synthetic sources.
 # ---------------------------------------------------------------------------
@@ -656,6 +745,27 @@ def test_the_classifier_separates_the_measured_shapes() -> None:
         ("import subprocess\nsubprocess.run(c, encoding='utf-8', errors='replace')", "lossy"),
         # `errors=` alone still implies text mode -- with the LOCALE codec.
         ("import subprocess\nsubprocess.run(c, errors='replace')", "violation"),
+        # --- POSITIONAL axis: text mode with no keyword at all -------------
+        # universal_newlines is Popen's 12th positional parameter, forwarded
+        # through run/check_output/call/check_call via *popenargs.
+        (
+            "import subprocess\nsubprocess.run(c, -1, None, None, subprocess.PIPE,"
+            " subprocess.PIPE, None, True, False, None, None, True)",
+            "violation",
+        ),
+        (
+            "import subprocess\nsubprocess.run(c, -1, None, None, subprocess.PIPE,"
+            " subprocess.PIPE, None, True, False, None, None, False)",
+            "violation",
+        ),
+        # two positionals is already unreadable, and refused
+        ("import subprocess\nsubprocess.run(c, -1)", "violation"),
+        # ...but the ordinary one-positional call must stay clean
+        ("import subprocess\nsubprocess.run(c, capture_output=True)", "bytes"),
+        ("import subprocess\nsubprocess.Popen(c, stdout=P)", "bytes"),
+        # a *args splat hides the positional count entirely
+        ("import subprocess\nsubprocess.run(*parts)", "violation"),
+        ("import subprocess\nsubprocess.run(c, *rest, text=True)", "violation"),
         # the ones that can never be made safe
         ("import subprocess\nsubprocess.getoutput(c)", "violation"),
         ("import subprocess\nsubprocess.getstatusoutput(c)", "violation"),
@@ -715,7 +825,7 @@ def test_the_classifier_separates_the_measured_shapes() -> None:
         assert verdict == expected, (
             f"{source!r} classified {verdict!r}, expected {expected!r} ({why})"
         )
-    assert len(cases) >= 40, f"the classifier table lost cases ({len(cases)})"
+    assert len(cases) >= 47, f"the classifier table lost cases ({len(cases)})"
 
 
 def test_the_classifier_agrees_with_the_REAL_ENGINE_about_text_mode() -> None:
@@ -742,31 +852,19 @@ def test_the_classifier_agrees_with_the_REAL_ENGINE_about_text_mode() -> None:
         """
         import json, subprocess, sys
 
-        SHAPES = [
-            ("{}", {}),
-            ("text=True", {"text": True}),
-            ("text=1", {"text": 1}),
-            ("text=2", {"text": 2}),
-            ("text='yes'", {"text": "yes"}),
-            ("universal_newlines=1", {"universal_newlines": 1}),
-            ("text=0", {"text": 0}),
-            ("text=False", {"text": False}),
-            ("text=None", {"text": None}),
-            ("encoding=None", {"encoding": None}),
-            ("errors=None", {"errors": None}),
-            ("encoding='utf-8'", {"encoding": "utf-8"}),
-            ("errors='replace'", {"errors": "replace"}),
-        ]
-        emit = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok\\\\n')"]
+        EMIT = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok\\\\n')"]
         observed = []
-        for label, kwargs in SHAPES:
-            done = subprocess.run(emit, capture_output=True, timeout=60, **kwargs)
-            observed.append([label, isinstance(done.stdout, str)])
+        for source in json.loads(sys.stdin.read()):
+            done = eval(source, {"subprocess": subprocess, "EMIT": EMIT})
+            observed.append([source, isinstance(done.stdout, str)])
         print("RESULT " + json.dumps(observed))
         """
     )
     completed = subprocess.run(
-        [sys.executable, "-c", experiment], capture_output=True, timeout=300
+        [sys.executable, "-c", experiment],
+        input=json.dumps(_ENGINE_CROSSCHECK_SHAPES).encode("utf-8"),
+        capture_output=True,
+        timeout=300,
     )
     assert completed.returncode == 0, (
         "the engine cross-check child failed:\n"
@@ -782,28 +880,55 @@ def test_the_classifier_agrees_with_the_REAL_ENGINE_about_text_mode() -> None:
         + completed.stdout.decode("utf-8", "replace")
     )
     observed = json.loads(payload[-1][len("RESULT "):])
+    assert len(observed) == len(_ENGINE_CROSSCHECK_SHAPES), (
+        "the child did not report on every shape it was given"
+    )
 
+    false_safety = []
     disagreements = []
-    for label, engine_text_mode in observed:
-        rendered = "" if label == "{}" else ", " + label
-        source = f"import subprocess\nsubprocess.run(c{rendered})"
+    for source, engine_text_mode in observed:
         collector = _CallCollector("<engine-crosscheck>")
-        collector.visit(ast.parse(source))
+        collector.visit(ast.parse("import subprocess\n" + source))
         assert len(collector.sites) == 1, source
-        guard_text_mode = collector.sites[0].text_mode
+        site = collector.sites[0]
+        verdict, _why = _verdict(site)
 
-        if guard_text_mode is not engine_text_mode:
+        # THE SAFETY INVARIANT. Whatever else the guard concludes, it must never
+        # affirmatively call a text-mode call "bytes" -- that is a false claim
+        # of safety, and it is exactly what reading only `node.keywords` did to
+        # a positionally-selected `universal_newlines`.
+        if engine_text_mode and verdict == "bytes":
+            false_safety.append(f"  {source}\n      engine: TEXT MODE, guard: 'bytes'")
+
+        # PRECISION, for the shapes the guard can fully read. A call it refuses
+        # as unprovable is allowed to disagree -- refusing is not a claim.
+        provable = (
+            not site.splat
+            and not site.star_args
+            and site.positional <= _MAX_POSITIONAL_ARGS
+        )
+        if provable and site.text_mode is not engine_text_mode:
             disagreements.append(
-                f"  {label:<22} engine text_mode={engine_text_mode}, "
-                f"guard says {guard_text_mode!r}"
+                f"  {source}\n      engine text_mode={engine_text_mode}, "
+                f"guard says {site.text_mode!r}"
             )
+
+    assert not false_safety, (
+        "the guard made a FALSE SAFETY CLAIM -- it called a call the engine "
+        "runs in text mode 'bytes':\n" + "\n".join(false_safety)
+    )
     assert not disagreements, (
         "the guard does not read text mode the way the engine applies it:\n"
         + "\n".join(disagreements)
         + "\n\nCPython: `self.text_mode = encoding or errors or text or "
         "universal_newlines` -- truthiness, not identity with True."
     )
-    assert len(observed) >= 13, f"the engine cross-check lost shapes ({len(observed)})"
+    # Both axes must actually be exercised, or this proves less than it looks.
+    assert any(s.count(",") >= 11 for s, _ in observed), (
+        "no positional shape was measured -- the cross-check is blind on the "
+        "axis the round-2 review found the defect on"
+    )
+    assert len(observed) >= 15, f"the engine cross-check lost shapes ({len(observed)})"
 
 
 def test_a_call_to_something_else_named_run_is_not_a_subprocess_site() -> None:
