@@ -88,6 +88,13 @@ are written down. **Binding forms that ARE resolved:** ``import subprocess``,
 rebinding ``sp = subprocess``. **Binding forms that are NOT, and would be
 invisible to this guard:**
 
+* ``r = subprocess.run`` then ``r(...)`` — a bare-name rebinding of the
+  *function* rather than the module. Measured: the collector yields **zero**
+  sites for it, while its resolved twin ``sp = subprocess`` then ``sp.run(...)``
+  yields one. Closing it is a few lines (bind the target when the assigned value
+  is an ``Attribute`` on a watched module), and is deliberately **not** done in
+  the change that documents it — it is named here so the boundary is honest
+  rather than implied;
 * ``getattr(subprocess, "run")(...)`` — the attribute name is a runtime value;
 * ``importlib.import_module("subprocess").run(...)`` — likewise;
 * a rebinding that is not a simple ``name = name`` assignment, one placed
@@ -570,38 +577,78 @@ def _all_sites() -> tuple[list[_Site], int]:
     return sites, len(files)
 
 
+# Every distinct GROUND on which `_verdict` refuses a call, mapped to the token
+# that must appear in this repository's CLAUDE.md description of the guard.
+#
+# This exists so the DOCUMENTED contract is checked against the SHIPPED one
+# rather than maintained by hand. Measured before it was added: the CLAUDE.md
+# paragraph still described the round-1 guard -- it stated shape (B) with no
+# codec restriction (so it admitted `encoding="cp1252", errors="replace"`,
+# which the code refuses) and listed four refusals where the code had grown
+# more. `os.popen`, `_ADMITTED_CODECS`, `cp932`, `_MAX_POSITIONAL_ARGS` and
+# `*args` each appeared 0 times in CLAUDE.md against 4-5 times here.
+#
+# A hand-maintained list drifts silently; a derived one reddens. Do not add a
+# refusal to `_verdict` without registering its ground here -- `_refuse` will
+# refuse to run, and the doc test will name the token you owe CLAUDE.md.
+_REFUSAL_GROUNDS: dict[str, str] = {
+    "os-popen": "os.popen",
+    "locale-only-dispatch": "getoutput",
+    "kwargs-splat": "**kwargs",
+    "args-splat": "*args",
+    "extra-positional": "positional",
+    "unreadable-text-mode": "non-literal",
+    "unreadable-encoding": "non-literal",
+    "locale-encoding": "locale codepage",
+    "unknown-codec": "codecs.lookup",
+    "non-utf8-codec": "cp932",
+    "raising-errors": "raising `errors=`",
+}
+
+
+def _refuse(ground: str, message: str) -> tuple[str, str]:
+    """Refuse a call on a REGISTERED ground.
+
+    Routing every refusal through here is what makes the grounds enumerable by
+    parsing this module, which is what lets CLAUDE.md's list be verified
+    instead of trusted.
+    """
+    assert ground in _REFUSAL_GROUNDS, f"unregistered refusal ground: {ground!r}"
+    return "violation", message
+
+
 def _verdict(site: _Site) -> tuple[str, str]:
     """Classify a site as ('bytes'|'lossy'|'violation', explanation)."""
     if site.module == "os" and site.dispatch in _OS_LOCALE_DISPATCH:
-        return "violation", (
+        return _refuse("os-popen", (
             f"`os.{site.dispatch}` returns a text-mode pipe opened with the "
             "LOCALE encoding and offers no way to pin one, so neither "
             "admissible shape is reachable through it. Use `subprocess.run` in "
             "bytes mode and decode in-process."
-        )
+        ))
     if site.dispatch in _LOCALE_ONLY_DISPATCH:
-        return "violation", (
+        return _refuse("locale-only-dispatch", (
             f"`subprocess.{site.dispatch}` decodes with the locale codepage and "
             "accepts no `encoding` parameter, so neither admissible shape is "
             "reachable through it. Use `subprocess.run` in bytes mode and decode "
             "in-process."
-        )
+        ))
     if site.splat:
-        return "violation", (
+        return _refuse("kwargs-splat", (
             "a `**kwargs` splat means the decoding keywords cannot be read at "
             "the call site, so this guard cannot prove the call is safe. Pass "
             "the decoding keywords explicitly."
-        )
+        ))
     if site.star_args:
-        return "violation", (
+        return _refuse("args-splat", (
             "a `*args` splat means the number of positional arguments cannot be "
             "read at the call site, so this guard cannot tell whether one of "
             "them is `universal_newlines` (Popen's 12th positional parameter). "
             "Pass the command as a single argument and everything else by "
             "keyword."
-        )
+        ))
     if site.positional > _MAX_POSITIONAL_ARGS:
-        return "violation", (
+        return _refuse("extra-positional", (
             f"{site.positional} positional arguments. `run`/`check_output`/"
             "`call`/`check_call` forward `*popenargs` into `Popen`, whose 12th "
             "positional parameter is `universal_newlines` -- so text mode can "
@@ -611,11 +658,11 @@ def _verdict(site: _Site) -> tuple[str, str]:
             "None, True)` returns a `str`. Pass the command positionally and "
             "everything else by keyword, where both this guard and a human "
             "reader can see it."
-        )
+        ))
 
     text_mode = site.text_mode
     if text_mode is _NOT_LITERAL:
-        return "violation", (
+        return _refuse("unreadable-text-mode", (
             "whether this call runs in text mode cannot be read at the call "
             "site: one of "
             f"{list(_TEXT_MODE_KEYS)} carries a non-literal value. The engine "
@@ -623,33 +670,33 @@ def _verdict(site: _Site) -> tuple[str, str]:
             "universal_newlines`), so a truthy value here selects text mode and "
             "the decode moves onto the reader thread. A guard that cannot prove "
             "its property fails closed -- spell the value out at the call site."
-        )
+        ))
     if not text_mode:
         return "bytes", "bytes mode -- the caller decodes, where failure is catchable"
 
     encoding = site.literal("encoding")
     if not encoding or encoding is _NOT_LITERAL:
         if encoding is _NOT_LITERAL:
-            return "violation", (
+            return _refuse("unreadable-encoding", (
                 "`encoding=` is not a literal, so this guard cannot confirm which "
                 "codec is used. Spell it out at the call site."
-            )
-        return "violation", (
+            ))
+        return _refuse("locale-encoding", (
             "text mode with no explicit (or a falsy) `encoding=`: the decode "
             "uses the LOCALE codepage (cp1252 on a Windows checkout), so the "
             "result depends on the machine. Measured: an undecodable byte kills "
             "the reader thread and the caller is handed stdout=None with "
             "returncode=0."
-        )
+        ))
     try:
         canonical = codecs.lookup(encoding).name
     except (LookupError, TypeError):
-        return "violation", (
+        return _refuse("unknown-codec", (
             f"`encoding={encoding!r}` is not a codec Python knows, so this call "
             "would raise at run time rather than decode."
-        )
+        ))
     if canonical not in _ADMITTED_CODECS:
-        return "violation", (
+        return _refuse("non-utf8-codec", (
             f"`encoding={encoding!r}` (canonically {canonical!r}) is not "
             f"{sorted(_ADMITTED_CODECS)}. A lossy reader-thread decode is only "
             "admitted for a codec where the register's justification actually "
@@ -657,24 +704,24 @@ def _verdict(site: _Site) -> tuple[str, str]:
             "is FALSE for cp932, cp936 and utf-16: a single stray lead byte "
             "consumes the following ASCII character, destroying a marker a test "
             "asserts on. Use utf-8, or drop to bytes mode and decode in-process."
-        )
+        ))
 
     errors = site.literal("errors")
     if errors is None:
-        return "violation", (
+        return _refuse("raising-errors", (
             f"text mode with `encoding={encoding!r}` but no `errors=` policy, so "
             "the decode is STRICT and can raise on the reader thread. Measured: "
             "an explicit encoding does NOT remove the crash -- it only changes "
             "which codec dies, and the caller still gets stdout=None with "
             "returncode=0. Either drop to bytes mode and decode in-process, or "
             "choose a non-raising `errors=` policy and register the reason."
-        )
+        ))
     if errors is _NOT_LITERAL or errors not in _NON_RAISING_ERRORS:
-        return "violation", (
+        return _refuse("raising-errors", (
             f"`errors={errors!r}` can raise on the reader thread, where the "
             "exception kills the thread instead of propagating. Non-raising "
             f"policies: {sorted(_NON_RAISING_ERRORS)}."
-        )
+        ))
     return "lossy", f"encoding={encoding!r}, errors={errors!r}"
 
 
@@ -924,7 +971,13 @@ def test_the_classifier_agrees_with_the_REAL_ENGINE_about_text_mode() -> None:
         "universal_newlines` -- truthiness, not identity with True."
     )
     # Both axes must actually be exercised, or this proves less than it looks.
-    assert any(s.count(",") >= 11 for s, _ in observed), (
+    # Counted by PARSING each shape, not by counting commas: a comma proxy also
+    # counts commas inside a nested call or literal, so it could report the
+    # positional axis as covered on a shape that does not exercise it.
+    def _positional_count(source: str) -> int:
+        return len(ast.parse(source).body[0].value.args)
+
+    assert any(_positional_count(s) > _MAX_POSITIONAL_ARGS for s, _ in observed), (
         "no positional shape was measured -- the cross-check is blind on the "
         "axis the round-2 review found the defect on"
     )
@@ -1034,6 +1087,80 @@ def test_the_lossy_register_does_not_outlive_its_sites() -> None:
         "subprocess site:\n"
         + "\n".join(f"  {path} :: {qualname}" for path, qualname in stale)
         + "\n\nThe code moved, was renamed, or was fixed. Remove the entry."
+    )
+
+
+def _refusal_grounds_used_by_verdict() -> set[str]:
+    """The grounds `_verdict` actually refuses on, by PARSING this module.
+
+    Derived, never hand-listed: that is the whole point. Reading the source of
+    the very file under test is deliberate -- the question is what this code
+    does, not what a copy of the list says it does.
+    """
+    source = pathlib.Path(__file__).read_bytes().decode("utf-8")
+    tree = ast.parse(source)
+    verdict = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_verdict"
+    )
+    grounds = set()
+    for node in ast.walk(verdict):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_refuse"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            grounds.add(node.args[0].value)
+    return grounds
+
+
+def test_every_refusal_is_registered_and_every_registration_is_used() -> None:
+    """The registry must equal the grounds the code actually refuses on.
+
+    Both directions matter. An unregistered refusal escapes the doc check
+    silently; a registered ground nothing refuses on is a claim in CLAUDE.md
+    that the code does not back.
+    """
+    used = _refusal_grounds_used_by_verdict()
+    registered = set(_REFUSAL_GROUNDS)
+    assert used, "no `_refuse(...)` calls found in _verdict -- the scan is broken"
+    assert used - registered == set(), (
+        f"refusal grounds used but not registered: {sorted(used - registered)}"
+    )
+    assert registered - used == set(), (
+        f"registered grounds nothing refuses on: {sorted(registered - used)}"
+    )
+    assert len(used) >= 10, f"only {len(used)} refusal grounds found"
+
+
+def test_the_documented_contract_matches_the_shipped_one() -> None:
+    """CLAUDE.md must describe the guard this PR ships, not an earlier one.
+
+    Measured on the commit before this arm existed: the paragraph still
+    described the round-1 guard. It stated shape (B) as "explicit `encoding=`
+    plus a non-raising `errors=`" with **no codec restriction** -- so the
+    documented contract admitted `encoding="cp1252", errors="replace"`, which
+    the code refuses -- and its Refused list named four grounds while the code
+    had grown to refuse eleven. The tokens `os.popen`, `_ADMITTED_CODECS`,
+    `cp932`, `_MAX_POSITIONAL_ARGS` and `*args` each appeared **0** times in
+    CLAUDE.md against 4-5 times in this module.
+
+    Prose that describes a guard the repository no longer ships is worse than
+    no prose: it is a confident, wrong answer to "what does this refuse?".
+    """
+    doc = (_REPO_ROOT / "CLAUDE.md").read_bytes().decode("utf-8")
+    missing = sorted(
+        f"{ground} (token {token!r})"
+        for ground, token in _REFUSAL_GROUNDS.items()
+        if token not in doc
+    )
+    assert not missing, (
+        "CLAUDE.md does not describe these refusal grounds:\n  "
+        + "\n  ".join(missing)
+        + "\n\nThe guard refuses on them; the documented contract must say so."
     )
 
 
