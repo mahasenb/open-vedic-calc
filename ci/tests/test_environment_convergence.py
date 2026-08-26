@@ -278,6 +278,21 @@ def _load_dockerfile_parser():
 parse_dockerfile = _load_dockerfile_parser()
 
 
+def _load_workflow_scope():
+    """The ONE definition of "which files are this repo's workflows", by path."""
+    module_path = _REPO_ROOT / "ci" / "workflow_scope.py"
+    spec = importlib.util.spec_from_file_location(
+        "_workflow_scope_for_convergence", module_path
+    )
+    assert spec is not None and spec.loader is not None, module_path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_workflow_scope = _load_workflow_scope()
+
+
 def _load_image_reference_vocabulary():
     """Load the image-reference helpers from the image-pin guard BY PATH.
 
@@ -384,7 +399,16 @@ def _installed_versions() -> dict[str, str]:
 
 
 def _workflow_files() -> list[pathlib.Path]:
-    return sorted(_WORKFLOWS_DIR.glob("*.yml")) + sorted(_WORKFLOWS_DIR.glob("*.yaml"))
+    """Both suffixes, asked of git rather than globbed off the disk.
+
+    This already read both extensions, so the change is scope rather than
+    coverage: ``--exclude-standard`` keeps a developer's ignored scratch
+    workflow from deciding this guard's verdict, and ``--others`` brings an
+    untracked one in at the commit that introduces it rather than one commit
+    later. Delegated so the repository has ONE answer to "what are the
+    workflows" -- there were three, and two of them read ``*.yml`` only.
+    """
+    return _workflow_scope.workflow_paths(_REPO_ROOT)
 
 
 def _job_steps(job: dict) -> list[dict]:

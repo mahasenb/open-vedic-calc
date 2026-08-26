@@ -38,6 +38,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -69,6 +70,10 @@ def _load_ci_module(name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_workflow_scope = _load_ci_module("workflow_scope")
+
 _JOB = "swiss-ephemeris"
 _FLAG = "REQUIRE_SWISS_EPHEMERIS"
 _FETCHER = "ci/fetch_swiss_ephemeris.py"
@@ -2353,10 +2358,19 @@ _COLLECTION_CHECKER_SCRIPT = "ci/check_pytest_collection.py"
 _REAL_CHANGE_EVENTS = ("push", "pull_request")
 
 
-def _workflow_documents() -> list[tuple[Path, dict]]:
-    """Every parsed workflow document, as (path, document) pairs."""
+def _workflow_documents(repo_root: Path = _REPO_ROOT) -> list[tuple[Path, dict]]:
+    """Every parsed workflow document, as (path, document) pairs.
+
+    Scope comes from ``ci/workflow_scope.py`` -- git, both suffixes. This used
+    to glob ``.github/workflows/*.yml``, and everything downstream of it is an
+    assertion of the form "no workflow does X", which a half-enumeration
+    satisfies by not looking. GitHub Actions runs ``.yaml`` identically, so a
+    narrowing ``PYTEST_ADDOPTS``, an injected ``$GITHUB_ENV`` write, or a
+    deleted accuracy step could all have sat in a ``.yaml`` workflow and been
+    reported clean by every guard in this file.
+    """
     documents: list[tuple[Path, dict]] = []
-    for workflow_path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+    for workflow_path in _workflow_scope.workflow_paths(repo_root):
         document = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
         if isinstance(document, dict):
             documents.append((workflow_path, document))
@@ -2703,4 +2717,52 @@ def test_manifest_and_goldens_are_committed() -> None:
     assert (_REPO_ROOT / "tests" / "goldens" / "swiss_ephemeris_goldens.json").is_file(), (
         "tests/goldens/swiss_ephemeris_goldens.json is missing — the Swiss accuracy "
         "assertions have nothing to compare against"
+    )
+
+
+def test_workflow_documents_reads_yaml_as_well_as_yml(tmp_path):
+    """RED under the old ``*.yml`` glob, and this file is where it mattered most.
+
+    Every guard in this module is an assertion of the form "no workflow does
+    X" -- no narrowing ``PYTEST_ADDOPTS``, no ``$GITHUB_ENV`` write, no deleted
+    accuracy step, no unpinned uv. A half-enumeration satisfies all of them by
+    not looking, and a ``.yaml`` workflow is a file GitHub Actions executes
+    identically. So the accuracy gate could have been switched off from a file
+    this guard reported clean, which is the precise failure the module exists
+    to prevent, arriving through the module's own scope.
+
+    Not committed: ``--others`` keeps an untracked workflow in scope, because
+    the cheapest moment to catch this is the commit that introduces the file.
+    """
+    body = (
+        "name: Fixture\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  t:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hello\n"
+    )
+    root = tmp_path / "wf-fixture"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "extra.yaml").write_text(
+        body, encoding="utf-8", newline="\n"
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+    documents = _workflow_documents(root)
+    assert [path.name for path, _ in documents] == ["extra.yaml"], (
+        f"a .yaml workflow was not parsed: {[p.name for p, _ in documents]}"
+    )
+
+
+def test_this_repositorys_workflow_documents_are_non_vacuous():
+    """The floor: every assertion in this module is vacuous over zero documents."""
+    documents = _workflow_documents()
+    assert len(documents) >= 3, (
+        f"only {len(documents)} workflow document(s) parsed for this repository "
+        "-- the enumeration is broken, not the tree"
+    )
+    assert all(path.suffix in {".yml", ".yaml"} for path, _ in documents), sorted(
+        path.name for path, _ in documents
     )
