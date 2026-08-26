@@ -118,6 +118,7 @@ Exit codes: 0 = no narrowing configuration; 1 = refused (with the reason printed
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shlex
 import subprocess
@@ -137,6 +138,30 @@ except ModuleNotFoundError:  # pragma: no cover - declared in the dev extras
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+
+_WORKFLOW_SCOPE_PATH = Path(__file__).resolve().parent / "workflow_scope.py"
+
+
+def _load_workflow_scope():
+    """Load ``ci/workflow_scope.py`` -- the shared workflow enumeration.
+
+    By path, not ``from ci import ...``: ``ci/`` has no ``__init__.py`` by
+    design, and this runs both as ``python ci/check_pytest_collection.py``
+    (where ``ci/`` is on ``sys.path``) and loaded by path from
+    ``ci/tests/test_pytest_collection_check.py`` (where it is not). The by-path
+    form is the one that works in both, and it is the form
+    ``ci/check_pr_text.py`` already uses to reach the tree gate.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_workflow_scope_for_pytest_collection", _WORKFLOW_SCOPE_PATH
+    )
+    assert spec is not None and spec.loader is not None, _WORKFLOW_SCOPE_PATH
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_workflow_scope = _load_workflow_scope()
 
 # The environment variable pytest reads extra arguments from. Round 1 detected this
 # at all three GitHub Actions `env:` levels — but from inside a pytest test, which
@@ -497,6 +522,30 @@ def narrowing_env_addopts(environ: Mapping[str, str]) -> list[str]:
     return narrowing_addopts(tokens)
 
 
+def workflow_paths_in_scope(root: Path) -> list[Path]:
+    """Every workflow file, from the repository's ONE scope definition.
+
+    This was ``sorted((root / ".github" / "workflows").iterdir())`` filtered on
+    the two suffixes. It read BOTH suffixes — the half-enumeration defect that
+    motivated ``ci/workflow_scope.py`` was never present here — but it asked the
+    FILESYSTEM, which cannot know whether a file ships:
+
+    * ``--exclude-standard`` — a git-ignored scratch workflow is never pushed,
+      so GitHub Actions never runs it and it cannot narrow any pytest run.
+      Measured before this migration: such a file was scanned and refused.
+    * ``--others`` — an untracked workflow stays in scope, because the cheapest
+      moment to catch a declaration is the commit that introduces it.
+    * a tree git cannot describe now RAISES. Measured before this migration, a
+      directory that is not a checkout answered ``[]`` for this whole arm —
+      clean, about files nothing enumerated.
+
+    A path listed from the INDEX may be gone from the working tree (a workflow
+    deleted but not yet committed); a directory listing could not produce that,
+    so it is dropped here rather than read and crashed on.
+    """
+    return [p for p in _workflow_scope.workflow_paths(root) if p.is_file()]
+
+
 def workflow_addopts_declarations(root: Path) -> list[str]:
     """Every ``PYTEST_ADDOPTS`` declaration across the workflow files.
 
@@ -504,11 +553,12 @@ def workflow_addopts_declarations(root: Path) -> list[str]:
     shell assignments in ``run:`` bodies. Every job in every workflow file, not
     just the accuracy job: a declaration anywhere narrows the pytest run in that
     job, and this checker is the only thing outside pytest that can see it.
-    """
-    directory = root / ".github" / "workflows"
-    if not directory.is_dir():
-        return []
 
+    A scope git cannot derive is reported as a PROBLEM, never raised and never
+    returned as "nothing found": this function's contract is one message per
+    problem, and a traceback out of a gate is a worse verdict than a legible
+    refusal — but silence is worse than either.
+    """
     if yaml is None:  # pragma: no cover - pyyaml is in the dev extras
         return [
             "PyYAML is not installed, so the workflow files could not be scanned for "
@@ -516,10 +566,17 @@ def workflow_addopts_declarations(root: Path) -> list[str]:
             "files nothing opened."
         ]
 
+    try:
+        paths = workflow_paths_in_scope(root)
+    except _workflow_scope.WorkflowScopeError as exc:
+        return [
+            f"the workflow scope could not be derived from git under {root}: {exc} "
+            f"Refusing rather than reporting no {ADDOPTS_ENV} declarations about "
+            "files nothing enumerated."
+        ]
+
     found: list[str] = []
-    for path in sorted(directory.iterdir()):
-        if path.suffix not in {".yml", ".yaml"} or not path.is_file():
-            continue
+    for path in paths:
         relative = path.relative_to(root).as_posix()
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8"))

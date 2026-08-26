@@ -47,9 +47,27 @@ def _load_checker():
 
 
 def _tree(tmp_path: pathlib.Path, pyproject_tail: str = "") -> pathlib.Path:
+    """A fixture tree that is a real git CHECKOUT, because the checker's is.
+
+    It was a bare directory until the workflow arm started taking its scope from
+    ``ci/workflow_scope.py``, which asks git and fails closed when git cannot
+    answer. Making the fixture a checkout is not a workaround for that: this
+    checker only ever runs inside one (a CI step after ``actions/checkout``, or
+    the local pre-push gate), so a non-checkout fixture was measuring a state
+    that does not occur. The state that DOES matter — git cannot describe the
+    tree — is asserted deliberately, in
+    ``test_a_tree_git_cannot_describe_is_REFUSED_not_reported_clean``, rather
+    than being the accidental default for every other test in this file.
+    """
     (tmp_path / "pyproject.toml").write_text(
         _BASE_PYPROJECT + pyproject_tail, encoding="utf-8", newline="\n"
     )
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=True)
     return tmp_path
 
 
@@ -463,6 +481,130 @@ def test_the_real_repository_workflows_declare_no_addopts() -> None:
     assert checker.workflow_addopts_declarations(_REPO) == []
 
 
+# ---------------------------------------------------------------------------
+# WHERE THE WORKFLOW SCOPE COMES FROM
+#
+# This arm used to enumerate `.github/workflows` with `sorted(directory.
+# iterdir())` filtered on the two suffixes. Both suffixes were read — the
+# half-enumeration defect that motivated ci/workflow_scope.py was never present
+# here — but the answer came from the FILESYSTEM, so it carried no
+# `--exclude-standard` / `--others` semantics and, measured, returned `[]` for a
+# tree git cannot describe: silently clean about files nothing enumerated.
+#
+# Measured at the commit before this migration, one probe workflow at a time
+# under `.github/workflows`, each declaring PYTEST_ADDOPTS at workflow level:
+#
+#   untracked probe   -> refused ("declares PYTEST_ADDOPTS at WORKFLOW level")
+#   git-ignored probe -> refused as well  <- the behaviour this migration changes
+#   no .github/workflows, not a checkout -> []   <- the fail-open this closes
+# ---------------------------------------------------------------------------
+_DECLARING = 'env:\n  PYTEST_ADDOPTS: "--collect-only"\njobs:\n  test:\n    steps:\n      - run: pytest tests/ -q\n'
+
+
+def test_the_workflow_scope_is_the_shared_definition(tmp_path: pathlib.Path) -> None:
+    """Delegation, asserted as an EQUALITY against the shared enumeration."""
+    checker = _load_checker()
+    spec = importlib.util.spec_from_file_location(
+        "_workflow_scope_for_collection_test", _CI_DIR / "workflow_scope.py"
+    )
+    scope = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope)
+    assert checker.workflow_paths_in_scope(_REPO) == scope.workflow_paths(_REPO)
+
+
+def test_an_untracked_workflow_declaration_is_still_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`--others`: a declaration must be caught by the commit that introduces
+    it, and at that moment the file is not yet tracked."""
+    checker = _load_checker()
+    root = _workflow(_tree(tmp_path), _DECLARING, name="brand_new.yml")
+    found = checker.workflow_addopts_declarations(root)
+    assert any("brand_new.yml" in problem for problem in found), (
+        f"an untracked workflow left the scan set: {found}"
+    )
+
+
+def test_a_git_ignored_workflow_declaration_is_out_of_scope(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`--exclude-standard`: an ignored workflow is never pushed, so GitHub
+    Actions never runs it and it cannot narrow anything."""
+    checker = _load_checker()
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text(
+        "/.github/workflows/scratch.yml\n", encoding="utf-8", newline="\n"
+    )
+    _workflow(root, _DECLARING, name="scratch.yml")
+    assert checker.workflow_addopts_declarations(root) == [], (
+        "a git-ignored scratch workflow decided this gate's verdict"
+    )
+
+
+def test_a_tree_git_cannot_describe_is_REFUSED_not_reported_clean(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Fail closed — the measured fail-open this migration exists to shut.
+
+    Before: a directory that is not a checkout answered `[]`, i.e. CLEAN, for
+    this whole arm. "Zero workflows found" and "zero declarations found" are the
+    same green, and this checker may not reach the second by way of the first.
+    """
+    checker = _load_checker()
+    root = tmp_path / "not-a-checkout"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    found = checker.workflow_addopts_declarations(root)
+    assert found, (
+        "a tree whose workflow scope git could not describe was reported clean"
+    )
+    assert any("git" in problem.lower() for problem in found), (
+        f"the refusal does not say WHY the scope is unknown: {found}"
+    )
+
+
+def test_a_tracked_workflow_deleted_from_the_worktree_does_not_crash(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`--cached` lists a path the working tree no longer holds — a failure mode
+    a directory listing could not produce, closed in the same change."""
+    checker = _load_checker()
+    root = _workflow(_tree(tmp_path), _WORKFLOW_CLEAN[0], name="doomed.yml")
+    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True, check=True)
+    (root / ".github" / "workflows" / "doomed.yml").unlink()
+    assert checker.workflow_addopts_declarations(root) == []
+
+
+def test_the_checker_no_longer_lists_the_workflow_directory_itself() -> None:
+    """Parsed, not grepped. ``os.walk`` in ``_walked_paths`` is the deliberate
+    fallback for the CONFIG scan and is untouched; ``iterdir`` was the workflow
+    enumeration and must be gone."""
+    import ast
+
+    tree = ast.parse(_CHECKER.read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "iterdir"
+    ]
+    assert offenders == [], (
+        f"{_CHECKER.name} lists the workflow directory again at line(s) "
+        f"{offenders}. Workflow scope comes from ci/workflow_scope.py."
+    )
+
+
+@pytest.mark.parametrize("suffix", [".yml", ".yaml"])
+def test_both_workflow_suffixes_stay_in_scope(
+    tmp_path: pathlib.Path, suffix: str
+) -> None:
+    """GitHub Actions runs `.yaml` exactly as it runs `.yml`."""
+    checker = _load_checker()
+    root = _workflow(_tree(tmp_path), _DECLARING, name=f"probe{suffix}")
+    assert any(
+        f"probe{suffix}" in problem
+        for problem in checker.workflow_addopts_declarations(root)
+    )
+
+
 def test_main_refuses_under_an_injected_environment(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
@@ -599,15 +741,13 @@ def test_the_real_script_refuses_under_the_reviewers_exact_reproduction() -> Non
 # The working-tree enumeration: what git actually hands back, and how it is read
 # ---------------------------------------------------------------------------
 def _git_fixture_repo(tmp_path: pathlib.Path) -> pathlib.Path:
-    """A real git checkout, so the git arm of the enumeration is the one used."""
-    root = _tree(tmp_path)
-    for args in (
-        ("init", "-q"),
-        ("config", "user.email", "test@example.com"),
-        ("config", "user.name", "Test"),
-    ):
-        subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
-    return root
+    """A real git checkout, so the git arm of the enumeration is the one used.
+
+    Kept as a named helper for the tests below that are ABOUT the git arm, even
+    though ``_tree`` now initialises a repository itself — the name is what
+    tells a reader those tests depend on git being able to answer.
+    """
+    return _tree(tmp_path)
 
 
 def test_a_narrowing_config_under_a_non_ascii_directory_is_found(

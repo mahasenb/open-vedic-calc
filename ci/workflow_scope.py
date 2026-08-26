@@ -9,19 +9,38 @@ the error is worth naming because it is the third time this workspace has paid
 for it: they enumerated ``.github/workflows/*.yml``.
 
 SCOPE OF THE "ONE DEFINITION" CLAIM -- stated precisely, because the loose
-version is false. This module is the single answer for the four ``ci/tests/``
-guards, and for nothing else. **Two production checkers still enumerate the
-workflow directory themselves** and are deliberately NOT migrated here:
+version was false for a while and the correction is the interesting part. When
+this module landed it unified the four ``ci/tests/`` guards and **two production
+checkers still enumerated the directory themselves**:
 ``ci/check_workflow_token_scopes.py`` (``workflow_files``) and
-``ci/check_pytest_collection.py`` (the ``$GITHUB_ENV``/``PYTEST_ADDOPTS`` scan).
-Measured: both read ``directory.iterdir()`` filtered on ``{".yml", ".yaml"}``, so
-the half-enumeration defect above is ABSENT from both -- what they lack is
-``--exclude-standard`` (a developer's ignored scratch workflow is in scope) and
-``--others`` (an untracked one is not), plus an empty-list return when the
-directory is absent, which is the "zero found equals zero violations" shape and
-is unreachable while the directory exists in-tree. So the honest count is SIX
-readers, four unified here and two independent, rather than "four implementations
-reduced to one".
+``ci/check_pytest_collection.py`` (the ``PYTEST_ADDOPTS`` workflow scan). Both
+are migrated now, so all SIX readers take their scope from here.
+
+What that migration actually changed is worth recording, because both of those
+checkers already read BOTH suffixes -- the half-enumeration defect was never
+present in either, and saying "they were wrong" would have been the overclaim.
+What they lacked was everything only git can supply. Measured at the commit
+before the migration, with one probe workflow at a time under
+``.github/workflows``:
+
+* a **git-ignored** probe was SCANNED by both (token scopes reported
+  ``FAIL [TOP_LEVEL_MISSING]`` and "Scanned 4 workflow file(s)"; the collection
+  checker refused its ``PYTEST_ADDOPTS`` declaration). It is now out of scope,
+  which is the correct direction: an ignored file is never pushed, so GitHub
+  Actions never runs it, and a developer's scratch file must not decide a gate;
+* an **untracked** probe was scanned by both, and still is -- ``--others`` keeps
+  it, because the cheapest moment to catch a violation is the commit that
+  introduces it;
+* a tree git cannot describe returned ``[]`` from
+  ``check_pytest_collection.workflow_addopts_declarations`` -- i.e. CLEAN, the
+  "zero found equals zero violations" shape, from a checker that never noticed
+  it had enumerated nothing. (``check_workflow_token_scopes`` already caught its
+  own version of this with ``[EMPTY_SCAN]``.) Both now refuse.
+
+One failure mode arrives WITH the migration and is closed in the same change:
+``--cached`` lists a path the working tree no longer holds -- a workflow deleted
+but not yet committed -- which a directory listing could never produce. Both
+callers drop a listed path that is not a file rather than crash on it.
 
 GitHub Actions runs a ``.yaml`` file exactly as it runs a ``.yml`` one. A
 ``*.yml`` glob therefore makes an affirmative "no violations" claim about a file
