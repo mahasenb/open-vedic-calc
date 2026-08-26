@@ -612,8 +612,17 @@ _REFUSAL_GROUNDS: dict[str, str] = {
     "unreadable-text-mode": "decided by TRUTHINESS",
     "unreadable-encoding": "**non-literal** value in any text-mode keyword",
     "locale-encoding": "the decode uses the **locale codepage**",
-    "unknown-codec": "resolves through `codecs.lookup`",
-    "non-utf8-codec": "`cp932`, `cp936` and `utf-16`",
+    # Both of these used to be anchored on the shape-(B) ADMISSION sentence
+    # ("resolves through `codecs.lookup` to canonical `utf-8`" and the `cp932`
+    # counterexample justifying it), several hundred characters before the
+    # Refused list. Measured at offsets 1537 and 1958 against a `**Refused**`
+    # marker at 2190. They are prose about what the guard ADMITS, so deleting
+    # the Refused list's codec clause -- the sentence that tells a reader these
+    # two are refused -- left the doc check green. Re-anchored on that clause's
+    # own words; `test_every_refusal_token_is_anchored_in_the_sentence_it_names`
+    # now refuses any token sitting before the marker.
+    "unknown-codec": "`codecs.lookup` does not know",
+    "non-utf8-codec": "not canonical utf-8 (see `cp932` above)",
     "raising-errors": "raising `errors=` policy, including the default",
 }
 
@@ -1189,6 +1198,130 @@ def test_the_documented_contract_matches_the_shipped_one() -> None:
         "refusal grounds:\n  "
         + "\n  ".join(missing)
         + "\n\nThe guard refuses on them; the documented contract must say so."
+    )
+
+
+def _guard_bullet() -> str:
+    doc = (_REPO_ROOT / "CLAUDE.md").read_bytes().decode("utf-8")
+    bullets = [line for line in doc.split("\n") if _GUARD_DOC_ANCHOR in line]
+    assert len(bullets) == 1, (
+        f"expected exactly one CLAUDE.md bullet anchored on {_GUARD_DOC_ANCHOR!r}, "
+        f"found {len(bullets)}"
+    )
+    return bullets[0]
+
+
+_REFUSED_LIST_MARKER = "**Refused**"
+
+
+def test_every_refusal_token_is_anchored_in_the_sentence_it_names() -> None:
+    """A token satisfied by a DIFFERENT sentence does not check its own.
+
+    This module already records the lesson -- "a token that survives the
+    deletion of the sentence carrying it is not checking that sentence" -- and
+    then two tokens were left violating it. Both ``unknown-codec`` and
+    ``non-utf8-codec`` were matched by the shape-**(B)** DEFINITION, which is
+    prose about what the guard ADMITS, several hundred characters before the
+    Refused list. Measured on the base commit: the two sat at offsets 1537 and
+    1958 against a ``**Refused**`` marker at 2190, while the other nine sat
+    between 2380 and 2997.
+
+    The consequence is a lost redundancy class, not a cosmetic one. Deleting the
+    Refused list's codec clause outright -- the sentence that tells a reader an
+    unknown or non-utf-8 codec is REFUSED -- left the doc check green, because
+    both tokens were still satisfied by the admission sentence describing the
+    opposite property.
+
+    Positional, not merely unique: uniqueness catches a second copy inside the
+    bullet (the measured ``cp932`` case) and says nothing about a token living
+    in the wrong half of it.
+    """
+    bullet = _guard_bullet()
+    marker = bullet.find(_REFUSED_LIST_MARKER)
+    assert marker != -1, (
+        f"the guard's bullet no longer carries a {_REFUSED_LIST_MARKER!r} list, "
+        "so there is no Refused clause for a refusal token to be anchored in"
+    )
+
+    misplaced = []
+    duplicated = []
+    for ground, token in _REFUSAL_GROUNDS.items():
+        count = bullet.count(token)
+        if count != 1:
+            duplicated.append(f"{ground}: token {token!r} appears {count}x")
+            continue
+        if bullet.find(token) < marker:
+            misplaced.append(
+                f"{ground}: token {token!r} sits at offset {bullet.find(token)}, "
+                f"BEFORE the Refused list at {marker} -- it is satisfied by prose "
+                f"about what the guard admits, so deleting the sentence that "
+                f"documents this refusal would not red the doc check"
+            )
+    assert not duplicated, (
+        "refusal tokens that do not appear exactly once in the bullet:\n  "
+        + "\n  ".join(duplicated)
+        + "\n\nA token with two copies survives the deletion of one of them."
+    )
+    assert not misplaced, (
+        "refusal tokens anchored outside the Refused list:\n  "
+        + "\n  ".join(misplaced)
+    )
+
+
+def test_a_non_literal_text_flag_is_not_always_refused_and_the_doc_says_so() -> None:
+    """The Refused list over-claims in the CONSERVATIVE direction, so it is corrected.
+
+    "A **non-literal** value in any text-mode keyword" is refused only where
+    nothing else settles the mode. ``_Site.text_mode`` is three-valued and
+    ordered on purpose: a keyword that is DEFINITELY truthy answers the question,
+    so an unreadable value elsewhere cannot make a certain text-mode call
+    uncertain. Measured against the guard itself:
+
+    * ``text=<expr>`` alone -> ``_NOT_LITERAL`` -> refused;
+    * ``text=<expr>`` beside a literal ``encoding="utf-8", errors="replace"``
+      -> ``True`` -> classified **lossy**, i.e. ADMITTED (and registered);
+    * ``universal_newlines=<expr>`` in the same company -> likewise lossy.
+
+    Over-claiming conservatively is still over-claiming: a reader who trusts the
+    sentence writes ``text=FLAG`` expecting a red build, gets a green one, and
+    learns the documented contract is not the shipped one -- which is exactly
+    what this doc arm exists to prevent, in the direction nobody checks.
+    """
+    measured = {}
+    for label, source in (
+        ("bare", "subprocess.run(cmd, capture_output=True, text=FLAG)"),
+        (
+            "with a literal utf-8 + replace",
+            'subprocess.run(cmd, capture_output=True, text=FLAG, '
+            'encoding="utf-8", errors="replace")',
+        ),
+        (
+            "universal_newlines, same company",
+            'subprocess.run(cmd, capture_output=True, universal_newlines=FLAG, '
+            'encoding="utf-8", errors="replace")',
+        ),
+    ):
+        call = ast.parse(source).body[0].value
+        site = _Site(relpath="probe.py", node=call, dispatch="run", qualname="probe")
+        measured[label] = _verdict(site)[0]
+
+    assert measured["bare"] == "violation", (
+        f"a bare non-literal text flag was classified {measured['bare']!r} -- the "
+        "premise of the whole clause is gone"
+    )
+    assert measured["with a literal utf-8 + replace"] == "lossy", (
+        "the correction this test documents is no longer true: "
+        f"got {measured['with a literal utf-8 + replace']!r}"
+    )
+    assert measured["universal_newlines, same company"] == "lossy", measured
+
+    bullet = _guard_bullet()
+    assert "classifies **lossy**, not refused" in bullet, (
+        "the CLAUDE.md Refused list still says a non-literal in ANY text-mode "
+        "keyword is refused, without the exception measured above. A definitely "
+        "truthy keyword settles the mode, so `text=<expr>` beside a literal "
+        "`encoding=\"utf-8\", errors=\"replace\"` is ADMITTED as lossy. State the "
+        "exception in the bullet."
     )
 
 
