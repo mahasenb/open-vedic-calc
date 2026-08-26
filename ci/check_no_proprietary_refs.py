@@ -68,11 +68,19 @@ inheriting an exemption from an extension list nobody re-reads.
 
 Run locally:  python ci/check_no_proprietary_refs.py [before_sha..after_sha]
 
-The optional positional argument is a git commit range (as produced by, e.g.,
-``${{ github.event.before }}..${{ github.sha }}`` in a GitHub Actions push
-event). When omitted, or when the range is invalid (e.g. the ``before`` SHA is
-the all-zero sentinel git uses for a branch's first push), the gate falls back
-to scanning just the current HEAD commit message.
+The optional positional argument is a git commit range, and it wins when given:
+an operator naming a range means exactly that range. With no argument the gate
+DERIVES one from the GitHub event (``resolve_commit_range``), which is why the
+workflow passes none and interpolates no ``${{ }}`` expression into its ``run:``
+body. Outside a GitHub Actions run there is no event to read and the gate scans
+HEAD's message, as it always has.
+
+That derivation replaced ``${{ github.event.before }}..${{ github.sha }}``,
+which was measured scanning ONE commit message on a branch's first push and
+ZERO author-written ones on a pull request — see ``resolve_commit_range`` for
+the measurements and for what the derivation deliberately does not claim. The
+number of messages actually read is printed on every run, because a range naming
+six commits and a scan that read one look identical at exit 0 otherwise.
 
 Text encoding is pinned at BOTH ends of the pipe, and neither half is optional:
 
@@ -93,11 +101,14 @@ absence.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 # Standalone "astro" token, but not the Swiss Ephemeris URL "astro.com". This is
 # the legacy base pattern — always active regardless of env configuration.
@@ -106,6 +117,17 @@ _LEGACY_PATTERN = re.compile(r"(?i)\bastro\b(?!\.com)")
 # Git's all-zero "before" sentinel for events with no real prior commit (e.g. a
 # branch's first push, or a non-push CI event) — never a resolvable range.
 _NULL_SHA = "0" * 40
+
+# A git OBJECT NAME, and nothing else. Hex only: no leading dash for `git log`
+# to read as an option, no `..` to smuggle a second revision, no whitespace.
+# Both SHA-1 (40) and SHA-256 (64) fit, and an abbreviated name is accepted from
+# 7 characters because that is git's own minimum for `--abbrev-commit`.
+_OBJECT_NAME = re.compile(r"[0-9a-fA-F]{7,64}")
+
+# A branch name safe to splice after `origin/`. Same reasoning as above; this
+# one is deliberately narrower than git's real refname grammar, because the only
+# values it ever sees come from a payload field naming a default branch.
+_REF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
 # The encoding this gate reads commit messages in, pinned at both ends of the
 # pipe. `-c` beats repository config, so this holds whatever the contributor's
@@ -356,12 +378,202 @@ def _get_commit_messages(commit_range: str | None, cwd: Path = _REPO_ROOT) -> li
     return [_decode(result.stdout, "HEAD's commit message")]
 
 
-def main(commit_range: str | None = None) -> int:
-    if commit_range is None and len(sys.argv) > 1:
-        commit_range = sys.argv[1]
+class CommitRangeDecision(NamedTuple):
+    """What the commit-message half will scan, and how that was decided.
+
+    ``provenance`` is printed, always. A range naming six commits and a scan
+    that read one are indistinguishable at exit 0 unless the decision says so,
+    and that indistinguishability is exactly how the defect below survived.
+    """
+
+    commit_range: str | None
+    provenance: str
+    refusal: str | None
+
+
+def _object_name(value: object) -> str | None:
+    """*value* if it is a git object name, else ``None`` -- never a guess.
+
+    ``git log`` reads ``--flags`` positionally, so a field spliced into a range
+    without validation is argument injection rather than merely a wrong answer.
+    The event payload is the one input to this gate that arrives from outside
+    the tree, so it is validated rather than trusted: hex only, no leading dash
+    to be read as an option, no separator to smuggle a second revision.
+
+    The all-zero sentinel is hex and is rejected here anyway -- it is git's
+    "there is no prior commit" marker, never a resolvable revision.
+    """
+    if not isinstance(value, str) or not _OBJECT_NAME.fullmatch(value):
+        return None
+    return None if set(value) == {"0"} else value
+
+
+def _read_event_payload(environ: Mapping[str, str]) -> tuple[dict, str | None]:
+    """The GitHub event payload, or ``({}, why not)``.
+
+    GitHub writes the whole payload to a JSON file and names it in
+    ``GITHUB_EVENT_PATH``. Reading it directly is what keeps the derivation OUT
+    of the workflow: no ``${{ }}`` expression is interpolated into a ``run:``
+    body, and the decision lands in Python where it is testable against a
+    synthetic payload.
+
+    Decoded through ``_decode`` like everything else this gate reads -- strict
+    UTF-8, in-process -- so the encoding policy has one definition here too.
+    """
+    path = environ.get("GITHUB_EVENT_PATH")
+    if not path:
+        return {}, "GITHUB_EVENT_PATH is not set"
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        return {}, f"the event payload at {path} could not be read ({exc})"
+    try:
+        payload = json.loads(_decode(raw, f"the event payload at {path}"))
+    except (ScanDecodeError, json.JSONDecodeError) as exc:
+        return {}, f"the event payload at {path} could not be parsed ({exc})"
+    return (payload, None) if isinstance(payload, dict) else ({}, "the event payload is not an object")
+
+
+def resolve_commit_range(
+    environ: Mapping[str, str] | None = None,
+    cwd: Path = _REPO_ROOT,
+    explicit: str | None = None,
+) -> CommitRangeDecision:
+    """Decide which commits the message scan covers, from the EVENT.
+
+    WHY THIS IS NOT `${{ github.event.before }}..${{ github.sha }}`
+    ==============================================================
+    That is what the workflow used to interpolate, and measured on five real
+    runs of this repository's own boundary job it produced, verbatim:
+
+    * ``0000...0..<sha>`` on a branch's FIRST push -- the null sentinel, which
+      is not a resolvable range, so the scan fell back to HEAD alone. The first
+      push is the one carrying every commit on the branch: measured here, six
+      commits on one branch and four on another, ONE message read each.
+    * ``..<sha>`` on a pull_request ``opened``/``reopened``/``edited``, because
+      ``before`` exists only on ``synchronize``. That is git for ``HEAD..<sha>``
+      and ``actions/checkout`` has put HEAD *at* ``github.sha`` (the run log
+      reads "HEAD is now at <merge> Merge <head> into <base>"), so the range is
+      empty and the fallback reads the synthetic MERGE commit -- a message with
+      no author-written text in it at all. ZERO real messages, not one.
+
+    So neither field is used as the workflow used them. On a pull_request the
+    range comes from the payload's own ``base``/``head`` (``github.sha`` is the
+    merge commit and must not appear in it); on a push a real ``before`` wins,
+    and the null sentinel falls back to the repository's default branch, which
+    is what a branch's first push is measured against.
+
+    KNOWN BOUNDS, stated rather than claimed away
+    =============================================
+    * ``base..head`` on a pull request over-scans when the branch has merged the
+      base branch into itself: those commits are reachable from head and not
+      from ``base.sha``. Over-scanning is the fail-SAFE direction and costs one
+      git object walk; under-scanning is the defect this replaces.
+    * The derivation builds a STRING. Whether git can resolve it depends on the
+      clone (``fetch-depth: 0`` is asserted by
+      ``ci/tests/test_check_no_proprietary_refs.py::TestTheWorkflowWiresTheDerivation``).
+      A range that does not resolve still degrades to HEAD's message, as it
+      always has -- what changes is that the printed count and provenance make
+      that degradation legible instead of silent.
+    * The default branch falls back to ``main`` when the payload does not name
+      one. That is this repository's default branch; a fork whose default is
+      named otherwise gets the payload value, which is why it is read at all.
+    """
+    if explicit:
+        return CommitRangeDecision(
+            explicit, f"the commit-range argument {explicit!r}", None
+        )
+
+    env = os.environ if environ is None else environ
+    event = env.get("GITHUB_EVENT_NAME", "")
+    if not event:
+        return CommitRangeDecision(
+            None, "HEAD's commit message (no GitHub event in the environment)", None
+        )
+
+    payload, payload_problem = _read_event_payload(env)
+
+    def refuse(why: str) -> CommitRangeDecision:
+        """Fail closed where it costs something.
+
+        Under GitHub Actions on a push or pull request, every fact needed here
+        is one GitHub always supplies -- so failing to derive a range means
+        something is wrong, and scanning HEAD alone while printing OK is the
+        silent degradation this function exists to end. Outside Actions the
+        same failure is ordinary: a developer running the gate by hand has no
+        event payload and never did, and refusing there would break the local
+        pre-push gate for nothing.
+        """
+        detail = f"could not derive the commit range for this {event} event: {why}"
+        if env.get("GITHUB_ACTIONS"):
+            return CommitRangeDecision(None, detail, detail)
+        return CommitRangeDecision(None, f"HEAD's commit message ({why})", None)
+
+    if event == "pull_request":
+        pull = payload.get("pull_request")
+        pull = pull if isinstance(pull, dict) else {}
+        base = _object_name((pull.get("base") or {}).get("sha"))
+        head = _object_name((pull.get("head") or {}).get("sha"))
+        if base and head:
+            return CommitRangeDecision(
+                f"{base}..{head}",
+                f"the pull request's own commits ({base[:7]}..{head[:7]}); "
+                f"github.sha is the merge commit and is deliberately not used",
+                None,
+            )
+        return refuse(
+            payload_problem
+            or "the payload carried no usable pull_request.base.sha / head.sha"
+        )
+
+    if event == "push":
+        after = _object_name(env.get("GITHUB_SHA"))
+        if not after:
+            return refuse(payload_problem or "GITHUB_SHA is absent or is not an object name")
+        before = _object_name(payload.get("before"))
+        if before:
+            return CommitRangeDecision(
+                f"{before}..{after}",
+                f"the pushed range ({before[:7]}..{after[:7]})",
+                None,
+            )
+        repository = payload.get("repository")
+        branch = (repository or {}).get("default_branch")
+        default_branch = branch if isinstance(branch, str) and _REF_NAME.fullmatch(branch) else "main"
+        return CommitRangeDecision(
+            f"origin/{default_branch}..{after}",
+            f"every commit this branch adds to origin/{default_branch} "
+            f"(this push carried no prior commit, so it is a branch's first)",
+            None,
+        )
+
+    return CommitRangeDecision(
+        None, f"HEAD's commit message (a {event} event carries no pushed range)", None
+    )
+
+
+def main(
+    commit_range: str | None = None,
+    argv: list[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    if commit_range is None:
+        arguments = sys.argv[1:] if argv is None else argv
+        if arguments:
+            commit_range = arguments[0]
+    decision = resolve_commit_range(environ, explicit=commit_range)
 
     violations: list[str] = []
     refusals: list[str] = []
+    # A SUBSET of `refusals`: the ones the encoding guidance below is actually
+    # about. Not every refusal is a decode failure -- an underivable commit
+    # range and a scan that examined zero files are both refusals too, and
+    # telling their reader to "rewrite the offending file as UTF-8" sends them
+    # hunting for a problem that is not there. Advice aimed at the wrong defect
+    # is worse than no advice.
+    decode_refusals: list[str] = []
+    if decision.refusal:
+        refusals.append(decision.refusal)
 
     candidates, scan_source = scan_paths(_REPO_ROOT)
     scanned = 0
@@ -385,6 +597,7 @@ def main(commit_range: str | None = None) -> int:
             text = _decode(raw, label, FileDecodeError)
         except FileDecodeError as exc:
             refusals.append(str(exc))
+            decode_refusals.append(str(exc))
             continue
         _scan_text(label, text, violations)
 
@@ -404,12 +617,13 @@ def main(commit_range: str | None = None) -> int:
     # Commit message(s) in the pushed range (cheap guard against a leak buried
     # in an intermediate commit of a multi-commit push, not just HEAD).
     try:
-        messages = _get_commit_messages(commit_range)
+        messages = _get_commit_messages(decision.commit_range)
     except CommitMessageDecodeError as exc:
         # Ordered before OSError deliberately, and kept off that class entirely:
         # absorbing this would restore exactly the silent pass it replaces.
         messages = []
         refusals.append(str(exc))
+        decode_refusals.append(str(exc))
     except OSError:
         messages = []
 
@@ -423,6 +637,11 @@ def main(commit_range: str | None = None) -> int:
         )
         for refusal in refusals:
             sys.stderr.write(f"  {refusal}\n")
+    # Only the refusals this guidance is ABOUT get it. A range that could not be
+    # derived and a scan that examined zero files are refusals too, and telling
+    # their reader to rewrite a file as UTF-8 points them at a defect that is
+    # not there.
+    if decode_refusals:
         sys.stderr.write(
             "\nThis gate decodes everything it scans — file contents and commit "
             "messages alike — as utf-8 strictly. A lossy decode substitutes "
@@ -451,9 +670,14 @@ def main(commit_range: str | None = None) -> int:
     if violations or refusals:
         return 1
 
+    # The COUNT is not decoration. A range naming six commits and a scan that
+    # read one are indistinguishable at exit 0 without it -- which is precisely
+    # how this gate spent months scanning a single message per CI run while
+    # printing the same OK line it prints for a full one.
     print(
         f"OK: no proprietary consumer references found "
-        f"({scanned} file(s) scanned, enumerated by {scan_source})."
+        f"({scanned} file(s) scanned, enumerated by {scan_source}; "
+        f"{len(messages)} commit message(s) scanned from {decision.provenance})."
     )
     return 0
 

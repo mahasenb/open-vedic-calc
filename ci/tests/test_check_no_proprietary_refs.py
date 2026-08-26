@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
 import subprocess
 import symtable
@@ -1958,3 +1959,487 @@ class TestTheGateItselfHasNoUnresolvableRunCall:
             f"the visitor recorded module-scope binding(s) symtable does not: "
             f"{sorted(collector.module_scope_bindings - by_symtable)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE COMMIT RANGE, DERIVED FROM THE EVENT RATHER THAN INTERPOLATED
+#
+# WHAT WAS MEASURED, on this repository's own CI runs rather than reasoned about
+# ---------------------------------------------------------------------------
+# `ci.yml` used to build the range by textual interpolation of
+# `github.event.before` and `github.sha`. Read off five real runs of that step
+# (`gh run view <id> --log`), the string it produced was, verbatim:
+#
+#   push, branch's FIRST push  "0000000000000000000000000000000000000000..3ccd529"
+#   push, later push           "3ccd529..4b8ad23"
+#   pull_request, opened       "..bf8cc63"
+#   pull_request, synchronize  "659f43d..039d0db"
+#
+# Both of the first-of-each-kind shapes scan ONE message:
+#
+# * the all-zero sentinel is refused by `_get_commit_messages` (correctly -- it
+#   is not a resolvable range), so a branch's first push scans HEAD alone. The
+#   first push is exactly the one carrying every commit on the branch: measured
+#   on this repository, `claude/guard-batch2`'s first push carried SIX commits
+#   and `claude/guard-follow-through`'s carried FOUR, one message read each.
+#
+# * `github.event.before` is ABSENT on a pull_request opened/reopened/edited (it
+#   exists only on `synchronize`), so the expression renders empty and the range
+#   is `..<sha>`. That is git for `HEAD..<sha>`, and `actions/checkout` has put
+#   HEAD *at* `github.sha`: measured on run 32966124847, "HEAD is now at bf8cc63
+#   Merge 3ccd529... into dd2a533...", with `github.sha` = bf8cc63. So the range
+#   is empty, the fallback reads HEAD, and HEAD is GitHub's synthetic MERGE
+#   commit -- whose message is "Merge <sha> into <sha>" and contains no author
+#   text at all. On those events the commit-message half of the gate scanned
+#   ZERO author-written messages, not one.
+#
+# The range is now DERIVED, in Python, from the event payload -- the same
+# "GitHub forwards facts, the policy decision is made where it is testable"
+# shape `ci/check_pr_text.py` uses.
+# ---------------------------------------------------------------------------
+
+_ZERO_SHA = "0" * 40
+
+
+def _run(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, check=True)
+    return result.stdout.decode("utf-8").strip()
+
+
+def _branch_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A checkout shaped like the one CI scans, with a leak buried mid-branch.
+
+    ``origin/main`` is a real remote-tracking ref (``actions/checkout`` fetches
+    ``+refs/heads/*:refs/remotes/origin/*``), the branch carries three commits,
+    and the forbidden token sits in the message of the MIDDLE one -- never in
+    HEAD's, which is the whole point: HEAD's message is the one a HEAD-only scan
+    already reads.
+    """
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    _run(repo, "init", "-q", "-b", "main")
+    _run(repo, "config", "user.email", "test@example.com")
+    _run(repo, "config", "user.name", "Test")
+
+    sha: dict[str, str] = {}
+    for label, message in (
+        ("base", "chore: the state of main before the branch"),
+        ("first", "feat: an ordinary first commit on the branch"),
+        ("middle", f"fix: a leak buried mid-branch, {_SYNTHETIC_TOKEN}"),
+        ("head", "docs: a perfectly clean commit at the tip"),
+    ):
+        (repo / "f.txt").write_text(label, encoding="utf-8", newline="\n")
+        _run(repo, "add", "f.txt")
+        _run(repo, "commit", "-q", "-m", message)
+        sha[label] = _run(repo, "rev-parse", "HEAD")
+        if label == "base":
+            # The remote-tracking ref a real checkout carries.
+            _run(repo, "update-ref", "refs/remotes/origin/main", sha["base"])
+    return repo, sha
+
+
+def _merge_checkout(repo: Path, sha: dict[str, str]) -> str:
+    """Put the checkout in the state ``actions/checkout`` leaves it in for a
+    pull_request: HEAD on GitHub's synthetic merge commit, which is also
+    ``github.sha``."""
+    _run(repo, "checkout", "-q", sha["base"])
+    _run(
+        repo, "merge", "-q", "--no-ff",
+        "-m", f"Merge {sha['head']} into {sha['base']}", sha["head"],
+    )
+    return _run(repo, "rev-parse", "HEAD")
+
+
+def _event(tmp_path: Path, payload: dict) -> str:
+    """Write a synthetic GitHub event payload and return its path.
+
+    GitHub hands the whole payload to every step as a JSON file named by
+    ``GITHUB_EVENT_PATH``. Reading it is what makes the derivation testable
+    without a workflow run -- and it needs no ``${{ }}`` interpolation into a
+    ``run:`` body, which is the other half of what this change buys.
+    """
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+    return str(path)
+
+
+class TestTheCommitRangeIsDerivedFromTheEvent:
+    """Both trigger shapes must scan the whole push, not HEAD alone."""
+
+    def test_the_measured_defect_is_real_on_a_first_push(
+        self, gate_without_env_token, tmp_path
+    ):
+        """The premise, re-measured here rather than taken from a report.
+
+        This asserts what the OLD interpolation produced, so the fix below is
+        measured against a demonstrated defect rather than a described one. It
+        passes before and after the fix -- a pin on the old string's behaviour,
+        not the red-to-green arm.
+        """
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        messages = module._get_commit_messages(f"{_ZERO_SHA}..{sha['head']}", cwd=repo)
+        assert len(messages) == 1, messages
+        assert not any(_SYNTHETIC_TOKEN in m for m in messages), (
+            "the premise is wrong: the null-sentinel range did NOT miss the leak"
+        )
+
+    def test_the_measured_defect_is_real_on_a_pull_request(
+        self, gate_without_env_token, tmp_path
+    ):
+        """Same, for the ``..<sha>`` shape a pull_request produced."""
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        merge_sha = _merge_checkout(repo, sha)
+        messages = module._get_commit_messages(f"..{merge_sha}", cwd=repo)
+        assert len(messages) == 1, messages
+        assert messages[0].startswith("Merge "), messages
+        assert not any(_SYNTHETIC_TOKEN in m for m in messages), (
+            "the premise is wrong: the empty-before range did NOT miss the leak"
+        )
+
+    # -- the fix -----------------------------------------------------------
+    def test_a_first_push_derives_the_range_from_the_default_branch(
+        self, gate_without_env_token, tmp_path
+    ):
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {"before": _ZERO_SHA, "repository": {"default_branch": "main"}},
+                ),
+            },
+            cwd=repo,
+        )
+        assert decision.refusal is None, decision.refusal
+        messages = module._get_commit_messages(decision.commit_range, cwd=repo)
+        assert len(messages) == 3, [m.splitlines()[0] for m in messages]
+        assert any(_SYNTHETIC_TOKEN in m for m in messages), (
+            f"the leak buried mid-branch went unscanned: {decision.provenance}"
+        )
+
+    def test_a_later_push_uses_the_before_sha_it_was_given(
+        self, gate_without_env_token, tmp_path
+    ):
+        """A real ``before`` is the most precise answer and must still win."""
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {"before": sha["first"], "repository": {"default_branch": "main"}},
+                ),
+            },
+            cwd=repo,
+        )
+        assert decision.commit_range == f"{sha['first']}..{sha['head']}"
+        messages = module._get_commit_messages(decision.commit_range, cwd=repo)
+        assert any(_SYNTHETIC_TOKEN in m for m in messages)
+
+    def test_a_pull_request_derives_the_range_from_its_base_and_head(
+        self, gate_without_env_token, tmp_path
+    ):
+        """``github.sha`` is the MERGE commit on a pull_request, so the range is
+        built from the payload's base and head, never from it."""
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        merge_sha = _merge_checkout(repo, sha)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": merge_sha,
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {
+                        "pull_request": {
+                            "base": {"sha": sha["base"]},
+                            "head": {"sha": sha["head"]},
+                        }
+                    },
+                ),
+            },
+            cwd=repo,
+        )
+        assert decision.refusal is None, decision.refusal
+        assert merge_sha not in (decision.commit_range or ""), (
+            "the merge commit reached the range; on a pull_request github.sha is "
+            f"not the head of the branch: {decision.commit_range}"
+        )
+        messages = module._get_commit_messages(decision.commit_range, cwd=repo)
+        assert len(messages) == 3, [m.splitlines()[0] for m in messages]
+        assert any(_SYNTHETIC_TOKEN in m for m in messages), (
+            f"the leak buried mid-branch went unscanned: {decision.provenance}"
+        )
+
+    def test_an_edited_pull_request_carries_no_before_and_still_resolves(
+        self, gate_without_env_token, tmp_path
+    ):
+        """``edited``/``opened``/``reopened`` payloads have no ``before`` key at
+        all -- the exact shape that rendered as ``..<sha>``. Nothing in the
+        derivation may depend on that key on a pull_request."""
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {
+                        "action": "edited",
+                        "pull_request": {
+                            "base": {"sha": sha["base"]},
+                            "head": {"sha": sha["head"]},
+                        },
+                    },
+                ),
+            },
+            cwd=repo,
+        )
+        assert any(
+            _SYNTHETIC_TOKEN in m
+            for m in module._get_commit_messages(decision.commit_range, cwd=repo)
+        )
+
+    # -- what the derivation refuses to do ---------------------------------
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "--upload-pack=touch /tmp/pwned",
+            "-C/etc",
+            "HEAD --all",
+            "main; rm -rf /",
+            "",
+            "not-hex-at-all",
+            "abc",  # hex, but shorter than git's own 7-character minimum
+            "f" * 65,  # hex, but longer than a SHA-256 object name
+            "0" * 40,  # git's "there is no prior commit" sentinel, not a revision
+            "0" * 40 + "..HEAD",  # a second revision smuggled into one field
+        ],
+    )
+    def test_a_sha_that_is_not_a_sha_never_reaches_git(
+        self, gate_without_env_token, tmp_path, hostile
+    ):
+        """Object names are validated as hex before being spliced into a range.
+
+        ``git log`` reads ``--flags`` positionally, so an unvalidated field is
+        argument injection rather than merely a wrong answer -- and the event
+        payload is the one input to this gate that arrives from outside the
+        tree.
+
+        One case in an earlier version of this table was WRONG rather than
+        revealing: a 42-character hex string, written as "an over-long SHA".
+        It is inside git's abbreviated-SHA-256 range and the validator
+        correctly accepted it (git then declines to resolve it, and the scan
+        degrades to HEAD). The table now bounds both ends deliberately --
+        shorter than git's own 7-character minimum, and longer than a full
+        SHA-256 -- rather than asserting a number nobody had checked.
+        """
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {
+                        "pull_request": {
+                            "base": {"sha": hostile},
+                            "head": {"sha": sha["head"]},
+                        }
+                    },
+                ),
+            },
+            cwd=repo,
+        )
+        assert decision.commit_range is None, decision.commit_range
+
+    def test_a_derivation_that_fails_under_actions_is_a_refusal(
+        self, gate_without_env_token, tmp_path
+    ):
+        """Fail closed where it costs something.
+
+        Under GitHub Actions on a push or pull_request, a range that cannot be
+        derived means a fact GitHub always supplies was missing -- something is
+        wrong, and scanning HEAD alone while printing OK is the silent
+        degradation this whole change is about.
+        """
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": str(tmp_path / "no-such-payload.json"),
+            },
+            cwd=repo,
+        )
+        assert decision.commit_range is None
+        assert decision.refusal, "a CI run derived no range and did not refuse"
+
+    def test_the_same_failure_outside_actions_is_not_a_refusal(
+        self, gate_without_env_token, tmp_path
+    ):
+        """A developer running the gate by hand has no event payload and never
+        did. Refusing there would make the local pre-push gate unrunnable, at a
+        real cost against no gain: locally, HEAD's message is the commit that
+        exists to be checked."""
+        module = gate_without_env_token
+        repo, _ = _branch_repo(tmp_path)
+        decision = module.resolve_commit_range({}, cwd=repo)
+        assert decision.commit_range is None
+        assert decision.refusal is None
+        assert "HEAD" in decision.provenance
+
+    def test_an_explicit_argv_range_still_wins(
+        self, gate_without_env_token, tmp_path
+    ):
+        """``python ci/check_no_proprietary_refs.py <range>`` keeps working: the
+        argument is an operator saying exactly what to scan, and it must not be
+        second-guessed by an environment that happens to be set."""
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        explicit = f"{sha['first']}..{sha['head']}"
+        decision = module.resolve_commit_range(
+            {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(tmp_path, {"before": _ZERO_SHA}),
+            },
+            cwd=repo,
+            explicit=explicit,
+        )
+        assert decision.commit_range == explicit
+        assert "argument" in decision.provenance
+
+    def test_main_reports_how_many_commit_messages_it_actually_read(
+        self, gate_without_env_token, tmp_path, monkeypatch, capsys
+    ):
+        """The count is the observability that makes a degraded run legible.
+
+        A range that names six commits and a scan that read one look identical
+        at exit 0 unless the number is printed. That is precisely how the
+        defect above survived: the step said `OK: no proprietary consumer
+        references found` on both shapes.
+        """
+        module = gate_without_env_token
+        repo, sha = _branch_repo(tmp_path)
+        monkeypatch.setattr(module, "_REPO_ROOT", repo)
+        monkeypatch.setattr(module, "scan_paths", lambda root: (["f.txt"], "git"))
+        # `_get_commit_messages`'s `cwd` default was bound at import, so pointing
+        # `_REPO_ROOT` at the fixture is not enough to redirect it. Wrapping the
+        # REAL function keeps the range logic under test and only redirects the
+        # checkout it reads.
+        real = module._get_commit_messages
+        monkeypatch.setattr(
+            module, "_get_commit_messages",
+            lambda commit_range=None: real(commit_range, cwd=repo),
+        )
+        rc = module.main(
+            argv=[],
+            environ={
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": sha["head"],
+                "GITHUB_EVENT_PATH": _event(
+                    tmp_path,
+                    {"before": _ZERO_SHA, "repository": {"default_branch": "main"}},
+                ),
+            },
+        )
+        out = capsys.readouterr()
+        assert rc == 0, out
+        assert "3 commit message(s)" in out.out, out.out
+        assert "origin/main" in out.out, out.out
+
+
+    def test_a_range_refusal_does_not_print_encoding_advice(
+        self, gate_without_env_token, tmp_path, monkeypatch, capsys
+    ):
+        """Advice aimed at the wrong defect is worse than no advice.
+
+        The refusal footer is about STRICT UTF-8 decoding -- "rewrite the
+        offending file(s) or commit message(s) as UTF-8". A commit range that
+        could not be derived is a refusal too, and printing that footer beside
+        it sends the reader hunting for an encoding problem that is not there.
+        Found by reading this gate's own output while verifying the fail-closed
+        arm, which is the argument for looking at what a control PRINTS and not
+        only at what it returns.
+        """
+        module = gate_without_env_token
+        repo, _ = _branch_repo(tmp_path)
+        monkeypatch.setattr(module, "_REPO_ROOT", repo)
+        monkeypatch.setattr(module, "scan_paths", lambda root: (["f.txt"], "git"))
+        monkeypatch.setattr(module, "_get_commit_messages", lambda commit_range=None: [])
+        rc = module.main(
+            argv=[],
+            environ={
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": "0" * 40,
+                "GITHUB_EVENT_PATH": str(tmp_path / "absent.json"),
+            },
+        )
+        err = capsys.readouterr().err
+        assert rc == 1, err
+        assert "could not derive the commit range" in err, err
+        assert "utf-8" not in err.lower(), err
+
+
+class TestTheWorkflowWiresTheDerivation:
+    """A fix nothing invokes is not a fix."""
+
+    @staticmethod
+    def _ci_workflow() -> dict:
+        import yaml
+
+        path = _GATE_PATH.parent.parent / ".github" / "workflows" / "ci.yml"
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def _boundary_step(cls) -> dict:
+        steps = cls._ci_workflow()["jobs"]["boundary"]["steps"]
+        gate_steps = [
+            step
+            for step in steps
+            if "check_no_proprietary_refs.py" in str(step.get("run", ""))
+        ]
+        assert len(gate_steps) == 1, gate_steps
+        return gate_steps[0]
+
+    def test_the_run_body_interpolates_nothing(self):
+        """A ``${{ }}`` expression is textual substitution performed BEFORE the
+        shell parses the command. The gate reads the event payload itself now,
+        so the run body has no reason to carry one -- and the safest expression
+        is the one that is not there."""
+        body = str(self._boundary_step()["run"])
+        assert "${{" not in body, body
+
+    def test_the_gate_is_invoked_with_no_range_argument(self):
+        """The derivation lives in Python, where it is tested. A positional
+        range here would silently take precedence over it."""
+        body = str(self._boundary_step()["run"]).strip()
+        assert body == "python ci/check_no_proprietary_refs.py", body
+
+    def test_the_checkout_still_fetches_the_whole_history(self):
+        """``fetch-depth: 0``. A derived range is worth nothing against a
+        shallow clone that does not contain the commits it names."""
+        checkouts = [
+            step
+            for step in self._ci_workflow()["jobs"]["boundary"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout")
+        ]
+        assert len(checkouts) == 1, checkouts
+        assert str(checkouts[0].get("with", {}).get("fetch-depth")) == "0"

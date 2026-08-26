@@ -42,12 +42,27 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check for proprietary consumer references
-        # Scan the full pushed commit range, not just HEAD, so a leak buried in
-        # an intermediate commit of a multi-commit push can't slip through.
-        # github.event.before is the zero-SHA sentinel on a branch's first push
-        # and is absent entirely on non-push events (e.g. pull_request) — the
-        # script falls back to scanning just HEAD's message in both cases.
-        run: python ci/check_no_proprietary_refs.py "${{ github.event.before }}..${{ github.sha }}"
+        # NO commit range is passed here, and no `${{ }}` expression appears in
+        # this body. The gate derives the range itself from GITHUB_EVENT_NAME,
+        # GITHUB_SHA and the event payload at GITHUB_EVENT_PATH, all of which
+        # the runner sets for every step — the same "GitHub forwards facts, the
+        # policy decision is made in Python where it is testable" shape the
+        # pr-text job below uses.
+        #
+        # This step used to interpolate `${{ github.event.before }}..${{
+        # github.sha }}`, and measured on five real runs of this job that string
+        # scanned ONE commit message on a branch's first push (the null-SHA
+        # sentinel is not a resolvable range, and the first push is the one
+        # carrying every commit on the branch — six, on one measured branch) and
+        # ZERO author-written messages on a pull_request opened/reopened/edited
+        # (no `before` on those actions, so the range rendered `..<sha>`, which
+        # is `HEAD..<sha>`, which is empty because actions/checkout has put HEAD
+        # at github.sha — the synthetic merge commit).
+        #
+        # Pinned by ci/tests/test_check_no_proprietary_refs.py::
+        # TestTheWorkflowWiresTheDerivation, which reds if a range argument or a
+        # `${{ }}` expression comes back, or if fetch-depth: 0 above goes away.
+        run: python ci/check_no_proprietary_refs.py
 
   pr-text:
     name: No proprietary references in PR text
