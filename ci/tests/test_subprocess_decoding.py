@@ -591,19 +591,35 @@ def _all_sites() -> tuple[list[_Site], int]:
 # A hand-maintained list drifts silently; a derived one reddens. Do not add a
 # refusal to `_verdict` without registering its ground here -- `_refuse` will
 # refuse to run, and the doc test will name the token you owe CLAUDE.md.
+# Each token is the SUBSTANTIVE CLAIM, not a keyword, and it is looked for in
+# the guard's own bullet rather than anywhere in the document. Both of those
+# were learned by mutation, not by design: the first version searched the whole
+# file for short keywords and three doc mutations escaped it --
+#   * deleting the positional route passed, because "positional" occurs in
+#     unrelated prose elsewhere in CLAUDE.md (the muhurta labelling bullet);
+#   * deleting the cp932 counterexample passed, because "cp932" appeared twice
+#     in the bullet and only one copy was removed;
+#   * reverting shape (B) to its round-1 wording passed, for the same reason
+#     with "codecs.lookup".
+# A token that survives the deletion of the sentence carrying it is not
+# checking that sentence.
 _REFUSAL_GROUNDS: dict[str, str] = {
-    "os-popen": "os.popen",
+    "os-popen": "`os.popen`",
     "locale-only-dispatch": "getoutput",
-    "kwargs-splat": "**kwargs",
-    "args-splat": "*args",
-    "extra-positional": "positional",
-    "unreadable-text-mode": "non-literal",
-    "unreadable-encoding": "non-literal",
-    "locale-encoding": "locale codepage",
-    "unknown-codec": "codecs.lookup",
-    "non-utf8-codec": "cp932",
-    "raising-errors": "raising `errors=`",
+    "kwargs-splat": "`**kwargs` splat",
+    "args-splat": "`*args` splat",
+    "extra-positional": "more than one positional argument",
+    "unreadable-text-mode": "decided by TRUTHINESS",
+    "unreadable-encoding": "**non-literal** value in any text-mode keyword",
+    "locale-encoding": "the decode uses the **locale codepage**",
+    "unknown-codec": "resolves through `codecs.lookup`",
+    "non-utf8-codec": "`cp932`, `cp936` and `utf-16`",
+    "raising-errors": "raising `errors=` policy, including the default",
 }
+
+# The line in CLAUDE.md that describes this guard. Anchored on a phrase, not a
+# line number, per this repository's citation rule.
+_GUARD_DOC_ANCHOR = "No subprocess read may decode where the failure is invisible"
 
 
 def _refuse(ground: str, message: str) -> tuple[str, str]:
@@ -1152,13 +1168,25 @@ def test_the_documented_contract_matches_the_shipped_one() -> None:
     no prose: it is a confident, wrong answer to "what does this refuse?".
     """
     doc = (_REPO_ROOT / "CLAUDE.md").read_bytes().decode("utf-8")
+    bullets = [line for line in doc.split("\n") if _GUARD_DOC_ANCHOR in line]
+    assert len(bullets) == 1, (
+        f"expected exactly one CLAUDE.md bullet anchored on {_GUARD_DOC_ANCHOR!r}, "
+        f"found {len(bullets)}. Fail closed rather than checking nothing."
+    )
+    bullet = bullets[0]
+
+    # Searched in the BULLET, not the document. Measured: a document-wide
+    # search let unrelated prose satisfy a token, and a doc mutation that
+    # deleted the positional route from this bullet passed because the word
+    # "positional" appears in the muhurta labelling bullet.
     missing = sorted(
         f"{ground} (token {token!r})"
         for ground, token in _REFUSAL_GROUNDS.items()
-        if token not in doc
+        if token not in bullet
     )
     assert not missing, (
-        "CLAUDE.md does not describe these refusal grounds:\n  "
+        "the CLAUDE.md bullet describing this guard does not state these "
+        "refusal grounds:\n  "
         + "\n  ".join(missing)
         + "\n\nThe guard refuses on them; the documented contract must say so."
     )
