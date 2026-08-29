@@ -44,8 +44,20 @@ Set the following environment variables:
 
 ```
 CALC_SERVICE_TOKEN=<any secret>
-PUBLIC_SOURCE_URL=<URL of this public repo>
+PUBLIC_SOURCE_URL=https://github.com/mahasenb/open-vedic-calc
 ```
+
+`PUBLIC_SOURCE_URL` is the AGPL-3.0 source offer `GET /source` publishes — where
+the Corresponding Source for *your* running instance can be obtained. It is
+**optional**: leave it unset and the service serves the built-in default shown
+above. Set it when you run a fork or a mirror, so the offer names source a
+recipient of your instance can actually fetch.
+
+It must not be blank. An empty, whitespace-only, or non-URL value makes the
+service **refuse to start**, in every environment, rather than answer `/source`
+with an offer that leads nowhere — a recipient following a blank or broken offer
+gets nothing where the license promises code, which is worse than a container
+that fails loudly at boot.
 
 Swiss Ephemeris data files: **nothing to do if you run the Docker images.**
 `Dockerfile` and `Dockerfile.test` fetch and checksum-verify them during the
