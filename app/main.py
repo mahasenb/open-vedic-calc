@@ -3,6 +3,7 @@ import os
 import subprocess
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -125,6 +126,98 @@ def _resolve_version() -> str:
 
 
 _COMMIT = _resolve_version()
+
+
+# The AGPL-3.0 source offer /source publishes. This literal is the DEFAULT, not
+# the answer: it used to be written inline in the response constructor, reachable
+# only as the second argument of an os.environ.get call, and a source offer that
+# can only be changed by editing a handler is one that cannot follow its own
+# repository. Nothing about a repository URL is permanent -- an owner rename, a
+# move between accounts, a mirror change -- and none of those events touch this
+# codebase, so the stale literal would keep being served and a recipient
+# following it would get a 404 where the license promises the Corresponding
+# Source. Naming it here makes the offer greppable and makes moving it a
+# deliberate edit a reviewer can see, rather than a detail buried in a response.
+DEFAULT_PUBLIC_SOURCE_URL = "https://github.com/mahasenb/open-vedic-calc"
+
+
+def _source_url_rejection_reason(url: str) -> str | None:
+    """Why *url* is unacceptable as this deployment's source offer, or None if it is fine.
+
+    Pure helper so the policy is unit-testable without process-env gymnastics,
+    the same shape ``app/auth.py::_token_weakness_reason`` takes for the service
+    token. It strips before judging, so the verdict is a property of the value
+    an operator meant to supply rather than of the padding it arrived with.
+
+    Two rejections, both of them values that would boot green with the license
+    obligation broken. **Blank** is the one this guard exists for: an
+    unsubstituted template, a secret that resolved to nothing, or a dangling
+    ``PUBLIC_SOURCE_URL=`` in an env file would otherwise serve
+    ``{"source_url": ""}`` at HTTP 200 -- a control silently disabling itself
+    when its input is absent, and reporting success. **Not a location** covers
+    the rest of the same class (``TODO``, ``changeme``, a bare ``owner/repo``
+    slug, a filesystem path): a recipient cannot fetch any of them either.
+
+    What this deliberately does NOT do is claim the URL *resolves*. There is no
+    reachability probe and no scheme allowlist, because the 404-after-a-move
+    failure that motivates the whole change is invisible to any local check --
+    a validator implying otherwise would buy the appearance of the property
+    without the property. One consequence worth stating rather than leaving to
+    be discovered: a ``mailto:`` written offer has a scheme but no host and is
+    refused here. That is AGPL section 6(b) territory; the field this feeds is
+    named ``source_url`` and documented as a URL a consumer fetches.
+    """
+    candidate = url.strip()
+    if not candidate:
+        return "empty or whitespace-only"
+    try:
+        parts = urlsplit(candidate)
+    except ValueError as exc:
+        return f"not parseable as a URL ({exc})"
+    if not parts.scheme or not parts.netloc:
+        return "not an absolute URL -- it needs a scheme and a host, e.g. 'https://host/owner/repo'"
+    return None
+
+
+def _resolve_source_url() -> str:
+    """This deployment's AGPL source offer, resolved once at import.
+
+    Resolved at import rather than per request for the reason ``_COMMIT`` and
+    ``_ALLOWED_ORIGINS`` are: a runtime ``os.environ`` mutation must not be able
+    to change what a control serves mid-process, and a per-request read would
+    make the refusal below unreachable -- a process that had already booted
+    would simply start serving the blank offer.
+
+    The unset/invalid boundary follows the precedent already set in this
+    service, rather than inventing a third convention. **Unset** takes the
+    built-in default, because unlike a secret there IS a correct compiled-in
+    answer -- the shape ``ALLOWED_ORIGINS`` (absent means the empty allow-list)
+    and ``GIT_COMMIT`` (absent means fall through to the next resolver) already
+    take. **Set and invalid** raises, in every environment, which is the shape
+    the wildcard-``ALLOWED_ORIGINS`` guard takes: a present-and-wrong value is
+    an operator error. It is deliberately not gated on ``is_real_deployment()``
+    the way the ``CALC_SERVICE_TOKEN`` guard is -- a developer box legitimately
+    runs without a token, but no environment legitimately wants a blank source
+    offer, and a fail-closed control that stands down in three environment
+    names is one that was never tested where it matters.
+    """
+    configured = os.environ.get("PUBLIC_SOURCE_URL")
+    if configured is None:
+        return DEFAULT_PUBLIC_SOURCE_URL
+    reason = _source_url_rejection_reason(configured)
+    if reason:
+        raise RuntimeError(
+            f"PUBLIC_SOURCE_URL is {reason}: {configured!r}. This service refuses to start "
+            "rather than serve a blank or unusable AGPL-3.0 source offer -- a recipient "
+            "following it would get nothing where the license promises the Corresponding "
+            "Source. Set PUBLIC_SOURCE_URL to the URL where this deployment publishes its "
+            "source, or unset it entirely to fall back to the built-in default "
+            f"({DEFAULT_PUBLIC_SOURCE_URL})."
+        )
+    return configured.strip()
+
+
+_SOURCE_URL = _resolve_source_url()
 
 _ALLOWED_ORIGINS = [o for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o]
 
@@ -851,11 +944,18 @@ def healthz():
 # endpoint that actually arrives, and /source is the one such consumers already
 # use. Same canonical detector as /healthz -- never a second copy of the
 # retflag classification.
+#
+# ``source_url`` is the module-level value resolved and validated at import by
+# ``_resolve_source_url``, never a literal and never a fresh ``os.environ`` read.
+# Both halves matter: a literal here cannot follow the repository when it moves,
+# and an inline read would let a mid-process mutation change the license offer
+# and would put a blank offer on the wire in a process the import-time guard
+# already let boot.
 @app.get("/source", response_model=SourceInfo, dependencies=AUTH)
 def source():
     ephe_ok, _retflag = utils.probe_ephemeris_source()
     return SourceInfo(
-        source_url=os.environ.get("PUBLIC_SOURCE_URL", "https://github.com/mahasenb/open-vedic-calc"),
+        source_url=_SOURCE_URL,
         commit=_COMMIT,
         ephe_loaded=ephe_ok,
         ephemeris_source="swiss" if ephe_ok else "moshier",
