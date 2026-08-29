@@ -39,4 +39,4 @@
 # PR, so a PR authored by the sole code owner could never satisfy its own
 # code-owner requirement.
 
-*       @mahasenb-reviewer
+*       @aishwara-reviewer
