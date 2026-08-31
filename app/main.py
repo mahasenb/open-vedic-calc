@@ -138,7 +138,7 @@ _COMMIT = _resolve_version()
 # following it would get a 404 where the license promises the Corresponding
 # Source. Naming it here makes the offer greppable and makes moving it a
 # deliberate edit a reviewer can see, rather than a detail buried in a response.
-DEFAULT_PUBLIC_SOURCE_URL = "https://github.com/mahasenb/open-vedic-calc"
+DEFAULT_PUBLIC_SOURCE_URL = "https://github.com/aishwara-limited/open-vedic-calc"
 
 
 def _source_url_rejection_reason(url: str) -> str | None:

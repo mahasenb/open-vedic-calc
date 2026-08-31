@@ -101,7 +101,7 @@ def test_the_default_is_a_declared_constant_not_a_literal_in_the_handler():
     """
     import app.main as main_mod
 
-    assert main_mod.DEFAULT_PUBLIC_SOURCE_URL == "https://github.com/mahasenb/open-vedic-calc"
+    assert main_mod.DEFAULT_PUBLIC_SOURCE_URL == "https://github.com/aishwara-limited/open-vedic-calc"
 
 
 def test_unset_serves_the_built_in_default(monkeypatch):
