@@ -44,7 +44,7 @@ Set the following environment variables:
 
 ```
 CALC_SERVICE_TOKEN=<any secret>
-PUBLIC_SOURCE_URL=https://github.com/mahasenb/open-vedic-calc
+PUBLIC_SOURCE_URL=https://github.com/aishwara-limited/open-vedic-calc
 ```
 
 `PUBLIC_SOURCE_URL` is the AGPL-3.0 source offer `GET /source` publishes — where
