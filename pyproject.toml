@@ -90,6 +90,7 @@ target-version = "py311"
 # with --fix and stop reading it.
 #
 # WHAT "E" ACTUALLY BUYS HERE, measured rather than assumed. Under ruff 0.14.6
+# (re-measured unchanged under 0.16.4 at the bump to that version)
 # the pycodestyle WHITESPACE rules -- E1xx, E2xx, E3xx, including E225
 # missing-whitespace-around-operator -- are PREVIEW-ONLY and are not enabled by
 # `select = ["E"]`. Measured: `x=1` and `y = ( 1, 2 )` pass under `--select E`
