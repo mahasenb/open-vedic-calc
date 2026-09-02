@@ -101,15 +101,19 @@ target-version = "py311"
 # part the exact `ruff==` pin removes.
 select = ["E", "F", "W", "I"]
 
-# E501 (line-too-long) is DISABLED, and the reason is recorded rather than left
-# as a bare entry. Measured on this tree at the default width: 533 violations,
-# and 57 even at 120 columns. Essentially all of them are prose -- this
-# repository deliberately writes long single-line paragraphs in comments and
-# docstrings, because that prose is where its measurements and rationale live,
-# and ci/tests/test_stable_anchor_citations.py PARSES those chunks as its
-# corpus. Reflowing 533 lines of it would be a large diff through text other
-# guards read, in exchange for a property that is a preference rather than a
-# defect. Line length is the one pycodestyle rule that cannot catch a mistake.
+# E501 (line-too-long) is DISABLED. This repository carries hundreds of
+# pre-existing over-length lines at ruff's default 88-column width, the large
+# majority of them code rather than reflowable comments or docstrings.
+# Enforcing it would mean a repository-wide reformat with no correctness
+# benefit. The count is deliberately NOT recorded: recount it starting with
+# `uv sync --frozen --extra dev` (without `--extra dev` no ruff is installed,
+# and a following `uv run --frozen ruff` silently uses whatever ruff is on
+# PATH) then
+# `uv run --frozen ruff check --select E501 --statistics .` (add
+# `--line-length 120` for the count at 120 columns). For a cross-version check
+# that touches neither the venv nor the lock:
+# `uvx ruff@0.14.6 check --select E501 --statistics .` -- any version other
+# than the pinned one.
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
